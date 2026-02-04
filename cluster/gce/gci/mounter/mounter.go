@@ -32,7 +32,20 @@ const (
 	nfsRPCBindErrMsg = "mount.nfs: rpc.statd is not running but is required for remote locking.\nmount.nfs: Either use '-o nolock' to keep locks local, or start statd.\nmount.nfs: an incorrect mount option was specified\n"
 	rpcBindCmd       = "/sbin/rpcbind"
 	defaultRootfs    = "/home/kubernetes/containerized_mounter/rootfs"
+	// SECURITY FIX (VULN-010 - CWE-78): Characters that could enable command injection
+	dangerousChars = ";|&`$"
 )
+
+// validateArgs checks for potentially dangerous characters that could enable command injection
+// SECURITY FIX (VULN-010 - CWE-78): Validate arguments before passing to exec.Command
+func validateArgs(args []string) error {
+	for _, arg := range args {
+		if strings.ContainsAny(arg, dangerousChars) {
+			return fmt.Errorf("invalid character in argument: argument contains potentially dangerous shell characters")
+		}
+	}
+	return nil
+}
 
 func main() {
 
@@ -64,6 +77,10 @@ func main() {
 func mountInChroot(rootfsPath string, args []string) error {
 	if _, err := os.Stat(rootfsPath); os.IsNotExist(err) {
 		return fmt.Errorf("path <%s> does not exist", rootfsPath)
+	}
+	// SECURITY FIX (VULN-010 - CWE-78): Validate arguments before command execution
+	if err := validateArgs(args); err != nil {
+		return fmt.Errorf("argument validation failed: %v", err)
 	}
 	args = append([]string{rootfsPath, mountCmd}, args...)
 	output, err := exec.Command(chrootCmd, args...).CombinedOutput()

@@ -586,11 +586,20 @@ func NewMainKubelet(ctx context.Context,
 	// A TLS transport is needed to make HTTPS-based container lifecycle requests,
 	// but we do not have the information necessary to do TLS verification.
 	//
+	// SECURITY NOTE (VULN-014 - CWE-295): InsecureSkipVerify is set to true
+	// because we lack the CA information to verify container lifecycle endpoints.
+	// MinVersion is set to TLS 1.2 to ensure secure protocol versions.
+	// This is a known trade-off - consider using network policies to restrict
+	// container lifecycle endpoint access.
+	//
 	// This client must not be modified to include credentials, because it is
 	// critical that credentials not leak from the client to arbitrary hosts.
 	insecureContainerLifecycleHTTPClient := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+				MinVersion:         tls.VersionTLS12,
+			},
 		},
 		CheckRedirect: httpprobe.RedirectChecker(false),
 	}

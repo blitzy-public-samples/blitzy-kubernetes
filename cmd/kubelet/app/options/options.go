@@ -212,11 +212,17 @@ func NewKubeletConfiguration() (*kubeletconfigapi.KubeletConfiguration, error) {
 // before the first round of flag parsing.
 func applyLegacyDefaults(kc *kubeletconfigapi.KubeletConfiguration) {
 	// --anonymous-auth
-	kc.Authentication.Anonymous.Enabled = true
+	// SECURITY FIX (VULN-011 - CWE-287): Disable anonymous authentication by default
+	// to prevent unauthenticated access to kubelet API endpoints
+	kc.Authentication.Anonymous.Enabled = false
 	// --authentication-token-webhook
-	kc.Authentication.Webhook.Enabled = false
+	// SECURITY FIX (VULN-012 - CWE-287): Enable webhook authentication by default
+	// to ensure proper authentication of requests to the kubelet API
+	kc.Authentication.Webhook.Enabled = true
 	// --authorization-mode
-	kc.Authorization.Mode = kubeletconfigapi.KubeletAuthorizationModeAlwaysAllow
+	// SECURITY FIX (VULN-004 - CWE-285): Use Webhook authorization mode by default
+	// instead of AlwaysAllow to enforce proper authorization checks
+	kc.Authorization.Mode = kubeletconfigapi.KubeletAuthorizationModeWebhook
 	// --read-only-port
 	kc.ReadOnlyPort = ports.KubeletReadOnlyPort
 }

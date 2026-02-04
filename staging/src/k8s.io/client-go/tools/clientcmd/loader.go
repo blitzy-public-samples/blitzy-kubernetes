@@ -315,8 +315,11 @@ func (rules *ClientConfigLoadingRules) Migrate() error {
 		if err != nil {
 			return err
 		}
-		// destination is created with mode 0666 before umask
-		err = os.WriteFile(destination, data, 0666)
+		// SECURITY FIX (VULN-007 - CWE-732): Use 0600 instead of 0666
+		// to protect kubeconfig credentials from unauthorized access.
+		// Kubeconfig files contain authentication credentials that should
+		// only be readable by the file owner.
+		err = os.WriteFile(destination, data, 0600)
 		if err != nil {
 			return err
 		}

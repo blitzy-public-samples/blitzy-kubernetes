@@ -260,8 +260,14 @@ func (w *KubeWaiter) WaitForControlPlaneComponents(podMap map[string]*v1.Pod, ap
 		_, _ = fmt.Fprintf(w.writer, "[control-plane-check] Checking %s at %s\n", comp.name, url)
 
 		go func(comp controlPlaneComponent) {
+			// SECURITY NOTE (VULN-013 - CWE-295): InsecureSkipVerify is used during
+			// initial bootstrap when CA certificates may not yet be available.
+			// MinVersion is set to TLS 1.2 to ensure secure protocol versions.
 			tr := &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+					MinVersion:         tls.VersionTLS12,
+				},
 			}
 			client := &http.Client{Transport: tr}
 			start := time.Now()

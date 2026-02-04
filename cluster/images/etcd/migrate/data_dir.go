@@ -44,7 +44,9 @@ func OpenOrCreateDataDirectory(path string) (*DataDirectory, error) {
 	}
 	if !exists {
 		klog.Infof("data directory '%s' does not exist, creating it", path)
-		err := os.MkdirAll(path, 0777)
+		// SECURITY FIX (VULN-005 - CWE-732): Use 0700 instead of 0777
+		// to restrict directory access to owner only, protecting sensitive etcd data
+		err := os.MkdirAll(path, 0700)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create data directory %s: %v", path, err)
 		}
@@ -82,7 +84,9 @@ func (d *DataDirectory) Backup() error {
 	if err != nil {
 		return err
 	}
-	err = os.MkdirAll(backupDir, 0777)
+	// SECURITY FIX (VULN-005 - CWE-732): Use 0700 instead of 0777
+	// to restrict backup directory access to owner only
+	err = os.MkdirAll(backupDir, 0700)
 	if err != nil {
 		return err
 	}
@@ -172,7 +176,9 @@ func (v *VersionFile) Write(vp *EtcdVersionPair) error {
 	// We do write + rename instead of just write to protect from version.txt
 	// corruption under full disk condition.
 	// See https://github.com/kubernetes/kubernetes/issues/98989.
-	err = os.WriteFile(v.nextPath(), []byte(vp.String()), 0666)
+	// SECURITY FIX (VULN-006 - CWE-732): Use 0600 instead of 0666
+	// to restrict version file access to owner only
+	err = os.WriteFile(v.nextPath(), []byte(vp.String()), 0600)
 	if err != nil {
 		return fmt.Errorf("failed to write new version file %s: %v", v.nextPath(), err)
 	}

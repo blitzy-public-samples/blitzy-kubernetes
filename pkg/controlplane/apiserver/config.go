@@ -414,8 +414,15 @@ func CreateConfig(
 // CreateProxyTransport creates the dialer infrastructure to connect to the nodes.
 func CreateProxyTransport() *http.Transport {
 	var proxyDialerFn utilnet.DialFunc
-	// Proxying to pods and services is IP-based... don't expect to be able to verify the hostname
-	proxyTLSClientConfig := &tls.Config{InsecureSkipVerify: true}
+	// SECURITY NOTE (VULN-001 - CWE-295): InsecureSkipVerify is currently set to true because
+	// proxying to pods and services is IP-based, making hostname verification impractical.
+	// This is a known security trade-off - in production environments, consider using
+	// service mesh with mTLS or other network-level security controls to mitigate MITM risks.
+	// MinVersion is set to TLS 1.2 to ensure secure TLS protocol versions.
+	proxyTLSClientConfig := &tls.Config{
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+	}
 	proxyTransport := utilnet.SetTransportDefaults(&http.Transport{
 		DialContext:     proxyDialerFn,
 		TLSClientConfig: proxyTLSClientConfig,
