@@ -19,6 +19,7 @@ package apiserver
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"time"
@@ -286,7 +287,13 @@ func CreateConfig(
 	[]admission.PluginInitializer,
 	error,
 ) {
-	proxyTransport := CreateProxyTransport()
+	// NOTE: InsecureSkipVerify is set to true for backward compatibility because proxying
+	// to pods and services is IP-based, making hostname verification impractical.
+	// In production environments with strict security requirements, consider:
+	// - Using a service mesh with mTLS
+	// - Providing a proper CA pool via the rootCAs parameter
+	// - Implementing network-level security controls to mitigate MITM risks
+	proxyTransport := CreateProxyTransport(true, nil)
 
 	opts.Metrics.Apply()
 	serviceaccount.RegisterMetrics()
@@ -412,15 +419,27 @@ func CreateConfig(
 }
 
 // CreateProxyTransport creates the dialer infrastructure to connect to the nodes.
-func CreateProxyTransport() *http.Transport {
+//
+// Security parameters:
+//   - insecureSkipVerify: When true, TLS certificate verification is disabled. This should
+//     only be used when hostname verification is not possible (e.g., IP-based proxying to
+//     pods/services) and proper network isolation is in place. Default should be false.
+//   - rootCAs: Optional trusted CA pool for certificate verification. When nil and
+//     insecureSkipVerify is false, the system root CA pool is used.
+//
+// WARNING: Setting insecureSkipVerify to true exposes connections to MITM attacks.
+// Use with caution and only when necessary for internal cluster communication.
+func CreateProxyTransport(insecureSkipVerify bool, rootCAs *x509.CertPool) *http.Transport {
 	var proxyDialerFn utilnet.DialFunc
-	// SECURITY NOTE (VULN-001 - CWE-295): InsecureSkipVerify is currently set to true because
-	// proxying to pods and services is IP-based, making hostname verification impractical.
-	// This is a known security trade-off - in production environments, consider using
-	// service mesh with mTLS or other network-level security controls to mitigate MITM risks.
-	// MinVersion is set to TLS 1.2 to ensure secure TLS protocol versions.
+	// WARNING: Security implications of InsecureSkipVerify:
+	// - Setting InsecureSkipVerify to true disables TLS certificate validation
+	// - This exposes the connection to Man-in-the-Middle (MITM) attacks
+	// - For internal pod/service IP proxying where hostname verification isn't possible,
+	//   this may be acceptable with proper network isolation
+	// - RECOMMENDATION: Provide a proper CA pool (rootCAs) when security is critical
 	proxyTLSClientConfig := &tls.Config{
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: insecureSkipVerify,
+		RootCAs:            rootCAs,
 		MinVersion:         tls.VersionTLS12,
 	}
 	proxyTransport := utilnet.SetTransportDefaults(&http.Transport{
