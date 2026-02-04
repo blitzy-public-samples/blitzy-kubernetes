@@ -1222,7 +1222,7 @@ func RunKubelet(ctx context.Context, kubeServer *options.KubeletServer, kubeDeps
 	}
 
 	capabilities.Initialize(capabilities.Capabilities{
-		AllowPrivileged: true,
+		AllowPrivileged: false,
 	})
 
 	credentialprovider.SetPreferredDockercfgPath(kubeServer.RootDirectory)
