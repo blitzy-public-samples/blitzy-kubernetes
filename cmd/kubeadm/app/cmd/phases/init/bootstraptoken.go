@@ -18,6 +18,7 @@ package phases
 
 import (
 	"fmt"
+	"strings"
 
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
@@ -61,6 +62,16 @@ func NewBootstrapTokenPhase() workflow.Phase {
 	}
 }
 
+// maskToken masks the secret portion of a bootstrap token to prevent credential exposure in logs.
+// Token format is "tokenID.secret", this function returns "tokenID.******".
+func maskToken(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) == 2 {
+		return parts[0] + ".******"
+	}
+	return "******"
+}
+
 func runBootstrapToken(c workflow.RunData) error {
 	data, ok := c.(InitData)
 	if !ok {
@@ -79,9 +90,13 @@ func runBootstrapToken(c workflow.RunData) error {
 	if !data.SkipTokenPrint() {
 		tokens := data.Tokens()
 		if len(tokens) == 1 {
-			fmt.Printf("[bootstrap-token] Using token: %s\n", tokens[0])
+			fmt.Printf("[bootstrap-token] Using token: %s\n", maskToken(tokens[0]))
 		} else if len(tokens) > 1 {
-			fmt.Printf("[bootstrap-token] Using tokens: %v\n", tokens)
+			maskedTokens := make([]string, len(tokens))
+			for i, t := range tokens {
+				maskedTokens[i] = maskToken(t)
+			}
+			fmt.Printf("[bootstrap-token] Using tokens: %v\n", maskedTokens)
 		}
 	}
 
