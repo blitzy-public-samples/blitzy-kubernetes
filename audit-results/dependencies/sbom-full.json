@@ -1,0 +1,1766 @@
+{
+  "metadata": {
+    "generation_timestamp": "2026-02-05T00:00:00Z",
+    "tool": "go list -m all",
+    "go_version": "1.25.0",
+    "repository": "k8s.io/kubernetes",
+    "branch": "main",
+    "commit_sha": "64318f8622229aad0725c23ce8d3a3754379b35f",
+    "description": "Complete Software Bill of Materials (SBOM) for Kubernetes repository containing all direct and indirect dependencies from go.mod",
+    "sbom_spec_version": "1.0.0"
+  },
+  "summary": {
+    "total_modules": 212,
+    "direct_dependencies": 113,
+    "indirect_dependencies": 99,
+    "staged_modules": 32,
+    "external_modules": 180,
+    "security_critical_dependencies": 8
+  },
+  "security_critical_dependencies": [
+    {
+      "path": "go.etcd.io/etcd/api/v3",
+      "version": "v3.6.5",
+      "risk_category": "data_store_access",
+      "description": "etcd API - critical for cluster state storage and access control"
+    },
+    {
+      "path": "go.etcd.io/etcd/client/pkg/v3",
+      "version": "v3.6.5",
+      "risk_category": "data_store_client",
+      "description": "etcd client package - data persistence and replication"
+    },
+    {
+      "path": "go.etcd.io/etcd/client/v3",
+      "version": "v3.6.5",
+      "risk_category": "data_store_client",
+      "description": "etcd client v3 - primary cluster state client"
+    },
+    {
+      "path": "google.golang.org/grpc",
+      "version": "v1.72.2",
+      "risk_category": "rpc_framework",
+      "description": "gRPC framework - all RPC communication security"
+    },
+    {
+      "path": "golang.org/x/crypto",
+      "version": "v0.45.0",
+      "risk_category": "cryptographic_primitives",
+      "description": "Go supplementary cryptographic libraries"
+    },
+    {
+      "path": "golang.org/x/oauth2",
+      "version": "v0.30.0",
+      "risk_category": "authentication",
+      "description": "OAuth2 implementation for external authentication"
+    },
+    {
+      "path": "github.com/prometheus/client_golang",
+      "version": "v1.23.2",
+      "risk_category": "metrics_exposure",
+      "description": "Prometheus client - metrics endpoint exposure"
+    },
+    {
+      "path": "github.com/coreos/go-oidc",
+      "version": "v2.3.0+incompatible",
+      "risk_category": "authentication",
+      "description": "OpenID Connect client for OIDC authentication"
+    }
+  ],
+  "modules": [
+    {
+      "path": "k8s.io/kubernetes",
+      "version": "v0.0.0",
+      "type": "main",
+      "source": "local",
+      "description": "Main Kubernetes repository module"
+    },
+    {
+      "path": "bitbucket.org/bertimus9/systemstat",
+      "version": "v0.5.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/JeffAshton/win_pdh",
+      "version": "v0.0.0-20161109143554-76bb4ee9f0ab",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/Microsoft/go-winio",
+      "version": "v0.6.2",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/Microsoft/hnslib",
+      "version": "v0.1.1",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/armon/circbuf",
+      "version": "v0.0.0-20190214190532-5111143e8da2",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/blang/semver/v4",
+      "version": "v4.0.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/container-storage-interface/spec",
+      "version": "v1.9.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/coredns/corefile-migration",
+      "version": "v1.0.29",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/coreos/go-oidc",
+      "version": "v2.3.0+incompatible",
+      "type": "direct",
+      "source": "external",
+      "security_critical": true
+    },
+    {
+      "path": "github.com/coreos/go-systemd/v22",
+      "version": "v22.5.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/cpuguy83/go-md2man/v2",
+      "version": "v2.0.6",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/cyphar/filepath-securejoin",
+      "version": "v0.6.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/distribution/reference",
+      "version": "v0.6.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/docker/go-units",
+      "version": "v0.5.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/emicklei/go-restful/v3",
+      "version": "v3.12.2",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/fsnotify/fsnotify",
+      "version": "v1.9.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/go-logr/logr",
+      "version": "v1.4.3",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/go-openapi/jsonreference",
+      "version": "v0.20.2",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/godbus/dbus/v5",
+      "version": "v5.1.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/google/cadvisor",
+      "version": "v0.53.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/google/cel-go",
+      "version": "v0.26.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/google/gnostic-models",
+      "version": "v0.7.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/google/go-cmp",
+      "version": "v0.7.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/ishidawataru/sctp",
+      "version": "v0.0.0-20250521072954-ae8eb7fa7995",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/libopenstorage/openstorage",
+      "version": "v1.0.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/lithammer/dedent",
+      "version": "v1.1.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/moby/ipvs",
+      "version": "v1.1.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/moby/sys/userns",
+      "version": "v0.1.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/mrunalp/fileutils",
+      "version": "v0.5.1",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/munnerz/goautoneg",
+      "version": "v0.0.0-20191010083416-a7dc8b61c822",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/onsi/ginkgo/v2",
+      "version": "v2.27.2",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/onsi/gomega",
+      "version": "v1.38.2",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/opencontainers/cgroups",
+      "version": "v0.0.3",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/opencontainers/selinux",
+      "version": "v1.13.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/pmezard/go-difflib",
+      "version": "v1.0.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/prometheus/client_golang",
+      "version": "v1.23.2",
+      "type": "direct",
+      "source": "external",
+      "security_critical": true
+    },
+    {
+      "path": "github.com/prometheus/client_model",
+      "version": "v0.6.2",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/prometheus/common",
+      "version": "v0.66.1",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/robfig/cron/v3",
+      "version": "v3.0.1",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/spf13/cobra",
+      "version": "v1.10.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/spf13/pflag",
+      "version": "v1.0.9",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/stretchr/testify",
+      "version": "v1.11.1",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/vishvananda/netlink",
+      "version": "v1.3.1",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "github.com/vishvananda/netns",
+      "version": "v0.0.5",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.etcd.io/etcd/api/v3",
+      "version": "v3.6.5",
+      "type": "direct",
+      "source": "external",
+      "security_critical": true
+    },
+    {
+      "path": "go.etcd.io/etcd/client/pkg/v3",
+      "version": "v3.6.5",
+      "type": "direct",
+      "source": "external",
+      "security_critical": true
+    },
+    {
+      "path": "go.etcd.io/etcd/client/v3",
+      "version": "v3.6.5",
+      "type": "direct",
+      "source": "external",
+      "security_critical": true
+    },
+    {
+      "path": "go.opentelemetry.io/contrib/instrumentation/github.com/emicklei/go-restful/otelrestful",
+      "version": "v0.44.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp",
+      "version": "v0.61.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/otel",
+      "version": "v1.36.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc",
+      "version": "v1.34.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/otel/metric",
+      "version": "v1.36.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/otel/sdk",
+      "version": "v1.36.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/otel/trace",
+      "version": "v1.36.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/proto/otlp",
+      "version": "v1.5.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.uber.org/goleak",
+      "version": "v1.3.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.uber.org/zap",
+      "version": "v1.27.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "go.yaml.in/yaml/v2",
+      "version": "v2.4.3",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/crypto",
+      "version": "v0.45.0",
+      "type": "direct",
+      "source": "external",
+      "security_critical": true
+    },
+    {
+      "path": "golang.org/x/net",
+      "version": "v0.47.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/oauth2",
+      "version": "v0.30.0",
+      "type": "direct",
+      "source": "external",
+      "security_critical": true
+    },
+    {
+      "path": "golang.org/x/sync",
+      "version": "v0.18.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/sys",
+      "version": "v0.38.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/term",
+      "version": "v0.37.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/text",
+      "version": "v0.31.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/time",
+      "version": "v0.9.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/tools",
+      "version": "v0.38.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "google.golang.org/genproto/googleapis/rpc",
+      "version": "v0.0.0-20250528174236-200df99c418a",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "google.golang.org/grpc",
+      "version": "v1.72.2",
+      "type": "direct",
+      "source": "external",
+      "security_critical": true
+    },
+    {
+      "path": "google.golang.org/protobuf",
+      "version": "v1.36.8",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "gopkg.in/evanphx/json-patch.v4",
+      "version": "v4.13.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "gopkg.in/go-jose/go-jose.v2",
+      "version": "v2.6.3",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "k8s.io/api",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/api",
+      "published_repository": "https://github.com/kubernetes/api"
+    },
+    {
+      "path": "k8s.io/apiextensions-apiserver",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/apiextensions-apiserver",
+      "published_repository": "https://github.com/kubernetes/apiextensions-apiserver"
+    },
+    {
+      "path": "k8s.io/apimachinery",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/apimachinery",
+      "published_repository": "https://github.com/kubernetes/apimachinery"
+    },
+    {
+      "path": "k8s.io/apiserver",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/apiserver",
+      "published_repository": "https://github.com/kubernetes/apiserver"
+    },
+    {
+      "path": "k8s.io/cli-runtime",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/cli-runtime",
+      "published_repository": "https://github.com/kubernetes/cli-runtime"
+    },
+    {
+      "path": "k8s.io/client-go",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/client-go",
+      "published_repository": "https://github.com/kubernetes/client-go"
+    },
+    {
+      "path": "k8s.io/cloud-provider",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/cloud-provider",
+      "published_repository": "https://github.com/kubernetes/cloud-provider"
+    },
+    {
+      "path": "k8s.io/cluster-bootstrap",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/cluster-bootstrap",
+      "published_repository": "https://github.com/kubernetes/cluster-bootstrap"
+    },
+    {
+      "path": "k8s.io/code-generator",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/code-generator",
+      "published_repository": "https://github.com/kubernetes/code-generator"
+    },
+    {
+      "path": "k8s.io/component-base",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/component-base",
+      "published_repository": "https://github.com/kubernetes/component-base"
+    },
+    {
+      "path": "k8s.io/component-helpers",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/component-helpers",
+      "published_repository": "https://github.com/kubernetes/component-helpers"
+    },
+    {
+      "path": "k8s.io/controller-manager",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/controller-manager",
+      "published_repository": "https://github.com/kubernetes/controller-manager"
+    },
+    {
+      "path": "k8s.io/cri-api",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/cri-api",
+      "published_repository": "https://github.com/kubernetes/cri-api"
+    },
+    {
+      "path": "k8s.io/cri-client",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/cri-client",
+      "published_repository": "https://github.com/kubernetes/cri-client"
+    },
+    {
+      "path": "k8s.io/csi-translation-lib",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/csi-translation-lib",
+      "published_repository": "https://github.com/kubernetes/csi-translation-lib"
+    },
+    {
+      "path": "k8s.io/dynamic-resource-allocation",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/dynamic-resource-allocation",
+      "published_repository": "https://github.com/kubernetes/dynamic-resource-allocation"
+    },
+    {
+      "path": "k8s.io/endpointslice",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/endpointslice",
+      "published_repository": "https://github.com/kubernetes/endpointslice"
+    },
+    {
+      "path": "k8s.io/externaljwt",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/externaljwt",
+      "published_repository": "https://github.com/kubernetes/externaljwt"
+    },
+    {
+      "path": "k8s.io/klog/v2",
+      "version": "v2.130.1",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "k8s.io/kms",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/kms",
+      "published_repository": "https://github.com/kubernetes/kms"
+    },
+    {
+      "path": "k8s.io/kube-aggregator",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/kube-aggregator",
+      "published_repository": "https://github.com/kubernetes/kube-aggregator"
+    },
+    {
+      "path": "k8s.io/kube-controller-manager",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/kube-controller-manager",
+      "published_repository": "https://github.com/kubernetes/kube-controller-manager"
+    },
+    {
+      "path": "k8s.io/kube-openapi",
+      "version": "v0.0.0-20250910181357-589584f1c912",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "k8s.io/kube-proxy",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/kube-proxy",
+      "published_repository": "https://github.com/kubernetes/kube-proxy"
+    },
+    {
+      "path": "k8s.io/kube-scheduler",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/kube-scheduler",
+      "published_repository": "https://github.com/kubernetes/kube-scheduler"
+    },
+    {
+      "path": "k8s.io/kubectl",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/kubectl",
+      "published_repository": "https://github.com/kubernetes/kubectl"
+    },
+    {
+      "path": "k8s.io/kubelet",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/kubelet",
+      "published_repository": "https://github.com/kubernetes/kubelet"
+    },
+    {
+      "path": "k8s.io/metrics",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/metrics",
+      "published_repository": "https://github.com/kubernetes/metrics"
+    },
+    {
+      "path": "k8s.io/mount-utils",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/mount-utils",
+      "published_repository": "https://github.com/kubernetes/mount-utils"
+    },
+    {
+      "path": "k8s.io/pod-security-admission",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/pod-security-admission",
+      "published_repository": "https://github.com/kubernetes/pod-security-admission"
+    },
+    {
+      "path": "k8s.io/sample-apiserver",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/sample-apiserver",
+      "published_repository": "https://github.com/kubernetes/sample-apiserver"
+    },
+    {
+      "path": "k8s.io/sample-cli-plugin",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/sample-cli-plugin",
+      "published_repository": "https://github.com/kubernetes/sample-cli-plugin"
+    },
+    {
+      "path": "k8s.io/sample-controller",
+      "version": "v0.0.0",
+      "type": "direct",
+      "source": "staged",
+      "replace_path": "./staging/src/k8s.io/sample-controller",
+      "published_repository": "https://github.com/kubernetes/sample-controller"
+    },
+    {
+      "path": "k8s.io/system-validators",
+      "version": "v1.12.1",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "k8s.io/utils",
+      "version": "v0.0.0-20251002143259-bc988d571ff4",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/json",
+      "version": "v0.0.0-20250730193827-2d320260d730",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/knftables",
+      "version": "v0.0.17",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/randfill",
+      "version": "v1.0.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/structured-merge-diff/v6",
+      "version": "v6.3.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/yaml",
+      "version": "v1.6.0",
+      "type": "direct",
+      "source": "external"
+    },
+    {
+      "path": "cel.dev/expr",
+      "version": "v0.24.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "cyphar.com/go-pathrs",
+      "version": "v0.2.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/Azure/go-ansiterm",
+      "version": "v0.0.0-20230124172434-306776ec8161",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/MakeNowJust/heredoc",
+      "version": "v1.0.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/Masterminds/semver/v3",
+      "version": "v3.4.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/NYTimes/gziphandler",
+      "version": "v1.1.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/antlr4-go/antlr/v4",
+      "version": "v4.13.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/beorn7/perks",
+      "version": "v1.0.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/cenkalti/backoff/v4",
+      "version": "v4.3.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/cespare/xxhash/v2",
+      "version": "v2.3.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/chai2010/gettext-go",
+      "version": "v1.0.2",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/containerd/containerd/api",
+      "version": "v1.9.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/containerd/errdefs",
+      "version": "v1.0.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/containerd/errdefs/pkg",
+      "version": "v0.3.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/containerd/log",
+      "version": "v0.1.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/containerd/ttrpc",
+      "version": "v1.2.7",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/containerd/typeurl/v2",
+      "version": "v2.2.3",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/coredns/caddy",
+      "version": "v1.1.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/coreos/go-semver",
+      "version": "v0.3.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/davecgh/go-spew",
+      "version": "v1.1.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/dustin/go-humanize",
+      "version": "v1.0.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/euank/go-kmsg-parser",
+      "version": "v2.0.0+incompatible",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/exponent-io/jsonpath",
+      "version": "v0.0.0-20210407135951-1de76d718b3f",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/fatih/camelcase",
+      "version": "v1.0.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/felixge/httpsnoop",
+      "version": "v1.0.4",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/fxamacker/cbor/v2",
+      "version": "v2.9.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/go-errors/errors",
+      "version": "v1.4.2",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/go-logr/stdr",
+      "version": "v1.2.2",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/go-logr/zapr",
+      "version": "v1.3.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/go-openapi/jsonpointer",
+      "version": "v0.21.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/go-openapi/swag",
+      "version": "v0.23.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/go-task/slim-sprig/v3",
+      "version": "v3.0.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/gogo/protobuf",
+      "version": "v1.3.2",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/golang-jwt/jwt/v5",
+      "version": "v5.2.2",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/golang/protobuf",
+      "version": "v1.5.4",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/google/btree",
+      "version": "v1.1.3",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/google/pprof",
+      "version": "v0.0.0-20250403155104-27863c87afa6",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/gorilla/websocket",
+      "version": "v1.5.4-0.20250319132907-e064f32e3674",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/gregjones/httpcache",
+      "version": "v0.0.0-20190611155906-901d90724c79",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus",
+      "version": "v1.0.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/grpc-ecosystem/go-grpc-middleware/v2",
+      "version": "v2.3.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/grpc-ecosystem/go-grpc-prometheus",
+      "version": "v1.2.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/grpc-ecosystem/grpc-gateway/v2",
+      "version": "v2.26.3",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/inconshreveable/mousetrap",
+      "version": "v1.1.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/jonboulle/clockwork",
+      "version": "v0.5.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/josharian/intern",
+      "version": "v1.0.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/json-iterator/go",
+      "version": "v1.1.12",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/karrick/godirwalk",
+      "version": "v1.17.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/kylelemons/godebug",
+      "version": "v1.1.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/liggitt/tabwriter",
+      "version": "v0.0.0-20181228230101-89fcab3d43de",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/mailru/easyjson",
+      "version": "v0.7.7",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/mistifyio/go-zfs",
+      "version": "v2.1.2-0.20190413222219-f784269be439+incompatible",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/mitchellh/go-wordwrap",
+      "version": "v1.0.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/moby/spdystream",
+      "version": "v0.5.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/moby/sys/mountinfo",
+      "version": "v0.7.2",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/moby/term",
+      "version": "v0.5.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/modern-go/concurrent",
+      "version": "v0.0.0-20180306012644-bacd9c7ef1dd",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/modern-go/reflect2",
+      "version": "v1.0.3-0.20250322232337-35a7c28c31ee",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/mohae/deepcopy",
+      "version": "v0.0.0-20170929034955-c48cc78d4826",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/monochromegane/go-gitignore",
+      "version": "v0.0.0-20200626010858-205db1a8cc00",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/mxk/go-flowrate",
+      "version": "v0.0.0-20140419014527-cca7078d478f",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/opencontainers/go-digest",
+      "version": "v1.0.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/opencontainers/image-spec",
+      "version": "v1.1.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/opencontainers/runtime-spec",
+      "version": "v1.2.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/peterbourgon/diskv",
+      "version": "v2.0.1+incompatible",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/pkg/errors",
+      "version": "v0.9.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/pquerna/cachecontrol",
+      "version": "v0.1.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/prometheus/procfs",
+      "version": "v0.16.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/russross/blackfriday/v2",
+      "version": "v2.1.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/sirupsen/logrus",
+      "version": "v1.9.3",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/soheilhy/cmux",
+      "version": "v0.1.5",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/stoewer/go-strcase",
+      "version": "v1.3.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/stretchr/objx",
+      "version": "v0.5.2",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/tmc/grpc-websocket-proxy",
+      "version": "v0.0.0-20220101234140-673ab2c3ae75",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/x448/float16",
+      "version": "v0.8.4",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/xiang90/probing",
+      "version": "v0.0.0-20221125231312-a49e3df8f510",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "github.com/xlab/treeprint",
+      "version": "v1.2.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.etcd.io/bbolt",
+      "version": "v1.4.3",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.etcd.io/etcd/pkg/v3",
+      "version": "v3.6.5",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.etcd.io/etcd/server/v3",
+      "version": "v3.6.5",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.etcd.io/raft/v3",
+      "version": "v3.6.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/auto/sdk",
+      "version": "v1.1.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc",
+      "version": "v0.60.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.opentelemetry.io/otel/exporters/otlp/otlptrace",
+      "version": "v1.34.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.uber.org/multierr",
+      "version": "v1.11.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "go.yaml.in/yaml/v3",
+      "version": "v3.0.4",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/exp",
+      "version": "v0.0.0-20240719175910-8a7402abbf56",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "golang.org/x/mod",
+      "version": "v0.29.0",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "google.golang.org/genproto/googleapis/api",
+      "version": "v0.0.0-20250303144028-a0af3efb3deb",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "gopkg.in/inf.v0",
+      "version": "v0.9.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "gopkg.in/natefinch/lumberjack.v2",
+      "version": "v2.2.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "gopkg.in/yaml.v3",
+      "version": "v3.0.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "k8s.io/gengo/v2",
+      "version": "v2.0.0-20250922181213-ec3ebc5fd46b",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/apiserver-network-proxy/konnectivity-client",
+      "version": "v0.31.2",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/kustomize/api",
+      "version": "v0.20.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/kustomize/kustomize/v5",
+      "version": "v5.7.1",
+      "type": "indirect",
+      "source": "external"
+    },
+    {
+      "path": "sigs.k8s.io/kustomize/kyaml",
+      "version": "v0.20.1",
+      "type": "indirect",
+      "source": "external"
+    }
+  ],
+  "dependency_graph": {
+    "k8s.io/kubernetes": [
+      "k8s.io/api",
+      "k8s.io/apimachinery",
+      "k8s.io/apiserver",
+      "k8s.io/client-go",
+      "k8s.io/component-base",
+      "k8s.io/controller-manager",
+      "k8s.io/kubelet",
+      "k8s.io/kubectl",
+      "k8s.io/kube-scheduler",
+      "k8s.io/kube-controller-manager",
+      "k8s.io/kube-proxy",
+      "k8s.io/kube-aggregator",
+      "k8s.io/apiextensions-apiserver",
+      "go.etcd.io/etcd/client/v3",
+      "google.golang.org/grpc",
+      "golang.org/x/crypto",
+      "golang.org/x/oauth2",
+      "github.com/prometheus/client_golang",
+      "github.com/coreos/go-oidc",
+      "github.com/spf13/cobra",
+      "github.com/spf13/pflag"
+    ],
+    "k8s.io/api": [
+      "k8s.io/apimachinery"
+    ],
+    "k8s.io/apimachinery": [
+      "github.com/gogo/protobuf",
+      "github.com/google/go-cmp",
+      "sigs.k8s.io/json",
+      "sigs.k8s.io/structured-merge-diff/v6",
+      "sigs.k8s.io/yaml"
+    ],
+    "k8s.io/apiserver": [
+      "k8s.io/api",
+      "k8s.io/apimachinery",
+      "k8s.io/client-go",
+      "k8s.io/component-base",
+      "go.etcd.io/etcd/client/v3",
+      "go.etcd.io/etcd/server/v3",
+      "google.golang.org/grpc",
+      "golang.org/x/crypto",
+      "go.opentelemetry.io/otel"
+    ],
+    "k8s.io/client-go": [
+      "k8s.io/api",
+      "k8s.io/apimachinery",
+      "golang.org/x/oauth2",
+      "golang.org/x/time",
+      "golang.org/x/net"
+    ],
+    "k8s.io/component-base": [
+      "k8s.io/apimachinery",
+      "k8s.io/client-go",
+      "github.com/prometheus/client_golang",
+      "github.com/spf13/cobra",
+      "github.com/spf13/pflag",
+      "go.opentelemetry.io/otel"
+    ],
+    "k8s.io/kubelet": [
+      "k8s.io/api",
+      "k8s.io/apimachinery",
+      "k8s.io/cri-api"
+    ],
+    "k8s.io/kube-scheduler": [
+      "k8s.io/api",
+      "k8s.io/apimachinery",
+      "k8s.io/client-go",
+      "k8s.io/component-base"
+    ],
+    "k8s.io/kube-controller-manager": [
+      "k8s.io/api",
+      "k8s.io/apimachinery",
+      "k8s.io/client-go",
+      "k8s.io/controller-manager"
+    ],
+    "k8s.io/controller-manager": [
+      "k8s.io/api",
+      "k8s.io/apimachinery",
+      "k8s.io/client-go",
+      "k8s.io/component-base"
+    ],
+    "go.etcd.io/etcd/client/v3": [
+      "go.etcd.io/etcd/api/v3",
+      "go.etcd.io/etcd/client/pkg/v3",
+      "google.golang.org/grpc",
+      "go.uber.org/zap"
+    ],
+    "go.etcd.io/etcd/server/v3": [
+      "go.etcd.io/etcd/api/v3",
+      "go.etcd.io/etcd/client/pkg/v3",
+      "go.etcd.io/etcd/pkg/v3",
+      "go.etcd.io/raft/v3",
+      "go.etcd.io/bbolt",
+      "google.golang.org/grpc"
+    ],
+    "google.golang.org/grpc": [
+      "google.golang.org/protobuf",
+      "google.golang.org/genproto/googleapis/rpc",
+      "golang.org/x/net",
+      "golang.org/x/sys"
+    ],
+    "golang.org/x/crypto": [
+      "golang.org/x/sys",
+      "golang.org/x/net"
+    ],
+    "golang.org/x/oauth2": [
+      "golang.org/x/net"
+    ],
+    "github.com/prometheus/client_golang": [
+      "github.com/prometheus/client_model",
+      "github.com/prometheus/common",
+      "github.com/prometheus/procfs",
+      "github.com/beorn7/perks",
+      "github.com/cespare/xxhash/v2"
+    ],
+    "github.com/coreos/go-oidc": [
+      "golang.org/x/oauth2",
+      "github.com/pquerna/cachecontrol",
+      "gopkg.in/go-jose/go-jose.v2"
+    ],
+    "go.opentelemetry.io/otel": [
+      "go.opentelemetry.io/otel/metric",
+      "go.opentelemetry.io/otel/trace"
+    ],
+    "go.opentelemetry.io/otel/sdk": [
+      "go.opentelemetry.io/otel",
+      "go.opentelemetry.io/otel/trace"
+    ],
+    "sigs.k8s.io/kustomize/kustomize/v5": [
+      "sigs.k8s.io/kustomize/api",
+      "sigs.k8s.io/kustomize/kyaml"
+    ]
+  },
+  "transitive_dependency_analysis": {
+    "description": "Analysis of transitive dependency chains for k8s.io/* staged modules",
+    "high_risk_chains": [
+      {
+        "chain": "k8s.io/kubernetes -> k8s.io/apiserver -> go.etcd.io/etcd/server/v3 -> google.golang.org/grpc",
+        "risk_factor": "critical",
+        "description": "etcd server dependency chain - cluster state persistence and replication security"
+      },
+      {
+        "chain": "k8s.io/kubernetes -> k8s.io/client-go -> golang.org/x/oauth2",
+        "risk_factor": "high",
+        "description": "OAuth2 authentication chain for external identity providers"
+      },
+      {
+        "chain": "k8s.io/kubernetes -> k8s.io/apiserver -> golang.org/x/crypto",
+        "risk_factor": "critical",
+        "description": "Cryptographic primitives for TLS, authentication tokens, and encryption"
+      },
+      {
+        "chain": "k8s.io/kubernetes -> k8s.io/component-base -> github.com/prometheus/client_golang",
+        "risk_factor": "medium",
+        "description": "Metrics exposure for all Kubernetes components"
+      },
+      {
+        "chain": "k8s.io/kubernetes -> github.com/coreos/go-oidc -> gopkg.in/go-jose/go-jose.v2",
+        "risk_factor": "high",
+        "description": "OIDC authentication with JOSE/JWT token handling"
+      }
+    ]
+  },
+  "staged_modules_summary": {
+    "description": "Summary of k8s.io/* staged modules from staging/src/ directory",
+    "total_count": 32,
+    "modules": [
+      {
+        "path": "k8s.io/api",
+        "local_path": "./staging/src/k8s.io/api",
+        "published_repo": "https://github.com/kubernetes/api",
+        "description": "Kubernetes API type definitions"
+      },
+      {
+        "path": "k8s.io/apiextensions-apiserver",
+        "local_path": "./staging/src/k8s.io/apiextensions-apiserver",
+        "published_repo": "https://github.com/kubernetes/apiextensions-apiserver",
+        "description": "API extensions server for CustomResourceDefinitions"
+      },
+      {
+        "path": "k8s.io/apimachinery",
+        "local_path": "./staging/src/k8s.io/apimachinery",
+        "published_repo": "https://github.com/kubernetes/apimachinery",
+        "description": "API machinery utilities and type system"
+      },
+      {
+        "path": "k8s.io/apiserver",
+        "local_path": "./staging/src/k8s.io/apiserver",
+        "published_repo": "https://github.com/kubernetes/apiserver",
+        "description": "Generic API server library"
+      },
+      {
+        "path": "k8s.io/cli-runtime",
+        "local_path": "./staging/src/k8s.io/cli-runtime",
+        "published_repo": "https://github.com/kubernetes/cli-runtime",
+        "description": "CLI runtime utilities for kubectl"
+      },
+      {
+        "path": "k8s.io/client-go",
+        "local_path": "./staging/src/k8s.io/client-go",
+        "published_repo": "https://github.com/kubernetes/client-go",
+        "description": "Kubernetes client library"
+      },
+      {
+        "path": "k8s.io/cloud-provider",
+        "local_path": "./staging/src/k8s.io/cloud-provider",
+        "published_repo": "https://github.com/kubernetes/cloud-provider",
+        "description": "Cloud provider interfaces"
+      },
+      {
+        "path": "k8s.io/cluster-bootstrap",
+        "local_path": "./staging/src/k8s.io/cluster-bootstrap",
+        "published_repo": "https://github.com/kubernetes/cluster-bootstrap",
+        "description": "Cluster bootstrap utilities"
+      },
+      {
+        "path": "k8s.io/code-generator",
+        "local_path": "./staging/src/k8s.io/code-generator",
+        "published_repo": "https://github.com/kubernetes/code-generator",
+        "description": "Code generation utilities"
+      },
+      {
+        "path": "k8s.io/component-base",
+        "local_path": "./staging/src/k8s.io/component-base",
+        "published_repo": "https://github.com/kubernetes/component-base",
+        "description": "Shared component base utilities"
+      },
+      {
+        "path": "k8s.io/component-helpers",
+        "local_path": "./staging/src/k8s.io/component-helpers",
+        "published_repo": "https://github.com/kubernetes/component-helpers",
+        "description": "Component helper utilities"
+      },
+      {
+        "path": "k8s.io/controller-manager",
+        "local_path": "./staging/src/k8s.io/controller-manager",
+        "published_repo": "https://github.com/kubernetes/controller-manager",
+        "description": "Controller manager library"
+      },
+      {
+        "path": "k8s.io/cri-api",
+        "local_path": "./staging/src/k8s.io/cri-api",
+        "published_repo": "https://github.com/kubernetes/cri-api",
+        "description": "Container Runtime Interface API"
+      },
+      {
+        "path": "k8s.io/cri-client",
+        "local_path": "./staging/src/k8s.io/cri-client",
+        "published_repo": "https://github.com/kubernetes/cri-client",
+        "description": "Container Runtime Interface client"
+      },
+      {
+        "path": "k8s.io/csi-translation-lib",
+        "local_path": "./staging/src/k8s.io/csi-translation-lib",
+        "published_repo": "https://github.com/kubernetes/csi-translation-lib",
+        "description": "CSI translation library"
+      },
+      {
+        "path": "k8s.io/dynamic-resource-allocation",
+        "local_path": "./staging/src/k8s.io/dynamic-resource-allocation",
+        "published_repo": "https://github.com/kubernetes/dynamic-resource-allocation",
+        "description": "Dynamic resource allocation"
+      },
+      {
+        "path": "k8s.io/endpointslice",
+        "local_path": "./staging/src/k8s.io/endpointslice",
+        "published_repo": "https://github.com/kubernetes/endpointslice",
+        "description": "EndpointSlice utilities"
+      },
+      {
+        "path": "k8s.io/externaljwt",
+        "local_path": "./staging/src/k8s.io/externaljwt",
+        "published_repo": "https://github.com/kubernetes/externaljwt",
+        "description": "External JWT authentication"
+      },
+      {
+        "path": "k8s.io/kms",
+        "local_path": "./staging/src/k8s.io/kms",
+        "published_repo": "https://github.com/kubernetes/kms",
+        "description": "Key Management Service interface"
+      },
+      {
+        "path": "k8s.io/kube-aggregator",
+        "local_path": "./staging/src/k8s.io/kube-aggregator",
+        "published_repo": "https://github.com/kubernetes/kube-aggregator",
+        "description": "API aggregation layer"
+      },
+      {
+        "path": "k8s.io/kube-controller-manager",
+        "local_path": "./staging/src/k8s.io/kube-controller-manager",
+        "published_repo": "https://github.com/kubernetes/kube-controller-manager",
+        "description": "Controller manager configuration"
+      },
+      {
+        "path": "k8s.io/kube-proxy",
+        "local_path": "./staging/src/k8s.io/kube-proxy",
+        "published_repo": "https://github.com/kubernetes/kube-proxy",
+        "description": "Kube-proxy configuration"
+      },
+      {
+        "path": "k8s.io/kube-scheduler",
+        "local_path": "./staging/src/k8s.io/kube-scheduler",
+        "published_repo": "https://github.com/kubernetes/kube-scheduler",
+        "description": "Scheduler configuration"
+      },
+      {
+        "path": "k8s.io/kubectl",
+        "local_path": "./staging/src/k8s.io/kubectl",
+        "published_repo": "https://github.com/kubernetes/kubectl",
+        "description": "Kubectl implementation"
+      },
+      {
+        "path": "k8s.io/kubelet",
+        "local_path": "./staging/src/k8s.io/kubelet",
+        "published_repo": "https://github.com/kubernetes/kubelet",
+        "description": "Kubelet configuration and types"
+      },
+      {
+        "path": "k8s.io/metrics",
+        "local_path": "./staging/src/k8s.io/metrics",
+        "published_repo": "https://github.com/kubernetes/metrics",
+        "description": "Metrics API types"
+      },
+      {
+        "path": "k8s.io/mount-utils",
+        "local_path": "./staging/src/k8s.io/mount-utils",
+        "published_repo": "https://github.com/kubernetes/mount-utils",
+        "description": "Mount utilities"
+      },
+      {
+        "path": "k8s.io/pod-security-admission",
+        "local_path": "./staging/src/k8s.io/pod-security-admission",
+        "published_repo": "https://github.com/kubernetes/pod-security-admission",
+        "description": "Pod security admission controller"
+      },
+      {
+        "path": "k8s.io/sample-apiserver",
+        "local_path": "./staging/src/k8s.io/sample-apiserver",
+        "published_repo": "https://github.com/kubernetes/sample-apiserver",
+        "description": "Sample API server implementation"
+      },
+      {
+        "path": "k8s.io/sample-cli-plugin",
+        "local_path": "./staging/src/k8s.io/sample-cli-plugin",
+        "published_repo": "https://github.com/kubernetes/sample-cli-plugin",
+        "description": "Sample CLI plugin"
+      },
+      {
+        "path": "k8s.io/sample-controller",
+        "local_path": "./staging/src/k8s.io/sample-controller",
+        "published_repo": "https://github.com/kubernetes/sample-controller",
+        "description": "Sample controller implementation"
+      }
+    ]
+  }
+}

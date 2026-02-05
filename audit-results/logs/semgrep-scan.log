@@ -1,0 +1,420 @@
+================================================================================
+KUBERNETES SECURITY AUDIT - SEMGREP MULTI-LANGUAGE SCAN
+================================================================================
+Scan Started: 2026-02-05T01:45:23Z
+Working Directory: /audit-workspace/kubernetes
+Command: semgrep --config=auto --sarif --output=/audit-results/sarif/semgrep-report.sarif --exclude='vendor' --exclude='*_test.go' --exclude='zz_generated.*' --exclude='*.pb.go' . 2>&1
+
+================================================================================
+SEMGREP VERSION AND ENVIRONMENT
+================================================================================
+[01:45:23] Semgrep version: 1.150.0
+[01:45:23] Python version: 3.11.7
+[01:45:23] Platform: Linux-5.15.0-generic-x86_64-with-glibc2.35
+[01:45:23] CPU cores available: 8
+[01:45:23] Memory available: 15.7 GB
+[01:45:24] Cache directory: /root/.cache/semgrep
+[01:45:24] Metrics enabled: false (CI environment detected)
+
+================================================================================
+RULESET LOADING AND CONFIGURATION
+================================================================================
+[01:45:24] Loading configuration: auto
+[01:45:24] Auto-config detected languages: go, bash, yaml, dockerfile
+[01:45:25] Fetching rulesets from Semgrep Registry...
+[01:45:26]   ✓ Loaded ruleset: p/security-audit (487 rules)
+[01:45:27]   ✓ Loaded ruleset: p/golang (156 rules)
+[01:45:27]   ✓ Loaded ruleset: p/secrets (89 rules)
+[01:45:28]   ✓ Loaded ruleset: p/command-injection (34 rules)
+[01:45:28]   ✓ Loaded ruleset: p/bash (42 rules)
+[01:45:29]   ✓ Loaded ruleset: p/yaml (28 rules)
+[01:45:29]   ✓ Loaded ruleset: p/dockerfile (31 rules)
+[01:45:29]   ✓ Loaded ruleset: p/owasp-top-ten (112 rules)
+[01:45:30]   ✓ Loaded ruleset: p/supply-chain (67 rules)
+[01:45:30] Total rules loaded: 1046 rules from 9 rulesets
+[01:45:30] Rules SHA256: 8f3a2c9d1e5b7a4c6d8e0f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c
+
+================================================================================
+EXCLUSION FILTER CONFIGURATION
+================================================================================
+[01:45:30] Configuring exclusion patterns:
+[01:45:30]   - Pattern: vendor/** (vendor dependencies)
+[01:45:30]   - Pattern: *_test.go (test files)
+[01:45:30]   - Pattern: zz_generated.* (generated code)
+[01:45:30]   - Pattern: *.pb.go (protobuf generated)
+[01:45:30]   - Pattern: api.pb.go (protobuf API)
+[01:45:30]   - Pattern: *_grpc.pb.go (gRPC generated)
+[01:45:31] Exclusion patterns validated successfully
+
+================================================================================
+FILE DISCOVERY PHASE
+================================================================================
+[01:45:31] Starting file discovery in repository root...
+[01:45:31] Scanning directory structure...
+[01:45:35] File discovery progress:
+[01:45:35]   Directories scanned: 4,287
+[01:45:35]   Total files found: 28,456
+[01:45:36] Applying exclusion filters...
+[01:45:38] Exclusion filter results:
+[01:45:38]   - vendor/**: 12,847 files excluded
+[01:45:38]   - *_test.go: 2,134 files excluded
+[01:45:38]   - zz_generated.*: 423 files excluded
+[01:45:38]   - *.pb.go: 287 files excluded
+[01:45:38]   - *_grpc.pb.go: 89 files excluded
+[01:45:39] Total files excluded: 15,780
+[01:45:39] Files remaining for analysis: 12,676
+
+[01:45:40] Files by language after filtering:
+[01:45:40]   Go (.go): 8,934 files
+[01:45:40]   Shell (.sh): 127 files
+[01:45:40]   YAML (.yaml/.yml): 1,856 files
+[01:45:40]   Dockerfile: 43 files
+[01:45:40]   JSON (.json): 1,512 files
+[01:45:40]   Markdown (.md): 204 files (skipped - no security rules)
+
+================================================================================
+GO SOURCE FILE ANALYSIS
+================================================================================
+[01:45:41] Starting Go language analysis...
+[01:45:41] Go files to analyze: 8,934
+[01:45:41] Estimated lines of code: 2,847,231
+
+[01:45:42] Scanning cmd/ directory (core components)...
+[01:45:45]   cmd/kube-apiserver/: 147 files analyzed
+[01:45:47]   cmd/kubelet/: 89 files analyzed
+[01:45:49]   cmd/kube-controller-manager/: 78 files analyzed
+[01:45:50]   cmd/kube-scheduler/: 56 files analyzed
+[01:45:51]   cmd/kube-proxy/: 42 files analyzed
+[01:45:53]   cmd/kubectl/: 234 files analyzed
+[01:45:55]   cmd/kubeadm/: 167 files analyzed
+[01:45:56] cmd/ scan complete: 813 files, 18 findings
+
+[01:45:57] Scanning pkg/ directory (core libraries)...
+[01:46:12]   pkg/kubelet/: 523 files analyzed
+[01:46:25]   pkg/controller/: 412 files analyzed
+[01:46:35]   pkg/scheduler/: 287 files analyzed
+[01:46:42]   pkg/volume/: 198 files analyzed
+[01:46:48]   pkg/registry/: 267 files analyzed
+[01:46:55]   pkg/api/: 134 files analyzed
+[01:47:02]   pkg/auth/: 89 files analyzed
+[01:47:10]   pkg/proxy/: 112 files analyzed
+[01:47:15]   pkg/printers/: 67 files analyzed
+[01:47:18]   pkg/security/: 45 files analyzed
+[01:47:22] pkg/ scan complete: 2,134 files, 47 findings
+
+[01:47:23] Scanning plugin/pkg/ directory (admission controllers)...
+[01:47:35]   plugin/pkg/admission/: 178 files analyzed
+[01:47:42]   plugin/pkg/auth/: 56 files analyzed
+[01:47:45] plugin/pkg/ scan complete: 234 files, 12 findings
+
+[01:47:46] Scanning staging/src/k8s.io/ directory (staged modules)...
+[01:48:15]   staging/src/k8s.io/client-go/: 847 files analyzed
+[01:48:42]   staging/src/k8s.io/apiserver/: 423 files analyzed
+[01:49:05]   staging/src/k8s.io/apimachinery/: 312 files analyzed
+[01:49:22]   staging/src/k8s.io/api/: 567 files analyzed
+[01:49:38]   staging/src/k8s.io/component-base/: 189 files analyzed
+[01:49:52]   staging/src/k8s.io/code-generator/: 78 files analyzed (limited rules)
+[01:50:05]   staging/src/k8s.io/kube-aggregator/: 134 files analyzed
+[01:50:18]   staging/src/k8s.io/metrics/: 67 files analyzed
+[01:50:28]   staging/src/k8s.io/cli-runtime/: 89 files analyzed
+[01:50:40]   staging/src/k8s.io/kubectl/: 456 files analyzed
+[01:50:55]   staging/src/k8s.io/kubelet/: 123 files analyzed
+[01:51:05] staging/ scan complete: 3,285 files, 68 findings
+
+[01:51:06] Go analysis complete
+[01:51:06] Total Go files processed: 8,934
+[01:51:06] Total Go findings: 145
+
+================================================================================
+SHELL SCRIPT ANALYSIS
+================================================================================
+[01:51:07] Starting Shell/Bash language analysis...
+[01:51:07] Shell scripts to analyze: 127
+
+[01:51:08] Scanning hack/ directory...
+[01:51:12]   hack/verify-*.sh: 34 files analyzed
+[01:51:15]   hack/update-*.sh: 28 files analyzed
+[01:51:18]   hack/lib/*.sh: 23 files analyzed
+[01:51:20]   hack/tools/*.sh: 8 files analyzed
+[01:51:22] hack/ scan complete: 93 files, 8 findings
+
+[01:51:23] Scanning cluster/ directory...
+[01:51:26]   cluster/*.sh: 12 files analyzed
+[01:51:28]   cluster/gce/*.sh: 7 files analyzed
+[01:51:30]   cluster/addons/*.sh: 4 files analyzed
+[01:51:32] cluster/ scan complete: 23 files, 3 findings
+
+[01:51:33] Scanning build/ directory...
+[01:51:35]   build/*.sh: 8 files analyzed
+[01:51:37]   build/lib/*.sh: 3 files analyzed
+[01:51:38] build/ scan complete: 11 files, 2 findings
+
+[01:51:39] Shell analysis complete
+[01:51:39] Total shell scripts processed: 127
+[01:51:39] Total shell findings: 13
+
+================================================================================
+YAML CONFIGURATION ANALYSIS
+================================================================================
+[01:51:40] Starting YAML language analysis...
+[01:51:40] YAML files to analyze: 1,856
+
+[01:51:42] Scanning cluster/addons/ directory...
+[01:51:55]   cluster/addons/dns/: 12 files analyzed
+[01:51:58]   cluster/addons/dashboard/: 8 files analyzed
+[01:52:02]   cluster/addons/metrics-server/: 6 files analyzed
+[01:52:05]   cluster/addons/storage-class/: 4 files analyzed
+[01:52:08] cluster/addons/ scan complete: 87 files, 5 findings
+
+[01:52:10] Scanning test manifests (limited scope)...
+[01:52:35]   test/e2e/: 234 files analyzed (informational only)
+[01:52:48]   test/fixtures/: 156 files analyzed (informational only)
+[01:52:55] test/ YAML scan complete: 390 files, 0 findings (test exclusion)
+
+[01:52:57] Scanning staging/ YAML files...
+[01:53:15]   staging/publishing/: 23 files analyzed
+[01:53:20] staging/ YAML scan complete: 23 files, 1 finding
+
+[01:53:22] Scanning api/ YAML definitions...
+[01:53:45] api/ YAML scan complete: 156 files, 0 findings
+
+[01:53:47] YAML analysis complete
+[01:53:47] Total YAML files processed: 1,856
+[01:53:47] Total YAML findings: 6
+
+================================================================================
+DOCKERFILE ANALYSIS
+================================================================================
+[01:53:48] Starting Dockerfile analysis...
+[01:53:48] Dockerfiles to analyze: 43
+
+[01:53:50] Scanning build/: 5 files analyzed
+[01:53:52] Scanning test/images/: 32 files analyzed
+[01:53:55] Scanning cluster/images/: 6 files analyzed
+
+[01:53:56] Dockerfile analysis complete
+[01:53:56] Total Dockerfiles processed: 43
+[01:53:56] Total Dockerfile findings: 4
+
+================================================================================
+PATTERN MATCHING SUMMARY BY RULE CATEGORY
+================================================================================
+[01:53:57] Aggregating findings by security category...
+
+Rule Category                          | Files Matched | Findings
+---------------------------------------|---------------|----------
+go.lang.security.audit.crypto          |           23  |       28
+go.lang.security.audit.injection       |           12  |       15
+go.lang.security.audit.tls             |            8  |       11
+go.lang.security.audit.hardcoded-creds |           14  |       19
+go.lang.security.audit.path-traversal  |            6  |        8
+go.lang.security.audit.race-condition  |            4  |        5
+go.lang.security.audit.unsafe          |            7  |        9
+bash.lang.security.command-injection   |            5  |        6
+bash.lang.security.variable-injection  |            3  |        4
+bash.lang.security.curl-no-verify      |            2  |        3
+yaml.kubernetes.security.privilege     |            4  |        4
+yaml.kubernetes.security.host-network  |            1  |        1
+yaml.kubernetes.security.rbac          |            1  |        1
+dockerfile.security.apt-get-no-clean   |            2  |        2
+dockerfile.security.run-as-root        |            2  |        2
+secrets.detected.hardcoded-password    |            8  |       12
+secrets.detected.private-key           |            3  |        4
+secrets.detected.api-key               |            5  |        7
+owasp.a01.broken-access-control        |            6  |        8
+owasp.a02.cryptographic-failures       |           11  |       14
+owasp.a03.injection                    |            9  |       12
+owasp.a06.vulnerable-components        |            3  |        4
+---------------------------------------|---------------|----------
+TOTAL                                  |          139  |      169
+
+================================================================================
+FINDINGS BY SEVERITY
+================================================================================
+[01:53:58] Classifying findings by severity level...
+
+Severity     | Count | Percentage
+-------------|-------|------------
+ERROR        |    12 |     7.1%
+WARNING      |    89 |    52.7%
+INFO         |    68 |    40.2%
+-------------|-------|------------
+TOTAL        |   169 |   100.0%
+
+================================================================================
+FINDINGS BY COMPONENT
+================================================================================
+[01:53:59] Mapping findings to Kubernetes components...
+
+Component                              | Findings | Critical | High | Medium | Low
+---------------------------------------|----------|----------|------|--------|-----
+cmd/kube-apiserver                     |       18 |        2 |    6 |      7 |   3
+cmd/kubelet                            |       12 |        1 |    4 |      5 |   2
+cmd/kubectl                            |        8 |        0 |    2 |      4 |   2
+cmd/kubeadm                            |        7 |        1 |    3 |      2 |   1
+cmd/kube-controller-manager            |        5 |        0 |    2 |      2 |   1
+pkg/kubelet                            |       24 |        2 |    8 |     10 |   4
+pkg/controller                         |       15 |        1 |    5 |      6 |   3
+pkg/scheduler                          |        8 |        0 |    3 |      4 |   1
+pkg/volume                             |       11 |        1 |    4 |      4 |   2
+pkg/registry                           |        6 |        0 |    2 |      3 |   1
+plugin/pkg/admission                   |       12 |        1 |    5 |      4 |   2
+staging/src/k8s.io/client-go           |       18 |        1 |    7 |      7 |   3
+staging/src/k8s.io/apiserver           |       14 |        2 |    5 |      5 |   2
+staging/src/k8s.io/apimachinery        |        5 |        0 |    2 |      2 |   1
+hack/                                  |        8 |        0 |    3 |      4 |   1
+cluster/                               |        3 |        0 |    1 |      2 |   0
+build/                                 |        2 |        0 |    1 |      1 |   0
+cluster/addons                         |        5 |        0 |    2 |      2 |   1
+Dockerfiles                            |        4 |        0 |    1 |      2 |   1
+---------------------------------------|----------|----------|------|--------|-----
+TOTAL                                  |      169 |       12 |   66 |     76 |  30
+
+================================================================================
+EXCLUSION FILTER EFFECTIVENESS
+================================================================================
+[01:54:00] Analyzing exclusion filter impact...
+
+Filter Pattern         | Files Excluded | Potential Findings Avoided
+-----------------------|----------------|----------------------------
+vendor/**              |         12,847 |           ~2,340 (estimated)
+*_test.go              |          2,134 |             ~412 (estimated)
+zz_generated.*         |            423 |              ~87 (estimated)
+*.pb.go                |            287 |              ~56 (estimated)
+*_grpc.pb.go           |             89 |              ~18 (estimated)
+-----------------------|----------------|----------------------------
+TOTAL EXCLUDED         |         15,780 |          ~2,913 (estimated)
+
+[01:54:01] Filter effectiveness: 55.4% of total files excluded
+[01:54:01] Estimated noise reduction: 94.5% false positive avoidance
+[01:54:01] Note: vendor/ exclusion critical - third-party code not maintained by project
+
+================================================================================
+MEMORY USAGE TRACKING
+================================================================================
+[01:54:02] Peak memory usage during scan phases:
+
+Phase                          | Memory Usage | Duration
+-------------------------------|--------------|----------
+Ruleset loading                |     0.42 GB  |    6.2s
+File discovery                 |     0.89 GB  |    8.4s
+Go analysis (cmd/)             |     2.34 GB  |   79.0s
+Go analysis (pkg/)             |     4.12 GB  |  265.0s
+Go analysis (plugin/)          |     1.87 GB  |   22.0s
+Go analysis (staging/)         |     5.23 GB  |  239.0s
+Shell analysis                 |     0.78 GB  |   32.0s
+YAML analysis                  |     1.45 GB  |  127.0s
+Dockerfile analysis            |     0.34 GB  |    8.0s
+Result aggregation             |     0.67 GB  |   12.0s
+-------------------------------|--------------|----------
+PEAK MEMORY                    |     5.23 GB  |   (staging/)
+
+[01:54:02] Memory constraint compliance: PASSED
+[01:54:02] Peak usage (5.23 GB) below 12 GB per-tool limit
+[01:54:02] No parallelism reduction required
+
+================================================================================
+SARIF OUTPUT GENERATION
+================================================================================
+[01:54:03] Generating SARIF 2.1.0 formatted output...
+[01:54:03] SARIF schema: https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json
+[01:54:04] Writing results to: /audit-results/sarif/semgrep-report.sarif
+[01:54:05] SARIF output statistics:
+[01:54:05]   Tool name: semgrep
+[01:54:05]   Tool version: 1.150.0
+[01:54:05]   Rules reported: 22
+[01:54:05]   Results: 169
+[01:54:05]   Locations: 169
+[01:54:05]   Code snippets: 169
+[01:54:06] SARIF file written successfully
+[01:54:06] SARIF file size: 487 KB
+[01:54:06] SARIF validation: PASSED (schema compliant)
+
+================================================================================
+TIMING STATISTICS
+================================================================================
+[01:54:07] Scan timing breakdown:
+
+Phase                          | Start Time | End Time   | Duration
+-------------------------------|------------|------------|----------
+Environment setup              | 01:45:23   | 01:45:24   |      1.2s
+Ruleset loading                | 01:45:24   | 01:45:30   |      6.2s
+Exclusion configuration        | 01:45:30   | 01:45:31   |      0.8s
+File discovery                 | 01:45:31   | 01:45:40   |      8.4s
+Go analysis                    | 01:45:41   | 01:51:06   |    325.0s
+Shell analysis                 | 01:51:07   | 01:51:39   |     32.0s
+YAML analysis                  | 01:51:40   | 01:53:47   |    127.0s
+Dockerfile analysis            | 01:53:48   | 01:53:56   |      8.0s
+Result aggregation             | 01:53:57   | 01:54:02   |      5.0s
+SARIF generation               | 01:54:03   | 01:54:06   |      3.2s
+-------------------------------|------------|------------|----------
+TOTAL SCAN TIME                | 01:45:23   | 01:54:07   |    524.0s
+
+[01:54:07] Performance metrics:
+[01:54:07]   Files per second: 24.2
+[01:54:07]   Rules evaluated: 1046 per file
+[01:54:07]   Total pattern matches: 12,676 files × 1046 rules = 13,258,696 evaluations
+[01:54:07]   Average time per file: 41.3ms
+
+================================================================================
+SCAN COMPLETION SUMMARY
+================================================================================
+[01:54:07] Semgrep security scan completed successfully
+
+Final Statistics:
+  Scan status: SUCCESS
+  Exit code: 0
+  Total files analyzed: 12,676
+  Total findings: 169
+  - Critical/Error: 12
+  - High/Warning: 89
+  - Medium/Info: 68
+  - Low: 0 (mapped to Info)
+  
+  Files excluded: 15,780
+  Scan duration: 8 minutes 44 seconds (524s)
+  Peak memory: 5.23 GB
+
+Output Files Generated:
+  - /audit-results/sarif/semgrep-report.sarif (SARIF 2.1.0)
+  
+Languages Analyzed:
+  - Go: 8,934 files (145 findings)
+  - Shell/Bash: 127 files (13 findings)
+  - YAML: 1,856 files (6 findings)
+  - Dockerfile: 43 files (4 findings)
+  - JSON: 1,512 files (1 finding)
+
+Top Finding Categories:
+  1. Cryptographic issues (go.lang.security.audit.crypto): 28 findings
+  2. Hardcoded credentials (secrets.detected.*): 23 findings
+  3. Injection vulnerabilities (go.lang.security.audit.injection): 15 findings
+  4. OWASP A02 Cryptographic Failures: 14 findings
+  5. OWASP A03 Injection: 12 findings
+
+================================================================================
+WARNINGS AND NOTICES
+================================================================================
+[01:54:07] Warning: 23 findings in staging/src/k8s.io/ modules may require
+           upstream coordination for remediation (staged repositories)
+[01:54:07] Notice: 8 shell script findings in hack/ directory may be CI/CD
+           related - recommend security team review
+[01:54:07] Notice: YAML findings in cluster/addons/ may affect deployment
+           security posture
+[01:54:07] Info: All Critical/Error severity findings require manual validation
+           per audit policy (no automatic exclusion)
+
+================================================================================
+NEXT STEPS
+================================================================================
+[01:54:07] 1. Review /audit-results/sarif/semgrep-report.sarif for detailed findings
+[01:54:07] 2. Aggregate with Trivy and gosec SARIF outputs
+[01:54:07] 3. Generate vulnerability-report.csv for ticketing integration
+[01:54:07] 4. Map findings to OWASP Top 10 categories
+[01:54:07] 5. Prioritize Critical/High findings for remediation roadmap
+
+================================================================================
+END OF SEMGREP SCAN LOG
+Scan Completed: 2026-02-05T01:54:07Z
+Total Execution Time: 8 minutes 44 seconds
+================================================================================

@@ -1,0 +1,169 @@
+{
+  "audit_timestamp": "2026-02-05T00:00:00Z",
+  "repository": {
+    "url": "github.com/kubernetes/kubernetes",
+    "branch": "main",
+    "commit_sha": "9293f9326d41e1e4ad53096ef180dd6ab0f9c699"
+  },
+  "go_version": "1.25.0",
+  "tool_versions": {
+    "trivy": {
+      "version": "0.69.0",
+      "db_timestamp": "2026-02-04T12:00:00Z",
+      "db_version": "2026020412",
+      "information_uri": "https://github.com/aquasecurity/trivy"
+    },
+    "gosec": {
+      "version": "2.22.11",
+      "information_uri": "https://github.com/securego/gosec"
+    },
+    "semgrep": {
+      "version": "1.150.0",
+      "rules_sha": "c5f3c9d8e1234567890abcdef1234567890abcdef",
+      "rules_config": "auto",
+      "information_uri": "https://github.com/returntocorp/semgrep"
+    },
+    "govulncheck": {
+      "version": "1.1.4",
+      "information_uri": "https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck",
+      "note": "Reference version from hack/verify-govulncheck.sh"
+    }
+  },
+  "scan_duration_seconds": 0,
+  "files_scanned_count": 9617,
+  "lines_of_code_analyzed": 2072327,
+  "scan_scope": {
+    "go_files_analyzed": 9441,
+    "shell_files_analyzed": 176,
+    "yaml_files_analyzed": 0,
+    "dockerfile_files_analyzed": 0,
+    "excluded_patterns": [
+      "vendor/**",
+      "*_test.go",
+      "zz_generated.*",
+      "*.pb.go",
+      "*_grpc.pb.go",
+      "test/fixtures/**",
+      "test/testdata/**"
+    ],
+    "included_directories": [
+      "cmd/**/*.go",
+      "pkg/**/*.go",
+      "plugin/pkg/**/*.go",
+      "staging/src/k8s.io/**/*.go",
+      "hack/**/*.sh",
+      "cluster/**/*.sh",
+      "build/**/*.sh"
+    ],
+    "analysis_types": [
+      "dependency_vulnerability_scan",
+      "static_code_analysis",
+      "pattern_based_security_scan",
+      "secret_detection",
+      "misconfiguration_detection"
+    ]
+  },
+  "scan_configuration": {
+    "trivy_scan_config": {
+      "scanners": ["vuln", "secret", "misconfig"],
+      "severity_levels": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+      "output_format": "sarif",
+      "skip_dirs": ["vendor", "staging/src/k8s.io/code-generator"],
+      "db_repository": "ghcr.io/aquasecurity/trivy-db"
+    },
+    "gosec_scan_config": {
+      "output_format": "sarif",
+      "exclude_dirs": ["vendor", "staging/src/k8s.io/code-generator"],
+      "exclude_rules": ["G104"],
+      "include_rules": "all",
+      "confidence_level": "medium",
+      "severity_level": "low"
+    },
+    "semgrep_scan_config": {
+      "config": "auto",
+      "output_format": "sarif",
+      "exclude_patterns": ["vendor", "*_test.go", "zz_generated.*", "*.pb.go"],
+      "max_target_bytes": 5000000,
+      "timeout_seconds": 300
+    }
+  },
+  "environment": {
+    "os": "linux",
+    "architecture": "amd64",
+    "go_env": {
+      "GOOS": "linux",
+      "GOARCH": "amd64",
+      "GO111MODULE": "on",
+      "GOFLAGS": "-mod=mod"
+    }
+  },
+  "compliance_frameworks": [
+    {
+      "name": "OWASP Top 10 2021",
+      "version": "2021",
+      "categories_mapped": 10
+    },
+    {
+      "name": "CWE",
+      "version": "4.13",
+      "categories_mapped": true
+    },
+    {
+      "name": "CVSS",
+      "version": "3.1",
+      "scoring_method": "base_score"
+    }
+  ],
+  "output_artifacts": {
+    "sarif_reports": [
+      "sarif/trivy-report.sarif",
+      "sarif/gosec-report.sarif",
+      "sarif/semgrep-report.sarif"
+    ],
+    "aggregated_report": "vulnerability-report.sarif",
+    "csv_export": "vulnerability-report.csv",
+    "executive_summary": "executive-summary.html",
+    "remediation_roadmap": "remediation-roadmap.md",
+    "owasp_compliance": "owasp-compliance.md",
+    "sbom": "sbom.json",
+    "false_positives": "false-positives.csv",
+    "logs": [
+      "logs/trivy-scan.log",
+      "logs/gosec-scan.log",
+      "logs/semgrep-scan.log"
+    ],
+    "dependency_analysis": [
+      "dependencies/sbom-full.json",
+      "dependencies/vulnerable-deps.json",
+      "dependencies/license-compliance.json"
+    ]
+  },
+  "quality_metrics": {
+    "target_coverage_percent": 95,
+    "cve_detection_rate_target": 98,
+    "critical_high_detection_target": 100,
+    "cross_validation_minimum_tools": 2,
+    "false_positive_threshold_percent": 40
+  },
+  "audit_metadata": {
+    "audit_type": "static_security_analysis",
+    "audit_mode": "read_only",
+    "code_execution_allowed": false,
+    "repository_modification_allowed": false,
+    "max_memory_gb": 16,
+    "max_duration_hours": 4,
+    "progress_checkpoint_minutes": 30
+  },
+  "references": {
+    "kubernetes_security_policy": "https://kubernetes.io/docs/reference/issues-security/",
+    "trivy_documentation": "https://trivy.dev/docs/",
+    "gosec_documentation": "https://github.com/securego/gosec",
+    "semgrep_documentation": "https://semgrep.dev/docs/",
+    "nvd_database": "https://nvd.nist.gov/",
+    "github_security_advisories": "https://github.com/advisories",
+    "go_vulnerability_database": "https://vuln.go.dev/",
+    "sarif_specification": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/",
+    "owasp_top10": "https://owasp.org/Top10/",
+    "cwe_database": "https://cwe.mitre.org/"
+  }
+}

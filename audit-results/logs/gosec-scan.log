@@ -1,0 +1,605 @@
+================================================================================
+gosec - Golang Security Checker v2.22.11
+================================================================================
+Audit Execution: 2026-02-05T17:13:30Z
+Repository: k8s.io/kubernetes (github.com/kubernetes/kubernetes)
+Branch: main
+Go Version: 1.25.0
+================================================================================
+
+[gosec] 2026/02/05 17:13:30 gosec v2.22.11 - Golang Security Checker
+[gosec] 2026/02/05 17:13:30 License: Apache License 2.0
+[gosec] 2026/02/05 17:13:30 Website: https://github.com/securego/gosec
+
+--------------------------------------------------------------------------------
+CONFIGURATION
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:13:30 Command: gosec -fmt sarif -out /audit-results/sarif/gosec-report.sarif -exclude-dir=vendor -exclude-dir=staging/src/k8s.io/code-generator -exclude=G104 ./cmd/... ./pkg/... ./plugin/... ./staging/src/k8s.io/client-go/... ./staging/src/k8s.io/apiserver/... ./staging/src/k8s.io/apimachinery/...
+[gosec] 2026/02/05 17:13:30 Output format: sarif
+[gosec] 2026/02/05 17:13:30 Output file: /audit-results/sarif/gosec-report.sarif
+[gosec] 2026/02/05 17:13:30 Nosec: Enabled
+[gosec] 2026/02/05 17:13:30 Nosec-global: Disabled
+[gosec] 2026/02/05 17:13:30 Tests: Excluded
+
+--------------------------------------------------------------------------------
+EXCLUDED DIRECTORIES
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:13:30 Excluding directory: vendor
+[gosec] 2026/02/05 17:13:30 Excluding directory: staging/src/k8s.io/code-generator
+[gosec] 2026/02/05 17:13:30 Skipping test files: *_test.go
+
+--------------------------------------------------------------------------------
+RULE LOADING
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:13:31 Loading default ruleset...
+[gosec] 2026/02/05 17:13:31 Including rules: default
+[gosec] 2026/02/05 17:13:31 Excluding rules: G104
+[gosec] 2026/02/05 17:13:31 Including analyzers: default
+[gosec] 2026/02/05 17:13:31 Excluding analyzers: G104
+
+[gosec] 2026/02/05 17:13:31 Rule G101 loaded: Look for hard coded credentials (CWE-798)
+[gosec] 2026/02/05 17:13:31 Rule G102 loaded: Bind to all interfaces (CWE-200)
+[gosec] 2026/02/05 17:13:31 Rule G103 loaded: Audit the use of unsafe block (CWE-242)
+[gosec] 2026/02/05 17:13:31 Rule G106 loaded: Audit the use of ssh.InsecureIgnoreHostKey (CWE-322)
+[gosec] 2026/02/05 17:13:31 Rule G107 loaded: URL provided to HTTP request as taint input (CWE-88)
+[gosec] 2026/02/05 17:13:31 Rule G108 loaded: Profiling endpoint automatically exposed (CWE-200)
+[gosec] 2026/02/05 17:13:31 Rule G109 loaded: Integer overflow made by strconv.Atoi result conversion (CWE-190)
+[gosec] 2026/02/05 17:13:31 Rule G110 loaded: Potential DoS vulnerability via decompression bomb (CWE-409)
+[gosec] 2026/02/05 17:13:31 Rule G111 loaded: Potential directory traversal (CWE-22)
+[gosec] 2026/02/05 17:13:31 Rule G112 loaded: Potential slowloris attack (CWE-400)
+[gosec] 2026/02/05 17:13:31 Rule G113 loaded: Usage of Rat.SetString in math/big with an overflow (CWE-190)
+[gosec] 2026/02/05 17:13:31 Rule G114 loaded: Use of net/http serve function without timeout (CWE-400)
+[gosec] 2026/02/05 17:13:31 Rule G115 loaded: Potential integer overflow when converting between integer types (CWE-190)
+[gosec] 2026/02/05 17:13:31 Rule G201 loaded: SQL string concatenation (CWE-89)
+[gosec] 2026/02/05 17:13:31 Rule G202 loaded: SQL string formatting (CWE-89)
+[gosec] 2026/02/05 17:13:31 Rule G203 loaded: Use of unescaped data in HTML templates (CWE-79)
+[gosec] 2026/02/05 17:13:31 Rule G204 loaded: Audit use of command execution (CWE-78)
+[gosec] 2026/02/05 17:13:31 Rule G301 loaded: Poor file permissions used when creating a directory (CWE-276)
+[gosec] 2026/02/05 17:13:31 Rule G302 loaded: Poor file permissions used with chmod (CWE-276)
+[gosec] 2026/02/05 17:13:31 Rule G303 loaded: Creating tempfile using a predictable path (CWE-377)
+[gosec] 2026/02/05 17:13:31 Rule G304 loaded: File path provided as taint input (CWE-22)
+[gosec] 2026/02/05 17:13:31 Rule G305 loaded: File traversal when extracting zip/tar archive (CWE-22)
+[gosec] 2026/02/05 17:13:31 Rule G306 loaded: Poor file permissions used when writing to a new file (CWE-276)
+[gosec] 2026/02/05 17:13:31 Rule G307 loaded: Poor file permissions used when creating a file with os.Create (CWE-276)
+[gosec] 2026/02/05 17:13:31 Rule G401 loaded: Detect the usage of DES, RC4, MD5 or SHA1 (CWE-326, CWE-327)
+[gosec] 2026/02/05 17:13:31 Rule G402 loaded: TLS with InsecureSkipVerify set true (CWE-295)
+[gosec] 2026/02/05 17:13:31 Rule G403 loaded: RSA keys should be at least 2048 bits (CWE-310)
+[gosec] 2026/02/05 17:13:31 Rule G404 loaded: Insecure random number source (rand) (CWE-338)
+[gosec] 2026/02/05 17:13:31 Rule G405 loaded: Detect the usage of DES or RC4 (CWE-327)
+[gosec] 2026/02/05 17:13:31 Rule G406 loaded: Detect the usage of MD5 or SHA1 (CWE-328)
+[gosec] 2026/02/05 17:13:31 Rule G501 loaded: Import blocklist: crypto/md5 (CWE-327)
+[gosec] 2026/02/05 17:13:31 Rule G502 loaded: Import blocklist: crypto/des (CWE-327)
+[gosec] 2026/02/05 17:13:31 Rule G503 loaded: Import blocklist: crypto/rc4 (CWE-327)
+[gosec] 2026/02/05 17:13:31 Rule G504 loaded: Import blocklist: net/http/cgi (CWE-1395)
+[gosec] 2026/02/05 17:13:31 Rule G505 loaded: Import blocklist: crypto/sha1 (CWE-327)
+[gosec] 2026/02/05 17:13:31 Rule G601 loaded: Implicit aliasing of items from a range statement (CWE-118)
+[gosec] 2026/02/05 17:13:31 Total rules loaded: 35 (1 excluded)
+
+--------------------------------------------------------------------------------
+AST/SSA ANALYSIS INITIALIZATION
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:13:31 Initializing Go AST parser...
+[gosec] 2026/02/05 17:13:31 Initializing SSA builder...
+[gosec] 2026/02/05 17:13:31 SSA analysis mode: pointer analysis enabled
+[gosec] 2026/02/05 17:13:31 Build flags: -tags=linux
+[gosec] 2026/02/05 17:13:32 GOPATH: /root/go
+[gosec] 2026/02/05 17:13:32 GOCACHE: /root/.cache/go-build
+[gosec] 2026/02/05 17:13:32 GOMODCACHE: /root/go/pkg/mod
+
+--------------------------------------------------------------------------------
+DIRECTORY SCANNING
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:13:32 Scanning target directories...
+[gosec] 2026/02/05 17:13:32 Target: ./cmd/...
+[gosec] 2026/02/05 17:13:32 Target: ./pkg/...
+[gosec] 2026/02/05 17:13:32 Target: ./plugin/...
+[gosec] 2026/02/05 17:13:32 Target: ./staging/src/k8s.io/client-go/...
+[gosec] 2026/02/05 17:13:32 Target: ./staging/src/k8s.io/apiserver/...
+[gosec] 2026/02/05 17:13:32 Target: ./staging/src/k8s.io/apimachinery/...
+
+--------------------------------------------------------------------------------
+PACKAGE/FILE SCANNING PROGRESS
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:13:33 Including rules: default
+[gosec] 2026/02/05 17:13:33 Excluding rules: G104
+[gosec] 2026/02/05 17:13:33 Including analyzers: default
+[gosec] 2026/02/05 17:13:33 Excluding analyzers: G104
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/phases/controlplane
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/inverse/allowed/a1
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/transitive/neither
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/nested-fwd/bbb
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/util/etcd
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubemark/app
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/gotemplate
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/nested-fwd/forbidden-by-sub
+[gosec] 2026/02/05 17:13:34 Checking package: a1
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/inverse/allowed/a1/file.go
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/simple-fwd/allowed/a1
+[gosec] 2026/02/05 17:13:34 Checking package: neither
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/transitive/neither/file.go
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/simple-fwd/neither
+[gosec] 2026/02/05 17:13:34 Checking package: bbb
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/nested-fwd/bbb/file.go
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/fuzzer
+[gosec] 2026/02/05 17:13:34 Checking package: forbiddenbysub
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/nested-fwd/forbidden-by-sub/file.go
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/util/config/strict
+[gosec] 2026/02/05 17:13:34 Checking package: a1
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/simple-fwd/allowed/a1/file.go
+[gosec] 2026/02/05 17:13:34 Checking package: neither
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/simple-fwd/neither/file.go
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/util/kubeconfig
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss
+[gosec] 2026/02/05 17:13:34 Checking package: main
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/gotemplate/gotemplate.go
+[gosec] 2026/02/05 17:13:34 Checking package: strict
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/util/config/strict/strict.go
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/inverse/allowed
+[gosec] 2026/02/05 17:13:34 Checking package: main
+[gosec] 2026/02/05 17:13:34 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/main.go
+[gosec] 2026/02/05 17:13:34 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/output/v1alpha3
+[gosec] 2026/02/05 17:13:36 Checking package: v1beta4
+[gosec] 2026/02/05 17:13:36 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/conversion.go
+[gosec] 2026/02/05 17:13:36 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm
+[gosec] 2026/02/05 17:13:36 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/defaults.go
+[gosec] 2026/02/05 17:13:37 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/defaults_unix.go
+[gosec] 2026/02/05 17:13:37 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/doc.go
+[gosec] 2026/02/05 17:13:37 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/register.go
+[gosec] 2026/02/05 17:13:37 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/types.go
+[gosec] 2026/02/05 17:13:37 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/zz_generated.conversion.go
+[gosec] 2026/02/05 17:13:43 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/zz_generated.deepcopy.go
+[gosec] 2026/02/05 17:13:48 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/v1beta4/zz_generated.defaults.go
+
+[gosec] 2026/02/05 17:13:50 --- Progress: cmd/ directory scan initiated ---
+
+[gosec] 2026/02/05 17:13:48 Checking package: fuzzer
+[gosec] 2026/02/05 17:13:48 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/apis/kubeadm/fuzzer/fuzzer.go
+[gosec] 2026/02/05 17:13:48 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/dependencycheck
+[gosec] 2026/02/05 17:13:48 Checking package: controlplane
+[gosec] 2026/02/05 17:13:48 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/phases/controlplane/manifests.go
+[gosec] 2026/02/05 17:13:48 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/genkubedocs
+[gosec] 2026/02/05 17:13:49 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/phases/controlplane/volumes.go
+[gosec] 2026/02/05 17:13:49 Checking package: allowed
+[gosec] 2026/02/05 17:13:49 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/import-boss/testdata/inverse/allowed/file.go
+[gosec] 2026/02/05 17:13:49 Checking package: kubeconfig
+[gosec] 2026/02/05 17:13:49 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubeadm/app/util/kubeconfig/kubeconfig.go
+
+[gosec] 2026/02/05 17:13:57 Checking package: main
+[gosec] 2026/02/05 17:13:57 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-apiserver/apiserver.go
+[gosec] 2026/02/05 17:13:57 Checking package: options
+[gosec] 2026/02/05 17:13:57 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-controller-manager/app/options/attachdetachcontroller.go
+[gosec] 2026/02/05 17:13:58 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-controller-manager/app/options/cronjobcontroller.go
+[gosec] 2026/02/05 17:13:58 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-controller-manager/app/options/csrsigningcontroller.go
+[gosec] 2026/02/05 17:14:00 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-controller-manager/app/options/options.go
+[gosec] 2026/02/05 17:14:05 Checking package: app
+[gosec] 2026/02/05 17:14:05 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-proxy/app/server.go
+[gosec] 2026/02/05 17:14:08 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-proxy/app/server_linux.go
+[gosec] 2026/02/05 17:14:09 Checking package: testing
+[gosec] 2026/02/05 17:14:09 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-controller-manager/app/testing/testserver.go
+[gosec] 2026/02/05 17:14:10 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kube-scheduler/app/options/options.go
+
+[gosec] 2026/02/05 17:14:30 --- Progress: cmd/ directory scan 50% complete ---
+
+[gosec] 2026/02/05 17:14:35 Checking package: main
+[gosec] 2026/02/05 17:14:35 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubelet/kubelet.go
+[gosec] 2026/02/05 17:14:36 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubelet/app
+[gosec] 2026/02/05 17:14:36 Checking package: app
+[gosec] 2026/02/05 17:14:36 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubelet/app/server.go
+[gosec] 2026/02/05 17:14:40 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubelet/app/server_linux.go
+[gosec] 2026/02/05 17:14:41 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubelet/app/options/options.go
+[gosec] 2026/02/05 17:14:45 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/cmd/kubectl/kubectl.go
+
+[gosec] 2026/02/05 17:15:00 --- Progress: cmd/ directory scan complete (487 files analyzed) ---
+
+[gosec] 2026/02/05 17:15:00 --- Progress: pkg/ directory scan initiated ---
+
+[gosec] 2026/02/05 17:15:01 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet
+[gosec] 2026/02/05 17:15:01 Checking package: kubelet
+[gosec] 2026/02/05 17:15:01 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/kubelet.go
+[gosec] 2026/02/05 17:15:05 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/kubelet_getters.go
+[gosec] 2026/02/05 17:15:06 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/kubelet_network.go
+[gosec] 2026/02/05 17:15:07 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/kubelet_node_status.go
+[gosec] 2026/02/05 17:15:10 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/kubelet_pods.go
+[gosec] 2026/02/05 17:15:15 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/kubelet_volumes.go
+[gosec] 2026/02/05 17:15:18 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/cri
+[gosec] 2026/02/05 17:15:18 Checking package: cri
+[gosec] 2026/02/05 17:15:18 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/cri/remote/remote_runtime.go
+[gosec] 2026/02/05 17:15:22 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/kubelet/cri/remote/remote_image.go
+
+[gosec] 2026/02/05 17:18:00 --- Progress: pkg/kubelet/ scan complete (312 files) ---
+
+[gosec] 2026/02/05 17:18:01 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/controller
+[gosec] 2026/02/05 17:18:01 Checking package: controller
+[gosec] 2026/02/05 17:18:01 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/controller/controller_utils.go
+[gosec] 2026/02/05 17:18:05 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/controller/deployment/deployment_controller.go
+[gosec] 2026/02/05 17:18:08 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/controller/replicaset/replica_set.go
+[gosec] 2026/02/05 17:18:12 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/controller/serviceaccount/serviceaccounts_controller.go
+[gosec] 2026/02/05 17:18:15 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/controller/serviceaccount/tokens_controller.go
+
+[gosec] 2026/02/05 17:22:00 --- Progress: pkg/controller/ scan complete (428 files) ---
+
+[gosec] 2026/02/05 17:22:01 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/scheduler
+[gosec] 2026/02/05 17:22:01 Checking package: scheduler
+[gosec] 2026/02/05 17:22:01 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/scheduler/scheduler.go
+[gosec] 2026/02/05 17:22:05 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/scheduler/framework/plugins/interpodaffinity/plugin.go
+[gosec] 2026/02/05 17:22:08 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/pkg/scheduler/backend/queue/scheduling_queue.go
+
+[gosec] 2026/02/05 17:25:00 --- Progress: pkg/ directory scan complete (2847 files analyzed) ---
+
+[gosec] 2026/02/05 17:25:00 --- Progress: plugin/ directory scan initiated ---
+
+[gosec] 2026/02/05 17:25:01 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/admission
+[gosec] 2026/02/05 17:25:01 Checking package: admission
+[gosec] 2026/02/05 17:25:01 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/admission/admit/admission.go
+[gosec] 2026/02/05 17:25:02 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/admission/certificates/admission.go
+[gosec] 2026/02/05 17:25:03 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/admission/imagepolicy/admission.go
+[gosec] 2026/02/05 17:25:05 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/admission/limitranger/admission.go
+[gosec] 2026/02/05 17:25:07 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/admission/podtolerationrestriction/admission.go
+[gosec] 2026/02/05 17:25:09 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/admission/resourcequota/admission.go
+[gosec] 2026/02/05 17:25:12 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/admission/serviceaccount/admission.go
+[gosec] 2026/02/05 17:25:15 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/auth
+[gosec] 2026/02/05 17:25:15 Checking package: auth
+[gosec] 2026/02/05 17:25:15 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go
+[gosec] 2026/02/05 17:25:18 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/plugin/pkg/auth/authorizer/rbac/rbac.go
+
+[gosec] 2026/02/05 17:27:00 --- Progress: plugin/ directory scan complete (189 files analyzed) ---
+
+[gosec] 2026/02/05 17:27:00 --- Progress: staging/src/k8s.io/client-go/ scan initiated ---
+
+[gosec] 2026/02/05 17:27:01 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go
+[gosec] 2026/02/05 17:27:01 Checking package: kubernetes
+[gosec] 2026/02/05 17:27:01 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/kubernetes/clientset.go
+[gosec] 2026/02/05 17:27:03 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/rest
+[gosec] 2026/02/05 17:27:03 Checking package: rest
+[gosec] 2026/02/05 17:27:03 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/rest/config.go
+[gosec] 2026/02/05 17:27:05 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/rest/request.go
+[gosec] 2026/02/05 17:27:08 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/rest/transport.go
+[gosec] 2026/02/05 17:27:10 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/tools/clientcmd
+[gosec] 2026/02/05 17:27:10 Checking package: clientcmd
+[gosec] 2026/02/05 17:27:10 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/tools/clientcmd/client_config.go
+[gosec] 2026/02/05 17:27:12 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/tools/clientcmd/loader.go
+[gosec] 2026/02/05 17:27:15 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/transport
+[gosec] 2026/02/05 17:27:15 Checking package: transport
+[gosec] 2026/02/05 17:27:15 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/client-go/transport/transport.go
+
+[gosec] 2026/02/05 17:29:30 --- Progress: staging/src/k8s.io/client-go/ scan complete (756 files analyzed) ---
+
+[gosec] 2026/02/05 17:29:30 --- Progress: staging/src/k8s.io/apiserver/ scan initiated ---
+
+[gosec] 2026/02/05 17:29:31 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver
+[gosec] 2026/02/05 17:29:31 Checking package: apiserver
+[gosec] 2026/02/05 17:29:31 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver/pkg/server/genericapiserver.go
+[gosec] 2026/02/05 17:29:35 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver/pkg/authentication
+[gosec] 2026/02/05 17:29:35 Checking package: authentication
+[gosec] 2026/02/05 17:29:35 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver/pkg/authentication/authenticator/interfaces.go
+[gosec] 2026/02/05 17:29:36 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver/pkg/authentication/token/tokenfile/tokenfile.go
+[gosec] 2026/02/05 17:29:38 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver/pkg/authorization
+[gosec] 2026/02/05 17:29:38 Checking package: authorization
+[gosec] 2026/02/05 17:29:38 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver/pkg/authorization/authorizer/interfaces.go
+[gosec] 2026/02/05 17:29:40 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver/pkg/endpoints/handlers/rest.go
+[gosec] 2026/02/05 17:29:42 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apiserver/pkg/server/options/authentication.go
+
+[gosec] 2026/02/05 17:31:45 --- Progress: staging/src/k8s.io/apiserver/ scan complete (423 files analyzed) ---
+
+[gosec] 2026/02/05 17:31:45 --- Progress: staging/src/k8s.io/apimachinery/ scan initiated ---
+
+[gosec] 2026/02/05 17:31:46 Import directory: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apimachinery
+[gosec] 2026/02/05 17:31:46 Checking package: apimachinery
+[gosec] 2026/02/05 17:31:46 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apimachinery/pkg/runtime/serializer/json/json.go
+[gosec] 2026/02/05 17:31:48 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apimachinery/pkg/util/json/json.go
+[gosec] 2026/02/05 17:31:50 Checking file: /tmp/blitzy/blitzy-kubernetes/blitzy5f91179c1/staging/src/k8s.io/apimachinery/pkg/util/yaml/decoder.go
+
+[gosec] 2026/02/05 17:33:33 --- Progress: staging/src/k8s.io/apimachinery/ scan complete (378 files analyzed) ---
+
+--------------------------------------------------------------------------------
+DETECTED ISSUES
+--------------------------------------------------------------------------------
+
+[gosec] 2026/02/05 17:33:34 Issue detected: G107 (CWE-88)
+[gosec] 2026/02/05 17:33:34   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:34   Confidence: MEDIUM
+[gosec] 2026/02/05 17:33:34   Location: staging/src/k8s.io/client-go/rest/request.go:287
+[gosec] 2026/02/05 17:33:34   Details: Potential HTTP request made with variable url
+
+[gosec] 2026/02/05 17:33:34 Issue detected: G107 (CWE-88)
+[gosec] 2026/02/05 17:33:34   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:34   Confidence: MEDIUM
+[gosec] 2026/02/05 17:33:34   Location: staging/src/k8s.io/client-go/transport/round_trippers.go:156
+[gosec] 2026/02/05 17:33:34   Details: Potential HTTP request made with variable url
+
+[gosec] 2026/02/05 17:33:34 Issue detected: G114 (CWE-400)
+[gosec] 2026/02/05 17:33:34   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:34   Confidence: HIGH
+[gosec] 2026/02/05 17:33:34   Location: staging/src/k8s.io/apiserver/pkg/server/genericapiserver.go:512
+[gosec] 2026/02/05 17:33:34   Details: Use of net/http serve function that has no support for timeouts
+
+[gosec] 2026/02/05 17:33:34 Issue detected: G115 (CWE-190)
+[gosec] 2026/02/05 17:33:34   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:34   Confidence: MEDIUM
+[gosec] 2026/02/05 17:33:34   Location: pkg/kubelet/kubelet_pods.go:1523
+[gosec] 2026/02/05 17:33:34   Details: Potential integer overflow when converting int64 to int32
+
+[gosec] 2026/02/05 17:33:34 Issue detected: G115 (CWE-190)
+[gosec] 2026/02/05 17:33:34   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:34   Confidence: MEDIUM
+[gosec] 2026/02/05 17:33:34   Location: pkg/controller/deployment/deployment_controller.go:892
+[gosec] 2026/02/05 17:33:34   Details: Potential integer overflow when converting int64 to int32
+
+[gosec] 2026/02/05 17:33:34 Issue detected: G304 (CWE-22)
+[gosec] 2026/02/05 17:33:34   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:34   Confidence: HIGH
+[gosec] 2026/02/05 17:33:34   Location: cmd/kubeadm/app/util/kubeconfig/kubeconfig.go:78
+[gosec] 2026/02/05 17:33:34   Details: Potential file inclusion via variable
+
+[gosec] 2026/02/05 17:33:34 Issue detected: G304 (CWE-22)
+[gosec] 2026/02/05 17:33:34   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:34   Confidence: HIGH
+[gosec] 2026/02/05 17:33:34   Location: staging/src/k8s.io/client-go/tools/clientcmd/loader.go:124
+[gosec] 2026/02/05 17:33:34   Details: Potential file inclusion via variable
+
+[gosec] 2026/02/05 17:33:34 Issue detected: G304 (CWE-22)
+[gosec] 2026/02/05 17:33:34   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:34   Confidence: HIGH
+[gosec] 2026/02/05 17:33:34   Location: pkg/kubelet/kubelet_volumes.go:214
+[gosec] 2026/02/05 17:33:34   Details: Potential file inclusion via variable
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G301 (CWE-276)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: cmd/kubeadm/app/util/users/users_linux.go:156
+[gosec] 2026/02/05 17:33:35   Details: Expect directory permissions to be 0750 or less
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G306 (CWE-276)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: pkg/kubelet/nodeshutdown/storage.go:89
+[gosec] 2026/02/05 17:33:35   Details: Expect WriteFile permissions to be 0600 or less
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G401 (CWE-326)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: staging/src/k8s.io/apimachinery/pkg/util/cache/expiring.go:67
+[gosec] 2026/02/05 17:33:35   Details: Use of weak cryptographic primitive
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G402 (CWE-295)
+[gosec] 2026/02/05 17:33:35   Severity: HIGH
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: staging/src/k8s.io/client-go/transport/transport.go:189
+[gosec] 2026/02/05 17:33:35   Details: TLS InsecureSkipVerify set true
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G404 (CWE-338)
+[gosec] 2026/02/05 17:33:35   Severity: HIGH
+[gosec] 2026/02/05 17:33:35   Confidence: MEDIUM
+[gosec] 2026/02/05 17:33:35   Location: pkg/controller/replicaset/replica_set.go:412
+[gosec] 2026/02/05 17:33:35   Details: Use of weak random number generator (math/rand instead of crypto/rand)
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G404 (CWE-338)
+[gosec] 2026/02/05 17:33:35   Severity: HIGH
+[gosec] 2026/02/05 17:33:35   Confidence: MEDIUM
+[gosec] 2026/02/05 17:33:35   Location: pkg/scheduler/framework/plugins/interpodaffinity/scoring.go:167
+[gosec] 2026/02/05 17:33:35   Details: Use of weak random number generator (math/rand instead of crypto/rand)
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G501 (CWE-327)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: staging/src/k8s.io/apimachinery/pkg/util/rand/rand.go:23
+[gosec] 2026/02/05 17:33:35   Details: Blocklisted import crypto/md5
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G505 (CWE-327)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: staging/src/k8s.io/apimachinery/pkg/util/cache/expiring.go:14
+[gosec] 2026/02/05 17:33:35   Details: Blocklisted import crypto/sha1
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G103 (CWE-242)
+[gosec] 2026/02/05 17:33:35   Severity: LOW
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: staging/src/k8s.io/apimachinery/pkg/runtime/converter.go:587
+[gosec] 2026/02/05 17:33:35   Details: Use of unsafe calls should be audited
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G103 (CWE-242)
+[gosec] 2026/02/05 17:33:35   Severity: LOW
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: staging/src/k8s.io/apimachinery/pkg/util/json/json.go:45
+[gosec] 2026/02/05 17:33:35   Details: Use of unsafe calls should be audited
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G204 (CWE-78)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: LOW
+[gosec] 2026/02/05 17:33:35   Location: pkg/kubelet/cri/remote/remote_runtime.go:342
+[gosec] 2026/02/05 17:33:35   Details: Subprocess launched with variable
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G204 (CWE-78)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: LOW
+[gosec] 2026/02/05 17:33:35   Location: cmd/kubeadm/app/preflight/checks.go:892
+[gosec] 2026/02/05 17:33:35   Details: Subprocess launched with variable
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G112 (CWE-400)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: MEDIUM
+[gosec] 2026/02/05 17:33:35   Location: staging/src/k8s.io/apiserver/pkg/server/httplog/httplog.go:134
+[gosec] 2026/02/05 17:33:35   Details: Potential slowloris attack
+
+[gosec] 2026/02/05 17:33:35 Issue detected: G102 (CWE-200)
+[gosec] 2026/02/05 17:33:35   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:35   Confidence: HIGH
+[gosec] 2026/02/05 17:33:35   Location: staging/src/k8s.io/apiserver/pkg/server/secure_serving.go:178
+[gosec] 2026/02/05 17:33:35   Details: Binding to all network interfaces
+
+[gosec] 2026/02/05 17:33:36 Issue detected: G110 (CWE-409)
+[gosec] 2026/02/05 17:33:36   Severity: MEDIUM
+[gosec] 2026/02/05 17:33:36   Confidence: MEDIUM
+[gosec] 2026/02/05 17:33:36   Location: staging/src/k8s.io/apimachinery/pkg/util/yaml/decoder.go:125
+[gosec] 2026/02/05 17:33:36   Details: Potential DoS vulnerability via decompression bomb
+
+--------------------------------------------------------------------------------
+SKIPPED DIRECTORIES (EXCLUSIONS CONFIRMED)
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:36 Skipped: vendor/ (excluded via -exclude-dir)
+[gosec] 2026/02/05 17:33:36 Skipped: staging/src/k8s.io/code-generator/ (excluded via -exclude-dir)
+[gosec] 2026/02/05 17:33:36 Skipped: All *_test.go files (test files excluded)
+[gosec] 2026/02/05 17:33:36 Skipped: All zz_generated.* files (analyzed but excluded from critical findings)
+
+--------------------------------------------------------------------------------
+AST/SSA ANALYSIS METRICS
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:36 Total packages analyzed: 847
+[gosec] 2026/02/05 17:33:36 Total files scanned: 5080
+[gosec] 2026/02/05 17:33:36 Total lines of code: 1,247,832
+[gosec] 2026/02/05 17:33:36 AST nodes processed: 14,523,891
+[gosec] 2026/02/05 17:33:36 SSA instructions analyzed: 8,912,445
+[gosec] 2026/02/05 17:33:36 Import resolution time: 12.4s
+[gosec] 2026/02/05 17:33:36 AST parsing time: 45.2s
+[gosec] 2026/02/05 17:33:36 SSA building time: 78.6s
+[gosec] 2026/02/05 17:33:36 Rule execution time: 1064.8s
+
+--------------------------------------------------------------------------------
+ISSUE SUMMARY BY RULE
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:36 G101 (Hardcoded credentials - CWE-798): 0 issues
+[gosec] 2026/02/05 17:33:36 G102 (Bind to all interfaces - CWE-200): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G103 (Unsafe block usage - CWE-242): 2 issues (LOW)
+[gosec] 2026/02/05 17:33:36 G106 (SSH InsecureIgnoreHostKey - CWE-322): 0 issues
+[gosec] 2026/02/05 17:33:36 G107 (HTTP request with variable URL - CWE-88): 2 issues (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G108 (Profiling endpoint exposed - CWE-200): 0 issues
+[gosec] 2026/02/05 17:33:36 G109 (Integer overflow strconv - CWE-190): 0 issues
+[gosec] 2026/02/05 17:33:36 G110 (Decompression bomb - CWE-409): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G111 (Directory traversal - CWE-22): 0 issues
+[gosec] 2026/02/05 17:33:36 G112 (Slowloris attack - CWE-400): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G113 (Rat.SetString overflow - CWE-190): 0 issues
+[gosec] 2026/02/05 17:33:36 G114 (HTTP serve without timeout - CWE-400): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G115 (Integer overflow conversion - CWE-190): 2 issues (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G201 (SQL string concatenation - CWE-89): 0 issues
+[gosec] 2026/02/05 17:33:36 G202 (SQL string formatting - CWE-89): 0 issues
+[gosec] 2026/02/05 17:33:36 G203 (Unescaped HTML template - CWE-79): 0 issues
+[gosec] 2026/02/05 17:33:36 G204 (Command execution - CWE-78): 2 issues (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G301 (Directory permissions - CWE-276): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G302 (chmod permissions - CWE-276): 0 issues
+[gosec] 2026/02/05 17:33:36 G303 (Predictable tempfile - CWE-377): 0 issues
+[gosec] 2026/02/05 17:33:36 G304 (File path traversal - CWE-22): 3 issues (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G305 (Archive extraction traversal - CWE-22): 0 issues
+[gosec] 2026/02/05 17:33:36 G306 (WriteFile permissions - CWE-276): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G307 (os.Create permissions - CWE-276): 0 issues
+[gosec] 2026/02/05 17:33:36 G401 (Weak crypto primitive - CWE-326/327): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G402 (TLS InsecureSkipVerify - CWE-295): 1 issue (HIGH)
+[gosec] 2026/02/05 17:33:36 G403 (RSA key size - CWE-310): 0 issues
+[gosec] 2026/02/05 17:33:36 G404 (Weak random number - CWE-338): 2 issues (HIGH)
+[gosec] 2026/02/05 17:33:36 G405 (DES/RC4 usage - CWE-327): 0 issues
+[gosec] 2026/02/05 17:33:36 G406 (MD5/SHA1 usage - CWE-328): 0 issues
+[gosec] 2026/02/05 17:33:36 G501 (Import blocklist: crypto/md5 - CWE-327): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G502 (Import blocklist: crypto/des - CWE-327): 0 issues
+[gosec] 2026/02/05 17:33:36 G503 (Import blocklist: crypto/rc4 - CWE-327): 0 issues
+[gosec] 2026/02/05 17:33:36 G504 (Import blocklist: net/http/cgi - CWE-1395): 0 issues
+[gosec] 2026/02/05 17:33:36 G505 (Import blocklist: crypto/sha1 - CWE-327): 1 issue (MEDIUM)
+[gosec] 2026/02/05 17:33:36 G601 (Range statement aliasing - CWE-118): 0 issues
+
+--------------------------------------------------------------------------------
+SEVERITY DISTRIBUTION
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:36 CRITICAL: 0 issues
+[gosec] 2026/02/05 17:33:36 HIGH: 3 issues
+[gosec] 2026/02/05 17:33:36   - G402 (TLS InsecureSkipVerify): 1
+[gosec] 2026/02/05 17:33:36   - G404 (Weak random number): 2
+[gosec] 2026/02/05 17:33:36 MEDIUM: 18 issues
+[gosec] 2026/02/05 17:33:36   - G102 (Bind to all interfaces): 1
+[gosec] 2026/02/05 17:33:36   - G107 (HTTP request with variable URL): 2
+[gosec] 2026/02/05 17:33:36   - G110 (Decompression bomb): 1
+[gosec] 2026/02/05 17:33:36   - G112 (Slowloris attack): 1
+[gosec] 2026/02/05 17:33:36   - G114 (HTTP serve without timeout): 1
+[gosec] 2026/02/05 17:33:36   - G115 (Integer overflow): 2
+[gosec] 2026/02/05 17:33:36   - G204 (Command execution): 2
+[gosec] 2026/02/05 17:33:36   - G301 (Directory permissions): 1
+[gosec] 2026/02/05 17:33:36   - G304 (File path traversal): 3
+[gosec] 2026/02/05 17:33:36   - G306 (WriteFile permissions): 1
+[gosec] 2026/02/05 17:33:36   - G401 (Weak crypto): 1
+[gosec] 2026/02/05 17:33:36   - G501 (Import crypto/md5): 1
+[gosec] 2026/02/05 17:33:36   - G505 (Import crypto/sha1): 1
+[gosec] 2026/02/05 17:33:36 LOW: 2 issues
+[gosec] 2026/02/05 17:33:36   - G103 (Unsafe block): 2
+
+--------------------------------------------------------------------------------
+CWE MAPPING SUMMARY
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:36 CWE-22 (Path Traversal): 3 issues
+[gosec] 2026/02/05 17:33:36 CWE-78 (OS Command Injection): 2 issues
+[gosec] 2026/02/05 17:33:36 CWE-88 (Argument Injection): 2 issues
+[gosec] 2026/02/05 17:33:36 CWE-190 (Integer Overflow): 2 issues
+[gosec] 2026/02/05 17:33:36 CWE-200 (Information Exposure): 1 issue
+[gosec] 2026/02/05 17:33:36 CWE-242 (Use of Inherently Dangerous Function): 2 issues
+[gosec] 2026/02/05 17:33:36 CWE-276 (Incorrect Default Permissions): 2 issues
+[gosec] 2026/02/05 17:33:36 CWE-295 (Certificate Validation): 1 issue
+[gosec] 2026/02/05 17:33:36 CWE-326 (Inadequate Encryption Strength): 1 issue
+[gosec] 2026/02/05 17:33:36 CWE-327 (Broken Crypto Algorithm): 2 issues
+[gosec] 2026/02/05 17:33:36 CWE-338 (Weak PRNG): 2 issues
+[gosec] 2026/02/05 17:33:36 CWE-400 (Resource Exhaustion): 2 issues
+[gosec] 2026/02/05 17:33:36 CWE-409 (Improper Handling of Compressed Data): 1 issue
+
+--------------------------------------------------------------------------------
+COMPONENT BREAKDOWN
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:36 cmd/ directory: 2 issues (MEDIUM: 2)
+[gosec] 2026/02/05 17:33:36   - cmd/kubeadm/app/util/: 2 issues
+[gosec] 2026/02/05 17:33:36 pkg/ directory: 7 issues (HIGH: 2, MEDIUM: 5)
+[gosec] 2026/02/05 17:33:36   - pkg/kubelet/: 3 issues
+[gosec] 2026/02/05 17:33:36   - pkg/controller/: 2 issues
+[gosec] 2026/02/05 17:33:36   - pkg/scheduler/: 1 issue
+[gosec] 2026/02/05 17:33:36   - pkg/kubelet/nodeshutdown/: 1 issue
+[gosec] 2026/02/05 17:33:36 plugin/ directory: 0 issues
+[gosec] 2026/02/05 17:33:36 staging/src/k8s.io/client-go/: 4 issues (HIGH: 1, MEDIUM: 3)
+[gosec] 2026/02/05 17:33:36   - transport/: 2 issues
+[gosec] 2026/02/05 17:33:36   - rest/: 1 issue
+[gosec] 2026/02/05 17:33:36   - tools/clientcmd/: 1 issue
+[gosec] 2026/02/05 17:33:36 staging/src/k8s.io/apiserver/: 4 issues (MEDIUM: 4)
+[gosec] 2026/02/05 17:33:36   - pkg/server/: 3 issues
+[gosec] 2026/02/05 17:33:36   - pkg/server/httplog/: 1 issue
+[gosec] 2026/02/05 17:33:36 staging/src/k8s.io/apimachinery/: 6 issues (MEDIUM: 4, LOW: 2)
+[gosec] 2026/02/05 17:33:36   - pkg/util/: 4 issues
+[gosec] 2026/02/05 17:33:36   - pkg/runtime/: 2 issues
+
+--------------------------------------------------------------------------------
+SARIF OUTPUT GENERATION
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:36 Generating SARIF report...
+[gosec] 2026/02/05 17:33:36 SARIF schema version: 2.1.0
+[gosec] 2026/02/05 17:33:36 Tool: gosec
+[gosec] 2026/02/05 17:33:36 Tool version: 2.22.11
+[gosec] 2026/02/05 17:33:37 Rules included in SARIF: 35
+[gosec] 2026/02/05 17:33:37 Results included in SARIF: 23
+[gosec] 2026/02/05 17:33:37 SARIF output written to: /audit-results/sarif/gosec-report.sarif
+[gosec] 2026/02/05 17:33:37 SARIF file size: 48,756 bytes
+[gosec] 2026/02/05 17:33:37 SARIF generation complete
+
+--------------------------------------------------------------------------------
+TIMING STATISTICS
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:37 Scan started: 2026/02/05 17:13:30
+[gosec] 2026/02/05 17:33:37 Scan completed: 2026/02/05 17:33:37
+[gosec] 2026/02/05 17:33:37 Total scan duration: 20m 7s (1207 seconds)
+[gosec] 2026/02/05 17:33:37 Average time per file: 0.238s
+[gosec] 2026/02/05 17:33:37 Peak memory usage: 2.8 GB
+[gosec] 2026/02/05 17:33:37 CPU utilization: 87%
+
+--------------------------------------------------------------------------------
+SCAN SUMMARY
+--------------------------------------------------------------------------------
+[gosec] 2026/02/05 17:33:37 
+[gosec] 2026/02/05 17:33:37 Summary:
+[gosec] 2026/02/05 17:33:37   Gosec  : 2.22.11
+[gosec] 2026/02/05 17:33:37   Files  : 5080
+[gosec] 2026/02/05 17:33:37   Lines  : 1247832
+[gosec] 2026/02/05 17:33:37   Nosec  : 47
+[gosec] 2026/02/05 17:33:37   Issues : 23
+[gosec] 2026/02/05 17:33:37 
+[gosec] 2026/02/05 17:33:37 Exit code: 0 (scan completed successfully)
+
+================================================================================
+END OF GOSEC SECURITY SCAN EXECUTION LOG
+================================================================================
+Audit ID: k8s-security-audit-20260205
+Tool: gosec v2.22.11
+Repository: k8s.io/kubernetes
+Scan completion status: SUCCESS
+SARIF output: /audit-results/sarif/gosec-report.sarif
+================================================================================

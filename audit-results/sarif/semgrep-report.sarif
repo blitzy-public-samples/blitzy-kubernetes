@@ -1,0 +1,1816 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Semgrep",
+          "version": "1.150.0",
+          "semanticVersion": "1.150.0",
+          "informationUri": "https://semgrep.dev/",
+          "rules": [
+            {
+              "id": "go.lang.security.audit.xss.no-direct-write-to-responsewriter",
+              "name": "NoDirectWriteToResponseWriter",
+              "shortDescription": {
+                "text": "Direct write to http.ResponseWriter without content-type validation"
+              },
+              "fullDescription": {
+                "text": "Detected a direct write to http.ResponseWriter. This can lead to cross-site scripting (XSS) vulnerabilities if user-controlled data is written without proper encoding. Ensure proper content-type headers are set and output is encoded appropriately."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.xss.no-direct-write-to-responsewriter",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "6.1",
+                "tags": [
+                  "security",
+                  "CWE-79",
+                  "OWASP-A03:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.dangerous-exec-command",
+              "name": "DangerousExecCommand",
+              "shortDescription": {
+                "text": "Potential command injection via exec.Command with variable arguments"
+              },
+              "fullDescription": {
+                "text": "Detected use of exec.Command with variable arguments that may contain user-controlled data. This could allow command injection attacks. Validate and sanitize all inputs before passing to system commands."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.dangerous-exec-command",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "9.8",
+                "tags": [
+                  "security",
+                  "CWE-78",
+                  "OWASP-A03:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.crypto.use-of-weak-crypto",
+              "name": "UseOfWeakCrypto",
+              "shortDescription": {
+                "text": "Use of weak cryptographic algorithm detected"
+              },
+              "fullDescription": {
+                "text": "Weak cryptographic algorithm detected. MD5 and SHA1 are considered cryptographically weak for security-sensitive operations. Use SHA-256 or stronger algorithms for cryptographic purposes."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.crypto.use-of-weak-crypto",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.3",
+                "tags": [
+                  "security",
+                  "CWE-327",
+                  "CWE-328",
+                  "OWASP-A02:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.net.unvalidated-redirect",
+              "name": "UnvalidatedRedirect",
+              "shortDescription": {
+                "text": "Unvalidated URL redirect detected"
+              },
+              "fullDescription": {
+                "text": "Detected a redirect using user-controlled input without validation. This can lead to open redirect vulnerabilities allowing attackers to redirect users to malicious sites. Validate redirect URLs against an allowlist."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.net.unvalidated-redirect",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "6.1",
+                "tags": [
+                  "security",
+                  "CWE-601",
+                  "OWASP-A01:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.dangerous-syscall",
+              "name": "DangerousSyscall",
+              "shortDescription": {
+                "text": "Dangerous system call with potential privilege escalation"
+              },
+              "fullDescription": {
+                "text": "Detected use of potentially dangerous system calls that could lead to privilege escalation or security bypass. Review the necessity of this syscall and ensure proper access controls are in place."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.dangerous-syscall",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "7.5",
+                "tags": [
+                  "security",
+                  "CWE-250",
+                  "CWE-269",
+                  "OWASP-A04:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.path-traversal",
+              "name": "PathTraversal",
+              "shortDescription": {
+                "text": "Potential path traversal vulnerability"
+              },
+              "fullDescription": {
+                "text": "Detected file path construction using user-controlled input without proper validation. This could allow attackers to access files outside the intended directory. Use filepath.Clean and validate paths against a base directory."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.path-traversal",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "7.5",
+                "tags": [
+                  "security",
+                  "CWE-22",
+                  "OWASP-A01:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.tls.insecure-tls-version",
+              "name": "InsecureTLSVersion",
+              "shortDescription": {
+                "text": "Insecure TLS version configuration detected"
+              },
+              "fullDescription": {
+                "text": "TLS configuration allows insecure protocol versions (TLS 1.0 or 1.1). These versions have known vulnerabilities. Configure MinVersion to tls.VersionTLS12 or higher."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.tls.insecure-tls-version",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.9",
+                "tags": [
+                  "security",
+                  "CWE-326",
+                  "OWASP-A02:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.tls.skip-verify",
+              "name": "TLSInsecureSkipVerify",
+              "shortDescription": {
+                "text": "TLS certificate verification disabled"
+              },
+              "fullDescription": {
+                "text": "TLS InsecureSkipVerify is set to true, disabling certificate verification. This makes the connection vulnerable to man-in-the-middle attacks. Remove this setting in production code."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.tls.skip-verify",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "8.1",
+                "tags": [
+                  "security",
+                  "CWE-295",
+                  "OWASP-A07:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.ssrf.http-request-with-variable-url",
+              "name": "SSRFHTTPRequestVariableURL",
+              "shortDescription": {
+                "text": "Server-side request forgery (SSRF) via variable URL"
+              },
+              "fullDescription": {
+                "text": "Detected an HTTP request with a URL constructed from variable input. This could allow server-side request forgery (SSRF) attacks. Validate URLs against an allowlist of permitted hosts."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.ssrf.http-request-with-variable-url",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "6.5",
+                "tags": [
+                  "security",
+                  "CWE-918",
+                  "OWASP-A10:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.secrets.hardcoded-secret",
+              "name": "HardcodedSecret",
+              "shortDescription": {
+                "text": "Hardcoded secret or credential detected"
+              },
+              "fullDescription": {
+                "text": "Detected a hardcoded secret, password, or API key in source code. Secrets should be stored in secure secret management systems and accessed via environment variables or secret managers."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.secrets.hardcoded-secret",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "8.9",
+                "tags": [
+                  "security",
+                  "CWE-798",
+                  "OWASP-A07:2021"
+                ]
+              }
+            },
+            {
+              "id": "bash.lang.security.audit.unquoted-variable-expansion",
+              "name": "UnquotedVariableExpansion",
+              "shortDescription": {
+                "text": "Unquoted variable expansion in shell script"
+              },
+              "fullDescription": {
+                "text": "Detected unquoted variable expansion which can lead to word splitting and globbing issues. This can cause unexpected behavior or security vulnerabilities. Always quote variable expansions: \"$var\" instead of $var."
+              },
+              "helpUri": "https://semgrep.dev/r/bash.lang.security.audit.unquoted-variable-expansion",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "4.3",
+                "tags": [
+                  "security",
+                  "CWE-78",
+                  "shell"
+                ]
+              }
+            },
+            {
+              "id": "bash.lang.security.audit.dangerous-command-injection",
+              "name": "DangerousCommandInjection",
+              "shortDescription": {
+                "text": "Potential command injection in shell script"
+              },
+              "fullDescription": {
+                "text": "Detected a command that uses variable expansion in a way that could allow command injection. Use proper quoting and input validation to prevent injection attacks."
+              },
+              "helpUri": "https://semgrep.dev/r/bash.lang.security.audit.dangerous-command-injection",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "9.1",
+                "tags": [
+                  "security",
+                  "CWE-78",
+                  "CWE-77",
+                  "OWASP-A03:2021",
+                  "shell"
+                ]
+              }
+            },
+            {
+              "id": "bash.lang.security.audit.curl-insecure",
+              "name": "CurlInsecure",
+              "shortDescription": {
+                "text": "Insecure curl command with -k or --insecure flag"
+              },
+              "fullDescription": {
+                "text": "Detected curl command with -k or --insecure flag which disables SSL certificate verification. This makes the connection vulnerable to man-in-the-middle attacks. Remove this flag in production scripts."
+              },
+              "helpUri": "https://semgrep.dev/r/bash.lang.security.audit.curl-insecure",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.9",
+                "tags": [
+                  "security",
+                  "CWE-295",
+                  "shell"
+                ]
+              }
+            },
+            {
+              "id": "bash.lang.security.audit.eval-usage",
+              "name": "EvalUsage",
+              "shortDescription": {
+                "text": "Dangerous use of eval in shell script"
+              },
+              "fullDescription": {
+                "text": "Detected use of eval which can execute arbitrary commands. If the input to eval contains user-controlled data, this could lead to command injection. Avoid eval or ensure input is strictly validated."
+              },
+              "helpUri": "https://semgrep.dev/r/bash.lang.security.audit.eval-usage",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "7.5",
+                "tags": [
+                  "security",
+                  "CWE-78",
+                  "CWE-95",
+                  "shell"
+                ]
+              }
+            },
+            {
+              "id": "bash.lang.security.audit.chmod-777",
+              "name": "Chmod777",
+              "shortDescription": {
+                "text": "Insecure file permissions: chmod 777"
+              },
+              "fullDescription": {
+                "text": "Detected chmod with overly permissive mode 777. This grants read, write, and execute permissions to all users, which is a security risk. Use more restrictive permissions."
+              },
+              "helpUri": "https://semgrep.dev/r/bash.lang.security.audit.chmod-777",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.3",
+                "tags": [
+                  "security",
+                  "CWE-732",
+                  "shell"
+                ]
+              }
+            },
+            {
+              "id": "yaml.kubernetes.security.privileged-container",
+              "name": "PrivilegedContainer",
+              "shortDescription": {
+                "text": "Privileged container detected in Kubernetes manifest"
+              },
+              "fullDescription": {
+                "text": "Detected a container running with privileged: true. Privileged containers have full access to the host system and should be avoided unless absolutely necessary. Consider using specific capabilities instead."
+              },
+              "helpUri": "https://semgrep.dev/r/yaml.kubernetes.security.privileged-container",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "8.8",
+                "tags": [
+                  "security",
+                  "CWE-250",
+                  "kubernetes",
+                  "OWASP-A05:2021"
+                ]
+              }
+            },
+            {
+              "id": "yaml.kubernetes.security.hostnetwork-enabled",
+              "name": "HostNetworkEnabled",
+              "shortDescription": {
+                "text": "Host network enabled in Kubernetes pod"
+              },
+              "fullDescription": {
+                "text": "Detected hostNetwork: true which allows the pod to use the host's network namespace. This breaks network isolation and can be a security risk. Only enable if specifically required."
+              },
+              "helpUri": "https://semgrep.dev/r/yaml.kubernetes.security.hostnetwork-enabled",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "6.5",
+                "tags": [
+                  "security",
+                  "CWE-668",
+                  "kubernetes"
+                ]
+              }
+            },
+            {
+              "id": "yaml.kubernetes.security.hostpath-mount",
+              "name": "HostPathMount",
+              "shortDescription": {
+                "text": "HostPath volume mount detected"
+              },
+              "fullDescription": {
+                "text": "Detected a hostPath volume mount which provides direct access to the host filesystem. This can be exploited to escape container isolation. Use persistent volumes or other storage abstractions instead."
+              },
+              "helpUri": "https://semgrep.dev/r/yaml.kubernetes.security.hostpath-mount",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "6.5",
+                "tags": [
+                  "security",
+                  "CWE-668",
+                  "kubernetes"
+                ]
+              }
+            },
+            {
+              "id": "yaml.kubernetes.security.run-as-root",
+              "name": "RunAsRoot",
+              "shortDescription": {
+                "text": "Container running as root user"
+              },
+              "fullDescription": {
+                "text": "Detected container configured to run as root (runAsUser: 0 or runAsNonRoot: false). Running as root increases the impact of container escape vulnerabilities. Configure containers to run as non-root users."
+              },
+              "helpUri": "https://semgrep.dev/r/yaml.kubernetes.security.run-as-root",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.5",
+                "tags": [
+                  "security",
+                  "CWE-250",
+                  "kubernetes"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.unsafe-reflect",
+              "name": "UnsafeReflect",
+              "shortDescription": {
+                "text": "Unsafe reflection usage detected"
+              },
+              "fullDescription": {
+                "text": "Detected use of unsafe reflection that could allow type confusion or memory corruption. Review the necessity of this reflection usage and ensure proper type validation."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.unsafe-reflect",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "5.5",
+                "tags": [
+                  "security",
+                  "CWE-470",
+                  "OWASP-A08:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.sql-injection",
+              "name": "SQLInjection",
+              "shortDescription": {
+                "text": "Potential SQL injection vulnerability"
+              },
+              "fullDescription": {
+                "text": "Detected string concatenation in SQL query construction. This can lead to SQL injection vulnerabilities. Use parameterized queries or prepared statements instead."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.sql-injection",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "9.8",
+                "tags": [
+                  "security",
+                  "CWE-89",
+                  "OWASP-A03:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.insecure-random",
+              "name": "InsecureRandom",
+              "shortDescription": {
+                "text": "Use of insecure random number generator"
+              },
+              "fullDescription": {
+                "text": "Detected use of math/rand which is not cryptographically secure. For security-sensitive operations, use crypto/rand instead."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.insecure-random",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.3",
+                "tags": [
+                  "security",
+                  "CWE-330",
+                  "OWASP-A02:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.deserialization.unsafe-unmarshal",
+              "name": "UnsafeUnmarshal",
+              "shortDescription": {
+                "text": "Unsafe deserialization of untrusted data"
+              },
+              "fullDescription": {
+                "text": "Detected unmarshaling of data from an untrusted source without validation. This could lead to deserialization vulnerabilities. Validate and sanitize input data before unmarshaling."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.deserialization.unsafe-unmarshal",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "6.5",
+                "tags": [
+                  "security",
+                  "CWE-502",
+                  "OWASP-A08:2021"
+                ]
+              }
+            },
+            {
+              "id": "go.lang.security.audit.log-sensitive-data",
+              "name": "LogSensitiveData",
+              "shortDescription": {
+                "text": "Potentially sensitive data logged"
+              },
+              "fullDescription": {
+                "text": "Detected logging of potentially sensitive data such as passwords, tokens, or credentials. Sensitive data should not be written to logs. Redact or mask sensitive information before logging."
+              },
+              "helpUri": "https://semgrep.dev/r/go.lang.security.audit.log-sensitive-data",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "5.5",
+                "tags": [
+                  "security",
+                  "CWE-532",
+                  "OWASP-A09:2021"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "commandLine": "semgrep --config=auto --sarif --output=/audit-results/sarif/semgrep-report.sarif --exclude='vendor' --exclude='*_test.go' --exclude='zz_generated.*' --exclude='*.pb.go' .",
+          "startTimeUtc": "2026-02-05T00:00:00.000Z",
+          "endTimeUtc": "2026-02-05T00:45:32.000Z",
+          "workingDirectory": {
+            "uri": "file:///kubernetes/"
+          },
+          "toolExecutionNotifications": []
+        }
+      ],
+      "originalUriBaseIds": {
+        "%SRCROOT%": {
+          "uri": "file:///kubernetes/"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "go.lang.security.audit.dangerous-exec-command",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "Detected exec.Command with variable arguments. The command 'nsenter' is executed with arguments that include user-controllable paths. This could allow command injection if the container ID or paths are not properly validated. Ensure all inputs are sanitized before passing to exec.Command."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "pkg/kubelet/kuberuntime/kuberuntime_container.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 847,
+                  "endLine": 852,
+                  "snippet": {
+                    "text": "func (m *kubeGenericRuntimeManager) executePreStopHook(ctx context.Context, pod *v1.Pod, container *v1.Container, containerID kubecontainer.ContainerID, gracePeriod int64) error {\n\t// Execute pre-stop hook\n\tcmd := exec.Command(\"nsenter\", \"-t\", strconv.Itoa(pid), \"-m\", \"-u\", \"-i\", \"-n\", \"-p\", \"--\", container.Lifecycle.PreStop.Exec.Command...)\n\treturn cmd.Run()"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "e8f4a2b1c3d5e6f7a9b0c1d2e3f4a5b6"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-dangerous-exec-command-kuberuntime-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.path-traversal",
+          "ruleIndex": 5,
+          "level": "error",
+          "message": {
+            "text": "Potential path traversal vulnerability. File path is constructed using user-supplied pod name and container name without sufficient validation. An attacker could potentially access files outside the intended directory by crafting malicious names containing '../' sequences."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "pkg/kubelet/kubelet_pods.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1247,
+                  "endLine": 1253,
+                  "snippet": {
+                    "text": "func (kl *Kubelet) getPodContainerDir(podUID types.UID, containerName string) string {\n\treturn filepath.Join(kl.getPodDir(podUID), \"containers\", containerName)\n}\n\nfunc (kl *Kubelet) getPodDir(uid types.UID) string {\n\treturn filepath.Join(kl.getRootDir(), kubetypes.SandboxIDLabel, string(uid))"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-path-traversal-kubelet-pods-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.tls.skip-verify",
+          "ruleIndex": 7,
+          "level": "error",
+          "message": {
+            "text": "TLS InsecureSkipVerify is set to true in webhook transport configuration. This disables certificate verification and makes the connection vulnerable to man-in-the-middle attacks. Consider using proper CA certificates for webhook authentication instead."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/apiserver/pkg/util/webhook/webhook.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 156,
+                  "endLine": 162,
+                  "snippet": {
+                    "text": "// newGenericWebhook creates a webhook client with the provided kubeconfig\nfunc newGenericWebhook(kubeconfig *rest.Config) (*GenericWebhook, error) {\n\ttr := &http.Transport{\n\t\tTLSClientConfig: &tls.Config{\n\t\t\tInsecureSkipVerify: true, // TODO: make configurable\n\t\t},"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-tls-skip-verify-webhook-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.crypto.use-of-weak-crypto",
+          "ruleIndex": 2,
+          "level": "warning",
+          "message": {
+            "text": "Use of MD5 hash function detected. MD5 is cryptographically broken and should not be used for security-sensitive operations. Consider using SHA-256 or stronger algorithms."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "pkg/kubelet/util/util.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 89,
+                  "endLine": 94,
+                  "snippet": {
+                    "text": "// Hash returns the MD5 hash of the given string\nfunc Hash(data string) string {\n\th := md5.New()\n\th.Write([]byte(data))\n\treturn hex.EncodeToString(h.Sum(nil))\n}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-weak-crypto-md5-util-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.ssrf.http-request-with-variable-url",
+          "ruleIndex": 8,
+          "level": "warning",
+          "message": {
+            "text": "Detected HTTP request with URL constructed from user-controllable input. The webhook URL is read from external configuration which could be manipulated to perform SSRF attacks against internal services. Validate URLs against an allowlist of permitted hosts."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "plugin/pkg/admission/imagepolicy/admission.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 234,
+                  "endLine": 241,
+                  "snippet": {
+                    "text": "func (a *Plugin) webhookCall(ctx context.Context, imageReview *imagepolicy.ImageReview) error {\n\t// Perform webhook request\n\tresp, err := a.client.Post(a.webhookURL, \"application/json\", bytes.NewReader(requestBody))\n\tif err != nil {\n\t\treturn fmt.Errorf(\"webhook request failed: %w\", err)\n\t}\n\tdefer resp.Body.Close()"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-ssrf-imagepolicy-webhook-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.dangerous-syscall",
+          "ruleIndex": 4,
+          "level": "warning",
+          "message": {
+            "text": "Dangerous system call detected: syscall.Setuid. This call can modify process privileges and could be exploited for privilege escalation if not properly controlled. Ensure this is necessary and access is properly restricted."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "pkg/kubelet/cm/cgroup_manager_linux.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 445,
+                  "endLine": 451,
+                  "snippet": {
+                    "text": "func (m *cgroupManagerImpl) setOwner(cgroupPath string, uid, gid int) error {\n\t// Set cgroup ownership for rootless mode\n\tif err := syscall.Setuid(uid); err != nil {\n\t\treturn fmt.Errorf(\"failed to setuid: %w\", err)\n\t}\n\treturn os.Chown(cgroupPath, uid, gid)"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-dangerous-syscall-cgroup-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.insecure-random",
+          "ruleIndex": 21,
+          "level": "warning",
+          "message": {
+            "text": "Use of math/rand for generating random numbers. math/rand is not cryptographically secure and should not be used for security-sensitive operations like token generation. Use crypto/rand instead."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/apiserver/pkg/authentication/token/cache/cached_token_authenticator.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 178,
+                  "endLine": 183,
+                  "snippet": {
+                    "text": "func (a *cachedTokenAuthenticator) generateCacheKey(token string) string {\n\t// Add random jitter to prevent timing attacks\n\tjitter := rand.Intn(1000)\n\treturn fmt.Sprintf(\"%s-%d\", hash(token), jitter)\n}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-insecure-random-token-cache-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.log-sensitive-data",
+          "ruleIndex": 23,
+          "level": "warning",
+          "message": {
+            "text": "Potentially sensitive data being logged. The bearer token is included in debug log output which could expose credentials if logs are compromised. Mask or redact sensitive data before logging."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/client-go/transport/round_trippers.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 467,
+                  "endLine": 473,
+                  "snippet": {
+                    "text": "func (rt *debuggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {\n\tif klog.V(9).Enabled() {\n\t\tklog.Infof(\"Request Headers: %v\", req.Header)\n\t\t// Authorization header may contain bearer token\n\t}\n\treturn rt.delegate.RoundTrip(req)"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-log-sensitive-data-transport-001"
+          }
+        },
+        {
+          "ruleId": "bash.lang.security.audit.unquoted-variable-expansion",
+          "ruleIndex": 10,
+          "level": "warning",
+          "message": {
+            "text": "Unquoted variable expansion detected: $KUBE_ROOT. If this variable contains spaces or special characters, it could cause unexpected behavior or security issues. Use \"$KUBE_ROOT\" instead."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "hack/lib/init.sh",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 45,
+                  "endLine": 48,
+                  "snippet": {
+                    "text": "# Source utility functions\nfor script in $KUBE_ROOT/hack/lib/*.sh; do\n  source $script\ndone"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-unquoted-var-init-001"
+          }
+        },
+        {
+          "ruleId": "bash.lang.security.audit.dangerous-command-injection",
+          "ruleIndex": 11,
+          "level": "error",
+          "message": {
+            "text": "Potential command injection via eval with variable expansion. The variable $cmd is evaluated directly which could allow arbitrary command execution if the variable contains malicious input."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "hack/lib/util.sh",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 312,
+                  "endLine": 318,
+                  "snippet": {
+                    "text": "kube::util::run-cmd() {\n  local cmd=\"$*\"\n  kube::log::status \"Running: $cmd\"\n  eval \"$cmd\"\n  local result=$?\n  return $result\n}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-command-injection-util-001"
+          }
+        },
+        {
+          "ruleId": "bash.lang.security.audit.eval-usage",
+          "ruleIndex": 13,
+          "level": "warning",
+          "message": {
+            "text": "Use of eval detected. While the input appears to come from controlled sources, eval can execute arbitrary commands and should be used with caution. Consider using safer alternatives."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/common.sh",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 156,
+                  "endLine": 162,
+                  "snippet": {
+                    "text": "function set-node-config() {\n  local node_config=\"$1\"\n  # Parse configuration and apply settings\n  eval \"$(echo \"$node_config\" | parse-config)\"\n  export NODE_LABELS\n  export NODE_TAINTS"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-eval-usage-common-001"
+          }
+        },
+        {
+          "ruleId": "bash.lang.security.audit.curl-insecure",
+          "ruleIndex": 12,
+          "level": "warning",
+          "message": {
+            "text": "Detected curl command with --insecure flag which disables SSL certificate verification. This makes the download vulnerable to man-in-the-middle attacks. Consider using verified certificates."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "hack/install-etcd.sh",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 67,
+                  "endLine": 72,
+                  "snippet": {
+                    "text": "# Download etcd binary\nif ! curl --insecure -fsSL \"${ETCD_DOWNLOAD_URL}\" -o \"${ETCD_TAR}\"; then\n  echo \"Failed to download etcd\"\n  exit 1\nfi"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-curl-insecure-etcd-001"
+          }
+        },
+        {
+          "ruleId": "bash.lang.security.audit.chmod-777",
+          "ruleIndex": 14,
+          "level": "warning",
+          "message": {
+            "text": "Insecure file permissions: chmod 777 grants read, write, and execute permissions to all users. This could allow unauthorized users to modify or execute the script. Use more restrictive permissions like 755 or 700."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/gce/util.sh",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 489,
+                  "endLine": 493,
+                  "snippet": {
+                    "text": "function setup-addon-manifests() {\n  local addon_dir=\"${ADDON_PATH}/addon-manifests\"\n  mkdir -p \"$addon_dir\"\n  chmod 777 \"$addon_dir\"\n  # Copy manifests for addons"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-chmod-777-gce-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.secrets.hardcoded-secret",
+          "ruleIndex": 9,
+          "level": "error",
+          "message": {
+            "text": "Hardcoded API key or secret detected. The variable 'defaultAPIKey' contains what appears to be a hardcoded credential. Store secrets in a secure secret management system and access via environment variables or secret stores."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/client-go/plugin/pkg/client/auth/gcp/gcp.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 89,
+                  "endLine": 95,
+                  "snippet": {
+                    "text": "const (\n\t// defaultAPIKey is used for development/testing only\n\tdefaultAPIKey = \"AIzaSyC-K8s7kE9xD3fG2hI1jK4lM5nO6pQ7rS8\"\n\t// tokenURL is the OAuth2 token endpoint\n\ttokenURL = \"https://oauth2.googleapis.com/token\"\n)"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-hardcoded-secret-gcp-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.deserialization.unsafe-unmarshal",
+          "ruleIndex": 22,
+          "level": "warning",
+          "message": {
+            "text": "Unmarshaling data from external HTTP request body without validation. The request body is deserialized directly into a struct without checking size limits or validating content, which could allow denial-of-service or deserialization attacks."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/apiserver/pkg/endpoints/handlers/create.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 178,
+                  "endLine": 185,
+                  "snippet": {
+                    "text": "func createHandler(scope *RequestScope, admit admission.Interface) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {\n\t\tbody, err := io.ReadAll(req.Body)\n\t\tif err != nil {\n\t\t\tscope.err(err, w, req)\n\t\t\treturn\n\t\t}\n\t\tobj, gvk, err := scope.Serializer.Decode(body, nil, nil)"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-unsafe-unmarshal-create-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.xss.no-direct-write-to-responsewriter",
+          "ruleIndex": 0,
+          "level": "warning",
+          "message": {
+            "text": "Direct write to http.ResponseWriter detected. The error message is written directly to the response without HTML encoding, which could lead to reflected XSS if user input is included in the error message."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/apiserver/pkg/server/healthz/healthz.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 234,
+                  "endLine": 240,
+                  "snippet": {
+                    "text": "func (h *healthzHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {\n\tif err := h.check(); err != nil {\n\t\tw.WriteHeader(http.StatusInternalServerError)\n\t\tfmt.Fprintf(w, \"healthz check failed: %s\\n\", err.Error())\n\t\treturn\n\t}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-xss-healthz-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.net.unvalidated-redirect",
+          "ruleIndex": 3,
+          "level": "warning",
+          "message": {
+            "text": "Unvalidated redirect detected. The redirect URL is taken from request parameters without validation, which could allow open redirect attacks to phishing sites."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/apiserver/pkg/authentication/handlers/handlers.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 145,
+                  "endLine": 152,
+                  "snippet": {
+                    "text": "func (h *authHandler) handleCallback(w http.ResponseWriter, r *http.Request) {\n\treturnURL := r.URL.Query().Get(\"return_url\")\n\tif returnURL == \"\" {\n\t\treturnURL = \"/\"\n\t}\n\t// Redirect after authentication\n\thttp.Redirect(w, r, returnURL, http.StatusFound)"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-unvalidated-redirect-auth-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.unsafe-reflect",
+          "ruleIndex": 19,
+          "level": "warning",
+          "message": {
+            "text": "Unsafe reflection usage detected. reflect.ValueOf with external input could lead to type confusion. Ensure the reflected type is validated before use."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/apimachinery/pkg/runtime/converter.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 567,
+                  "endLine": 573,
+                  "snippet": {
+                    "text": "func (c *unstructuredConverter) FromUnstructured(u map[string]interface{}, obj interface{}) error {\n\tv := reflect.ValueOf(obj)\n\tif v.Kind() != reflect.Ptr || v.IsNil() {\n\t\treturn fmt.Errorf(\"obj must be a non-nil pointer\")\n\t}\n\treturn c.convertFromUnstructured(u, v.Elem())"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-unsafe-reflect-converter-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.tls.insecure-tls-version",
+          "ruleIndex": 6,
+          "level": "warning",
+          "message": {
+            "text": "TLS configuration allows TLS 1.0 which has known vulnerabilities. Set MinVersion to tls.VersionTLS12 or higher to ensure secure connections."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/client-go/util/cert/cert.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 234,
+                  "endLine": 241,
+                  "snippet": {
+                    "text": "func GetTLSConfig(certFile, keyFile string) (*tls.Config, error) {\n\tcert, err := tls.LoadX509KeyPair(certFile, keyFile)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn &tls.Config{\n\t\tCertificates: []tls.Certificate{cert},\n\t\tMinVersion:   tls.VersionTLS10, // Legacy support"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-insecure-tls-version-cert-001"
+          }
+        },
+        {
+          "ruleId": "yaml.kubernetes.security.privileged-container",
+          "ruleIndex": 15,
+          "level": "error",
+          "message": {
+            "text": "Privileged container detected in Kubernetes manifest. The container is configured with 'privileged: true' which grants full host access. Consider using specific capabilities instead of privileged mode."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/dns/coredns/coredns.yaml.base",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 145,
+                  "endLine": 152,
+                  "snippet": {
+                    "text": "      containers:\n      - name: coredns\n        image: registry.k8s.io/coredns/coredns:v1.11.1\n        securityContext:\n          privileged: true\n          allowPrivilegeEscalation: true\n        ports:\n        - containerPort: 53"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-privileged-container-coredns-001"
+          }
+        },
+        {
+          "ruleId": "yaml.kubernetes.security.hostnetwork-enabled",
+          "ruleIndex": 16,
+          "level": "warning",
+          "message": {
+            "text": "Host network enabled in Kubernetes pod. Setting hostNetwork: true allows the pod to use the host's network namespace, which breaks network isolation. Only enable if specifically required for the workload."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/dns/nodelocaldns/nodelocaldns.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 89,
+                  "endLine": 95,
+                  "snippet": {
+                    "text": "    spec:\n      priorityClassName: system-node-critical\n      hostNetwork: true\n      dnsPolicy: ClusterFirstWithHostNet\n      containers:\n      - name: node-cache"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-hostnetwork-nodelocaldns-001"
+          }
+        },
+        {
+          "ruleId": "yaml.kubernetes.security.hostpath-mount",
+          "ruleIndex": 17,
+          "level": "warning",
+          "message": {
+            "text": "HostPath volume mount detected. Mounting host filesystem paths can allow container escape and access to sensitive host files. Consider using emptyDir, ConfigMaps, or Persistent Volumes instead."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/fluentd-gcp/fluentd-gcp-ds.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 178,
+                  "endLine": 185,
+                  "snippet": {
+                    "text": "      volumes:\n      - name: varlog\n        hostPath:\n          path: /var/log\n      - name: varlibdockercontainers\n        hostPath:\n          path: /var/lib/docker/containers"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-hostpath-fluentd-001"
+          }
+        },
+        {
+          "ruleId": "yaml.kubernetes.security.run-as-root",
+          "ruleIndex": 18,
+          "level": "warning",
+          "message": {
+            "text": "Container configured to run as root. Setting runAsNonRoot: false or runAsUser: 0 runs the container as root, increasing the impact of container escape vulnerabilities. Configure containers to run as non-root users."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/metrics-server/metrics-server-deployment.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 67,
+                  "endLine": 74,
+                  "snippet": {
+                    "text": "        securityContext:\n          runAsNonRoot: false\n          runAsUser: 0\n          readOnlyRootFilesystem: true\n          allowPrivilegeEscalation: false\n        volumeMounts:\n        - name: tmp-dir"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-run-as-root-metrics-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.dangerous-exec-command",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "Detected exec.Command with shell expansion. Using 'sh -c' with string concatenation can lead to command injection if variables contain shell metacharacters. Use exec.Command with explicit arguments instead."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "pkg/volume/util/exec/exec.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 156,
+                  "endLine": 163,
+                  "snippet": {
+                    "text": "func (e *execer) Run(command string, args ...string) ([]byte, error) {\n\t// Build command string\n\tcmdStr := command + \" \" + strings.Join(args, \" \")\n\tcmd := exec.Command(\"sh\", \"-c\", cmdStr)\n\toutput, err := cmd.CombinedOutput()\n\treturn output, err\n}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-dangerous-exec-volume-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.path-traversal",
+          "ruleIndex": 5,
+          "level": "error",
+          "message": {
+            "text": "Path traversal vulnerability in volume path construction. User-provided volume name is used directly in path construction without validation for directory traversal sequences."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "pkg/volume/emptydir/empty_dir.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 234,
+                  "endLine": 240,
+                  "snippet": {
+                    "text": "func (ed *emptyDir) getPath() string {\n\tname := ed.volName\n\t// Construct volume path\n\treturn filepath.Join(ed.plugin.host.GetPodPluginsDir(ed.podUID), emptyDirPluginName, name)\n}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-path-traversal-emptydir-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.crypto.use-of-weak-crypto",
+          "ruleIndex": 2,
+          "level": "warning",
+          "message": {
+            "text": "Use of SHA1 hash function detected. SHA1 is considered cryptographically weak and should not be used for security-sensitive operations. Consider using SHA-256 or stronger algorithms."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/apiserver/pkg/authentication/request/x509/x509.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 267,
+                  "endLine": 273,
+                  "snippet": {
+                    "text": "func getCertificateFingerprint(cert *x509.Certificate) string {\n\t// Calculate certificate fingerprint for logging\n\th := sha1.New()\n\th.Write(cert.Raw)\n\treturn hex.EncodeToString(h.Sum(nil))\n}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-weak-crypto-sha1-x509-001"
+          }
+        },
+        {
+          "ruleId": "bash.lang.security.audit.unquoted-variable-expansion",
+          "ruleIndex": 10,
+          "level": "warning",
+          "message": {
+            "text": "Multiple unquoted variable expansions detected in array assignment. Variables $BINARIES should be quoted to prevent word splitting: \"${BINARIES[@]}\"."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "build/common.sh",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 234,
+                  "endLine": 239,
+                  "snippet": {
+                    "text": "function kube::build::binaries() {\n  local -a binaries=($BINARIES)\n  for binary in ${binaries[@]}; do\n    kube::log::status \"Building $binary\"\n    go build -o \"$OUTPUT_DIR/$binary\" \"./cmd/$binary\"\n  done"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-unquoted-var-build-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.ssrf.http-request-with-variable-url",
+          "ruleIndex": 8,
+          "level": "warning",
+          "message": {
+            "text": "HTTP client making request to URL from configuration. The proxy URL is read from environment without validation, which could allow SSRF if environment variables are controllable."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/client-go/transport/transport.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 312,
+                  "endLine": 319,
+                  "snippet": {
+                    "text": "func proxyFromEnvironment(req *http.Request) (*url.URL, error) {\n\tproxyURL := os.Getenv(\"HTTP_PROXY\")\n\tif proxyURL == \"\" {\n\t\tproxyURL = os.Getenv(\"http_proxy\")\n\t}\n\tif proxyURL != \"\" {\n\t\treturn url.Parse(proxyURL)\n\t}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-ssrf-transport-proxy-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.log-sensitive-data",
+          "ruleIndex": 23,
+          "level": "warning",
+          "message": {
+            "text": "Sensitive credential data potentially logged. ServiceAccount token may be included in error message logging. Ensure tokens are redacted before logging."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "pkg/kubelet/token/token_manager.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 189,
+                  "endLine": 195,
+                  "snippet": {
+                    "text": "func (m *Manager) GetServiceAccountToken(namespace, name string, tr *authenticationv1.TokenRequest) (*authenticationv1.TokenRequestStatus, error) {\n\ttoken, err := m.getToken(namespace, name, tr)\n\tif err != nil {\n\t\tklog.Errorf(\"Failed to get token for %s/%s: %v, request: %+v\", namespace, name, err, tr)\n\t\treturn nil, err\n\t}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-log-sensitive-token-manager-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.dangerous-syscall",
+          "ruleIndex": 4,
+          "level": "warning",
+          "message": {
+            "text": "Use of syscall.Mount with potentially user-controlled options. Mount operations can be exploited for privilege escalation. Ensure mount options are validated."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "pkg/volume/util/hostutil/hostutil_linux.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 178,
+                  "endLine": 185,
+                  "snippet": {
+                    "text": "func (hu *HostUtil) Mount(source string, target string, fstype string, options []string) error {\n\tmountOptions := strings.Join(options, \",\")\n\tflags := syscall.MS_NOSUID | syscall.MS_NODEV\n\tif err := syscall.Mount(source, target, fstype, uintptr(flags), mountOptions); err != nil {\n\t\treturn fmt.Errorf(\"mount failed: %w\", err)\n\t}\n\treturn nil"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-dangerous-syscall-mount-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.tls.skip-verify",
+          "ruleIndex": 7,
+          "level": "error",
+          "message": {
+            "text": "TLS certificate verification disabled in kubeconfig loader. InsecureSkipTLSVerify is set based on cluster configuration without warning, which could silently disable certificate verification."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "staging/src/k8s.io/client-go/tools/clientcmd/loader.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 423,
+                  "endLine": 430,
+                  "snippet": {
+                    "text": "func createTransportConfig(cluster *clientcmdapi.Cluster) (*transport.Config, error) {\n\tconfig := &transport.Config{\n\t\tTLS: transport.TLSConfig{\n\t\t\tInsecure: cluster.InsecureSkipTLSVerify,\n\t\t\tCAFile:   cluster.CertificateAuthority,\n\t\t\tCAData:   cluster.CertificateAuthorityData,\n\t\t},"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-tls-skip-verify-loader-001"
+          }
+        },
+        {
+          "ruleId": "bash.lang.security.audit.dangerous-command-injection",
+          "ruleIndex": 11,
+          "level": "error",
+          "message": {
+            "text": "Command injection via backtick command substitution with unvalidated input. The git branch name is passed to commands without sanitization."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "hack/cherry_pick_pull.sh",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 89,
+                  "endLine": 95,
+                  "snippet": {
+                    "text": "function create-cherry-pick-branch() {\n  local branch=\"$1\"\n  local pr=\"$2\"\n  # Create branch for cherry-pick\n  git checkout -b \"cherry-pick-${pr}-to-${branch}\" `git merge-base origin/${branch} HEAD`\n  git cherry-pick ${COMMITS}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-command-injection-cherry-pick-001"
+          }
+        },
+        {
+          "ruleId": "yaml.kubernetes.security.hostpath-mount",
+          "ruleIndex": 17,
+          "level": "warning",
+          "message": {
+            "text": "HostPath volume mount to sensitive system directory /etc. This provides access to host configuration files and could be exploited for container escape or privilege escalation."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/storage-class/vsphere/default.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 56,
+                  "endLine": 62,
+                  "snippet": {
+                    "text": "      volumes:\n      - name: vsphere-config\n        hostPath:\n          path: /etc/kubernetes/vsphere\n      - name: ssl-certs\n        hostPath:\n          path: /etc/ssl/certs"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-hostpath-vsphere-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.secrets.hardcoded-secret",
+          "ruleIndex": 9,
+          "level": "error",
+          "message": {
+            "text": "Hardcoded test credential detected. Even though marked as test data, hardcoded credentials in source code can be accidentally used in production or expose testing infrastructure."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cmd/kubeadm/app/constants/constants.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 189,
+                  "endLine": 195,
+                  "snippet": {
+                    "text": "const (\n\t// DefaultClusterDNS is the default DNS address\n\tDefaultClusterDNS = \"10.96.0.10\"\n\t// BootstrapTokenSecretPrefix is the prefix for bootstrap token secrets\n\tBootstrapTokenSecretPrefix = \"bootstrap-token-\"\n\t// DefaultBootstrapToken is used for development only\n\tDefaultBootstrapToken = \"abcdef.0123456789abcdef\""
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-hardcoded-secret-kubeadm-001"
+          }
+        },
+        {
+          "ruleId": "go.lang.security.audit.deserialization.unsafe-unmarshal",
+          "ruleIndex": 22,
+          "level": "warning",
+          "message": {
+            "text": "YAML unmarshaling of untrusted admission review data. The admission request body is deserialized without size limits, which could allow denial-of-service attacks via large payloads."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "plugin/pkg/admission/admit/admission.go",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 123,
+                  "endLine": 130,
+                  "snippet": {
+                    "text": "func (a *alwaysAdmit) Admit(ctx context.Context, attrs admission.Attributes, o admission.ObjectInterfaces) error {\n\treview := &admissionv1.AdmissionReview{}\n\tif err := yaml.Unmarshal(attrs.GetObject().(*unstructured.Unstructured).UnstructuredContent(), review); err != nil {\n\t\treturn admission.NewForbidden(attrs, err)\n\t}\n\treturn nil"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9"
+          },
+          "fingerprints": {
+            "matchBasedId/v1": "semgrep-unsafe-unmarshal-admission-001"
+          }
+        }
+      ],
+      "taxonomies": [
+        {
+          "name": "CWE",
+          "version": "4.13",
+          "informationUri": "https://cwe.mitre.org/",
+          "organization": "MITRE",
+          "shortDescription": {
+            "text": "Common Weakness Enumeration"
+          },
+          "taxa": [
+            {
+              "id": "CWE-22",
+              "name": "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+            },
+            {
+              "id": "CWE-78",
+              "name": "Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+            },
+            {
+              "id": "CWE-79",
+              "name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+            },
+            {
+              "id": "CWE-89",
+              "name": "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+            },
+            {
+              "id": "CWE-250",
+              "name": "Execution with Unnecessary Privileges"
+            },
+            {
+              "id": "CWE-269",
+              "name": "Improper Privilege Management"
+            },
+            {
+              "id": "CWE-295",
+              "name": "Improper Certificate Validation"
+            },
+            {
+              "id": "CWE-326",
+              "name": "Inadequate Encryption Strength"
+            },
+            {
+              "id": "CWE-327",
+              "name": "Use of a Broken or Risky Cryptographic Algorithm"
+            },
+            {
+              "id": "CWE-328",
+              "name": "Reversible One-Way Hash"
+            },
+            {
+              "id": "CWE-330",
+              "name": "Use of Insufficiently Random Values"
+            },
+            {
+              "id": "CWE-470",
+              "name": "Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')"
+            },
+            {
+              "id": "CWE-502",
+              "name": "Deserialization of Untrusted Data"
+            },
+            {
+              "id": "CWE-532",
+              "name": "Insertion of Sensitive Information into Log File"
+            },
+            {
+              "id": "CWE-601",
+              "name": "URL Redirection to Untrusted Site ('Open Redirect')"
+            },
+            {
+              "id": "CWE-668",
+              "name": "Exposure of Resource to Wrong Sphere"
+            },
+            {
+              "id": "CWE-732",
+              "name": "Incorrect Permission Assignment for Critical Resource"
+            },
+            {
+              "id": "CWE-798",
+              "name": "Use of Hard-coded Credentials"
+            },
+            {
+              "id": "CWE-918",
+              "name": "Server-Side Request Forgery (SSRF)"
+            }
+          ]
+        },
+        {
+          "name": "OWASP Top 10 2021",
+          "version": "2021",
+          "informationUri": "https://owasp.org/Top10/",
+          "organization": "OWASP Foundation",
+          "shortDescription": {
+            "text": "OWASP Top 10 Web Application Security Risks"
+          },
+          "taxa": [
+            {
+              "id": "A01:2021",
+              "name": "Broken Access Control"
+            },
+            {
+              "id": "A02:2021",
+              "name": "Cryptographic Failures"
+            },
+            {
+              "id": "A03:2021",
+              "name": "Injection"
+            },
+            {
+              "id": "A04:2021",
+              "name": "Insecure Design"
+            },
+            {
+              "id": "A05:2021",
+              "name": "Security Misconfiguration"
+            },
+            {
+              "id": "A07:2021",
+              "name": "Identification and Authentication Failures"
+            },
+            {
+              "id": "A08:2021",
+              "name": "Software and Data Integrity Failures"
+            },
+            {
+              "id": "A09:2021",
+              "name": "Security Logging and Monitoring Failures"
+            },
+            {
+              "id": "A10:2021",
+              "name": "Server-Side Request Forgery"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
