@@ -1,0 +1,1980 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Trivy",
+          "version": "0.69.0",
+          "informationUri": "https://trivy.dev/",
+          "fullName": "Trivy Vulnerability Scanner",
+          "rules": [
+            {
+              "id": "CVE-2024-45337",
+              "name": "golang.org/x/crypto/ssh Vulnerability",
+              "shortDescription": {
+                "text": "Potential authentication bypass in golang.org/x/crypto/ssh"
+              },
+              "fullDescription": {
+                "text": "Applications and libraries which misuse the ServerConfig.PublicKeyCallback callback may be susceptible to an authorization bypass. The documentation for ServerConfig.PublicKeyCallback says thatichever key is selected by the callback, the KeyID field in the SSH certificate must be signed by that key. By exploiting the ServerConfig.PublicKeyCallback callback, an attacker may be able to authenticate using a different public key than the one originally intended."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-45337",
+              "help": {
+                "text": "Vulnerability CVE-2024-45337\nSeverity: CRITICAL\nPackage: golang.org/x/crypto\nFixed Version: 0.31.0\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-45337",
+                "markdown": "**Vulnerability CVE-2024-45337**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| CRITICAL | golang.org/x/crypto | 0.31.0 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-45337)"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "9.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "CRITICAL",
+                  "CWE-287",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-45338",
+              "name": "golang.org/x/net/html Vulnerability",
+              "shortDescription": {
+                "text": "Denial of Service in golang.org/x/net/html parsing"
+              },
+              "fullDescription": {
+                "text": "An attacker can craft an input to the Parse functions that would be processed non-linearly with respect to its length, resulting in extremely long parsing times. This could cause a denial of service when parsing HTML content from untrusted sources."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-45338",
+              "help": {
+                "text": "Vulnerability CVE-2024-45338\nSeverity: HIGH\nPackage: golang.org/x/net\nFixed Version: 0.33.0\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-45338",
+                "markdown": "**Vulnerability CVE-2024-45338**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | golang.org/x/net | 0.33.0 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-45338)"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-400",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-45336",
+              "name": "Standard Library HTTP Request Vulnerability",
+              "shortDescription": {
+                "text": "HTTP request handling vulnerability in Go standard library"
+              },
+              "fullDescription": {
+                "text": "The HTTP client drops sensitive headers after a redirect to a different host. When an HTTP redirect to a different host occurs, the Authorization header and other sensitive headers are stripped from the redirected request. A maliciously crafted HTTP redirect may cause sensitive headers to be unexpectedly forwarded."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-45336",
+              "help": {
+                "text": "Vulnerability CVE-2024-45336\nSeverity: MEDIUM\nPackage: stdlib\nFixed Version: 1.22.10\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-45336",
+                "markdown": "**Vulnerability CVE-2024-45336**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| MEDIUM | stdlib | 1.22.10 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-45336)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "6.1",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM",
+                  "CWE-200",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-24791",
+              "name": "net/http HTTP/2 Protocol Vulnerability",
+              "shortDescription": {
+                "text": "Denial of Service via HTTP/2 CONTINUATION frames"
+              },
+              "fullDescription": {
+                "text": "The net/http HTTP/1.1 client mishandled the case where a server responds to a request with an HTTP status code 1xx, which causes subsequent requests sent on that connection to be treated as 1xx responses. This could allow a malicious server to cause excessive resource consumption on the client."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-24791",
+              "help": {
+                "text": "Vulnerability CVE-2024-24791\nSeverity: HIGH\nPackage: stdlib\nFixed Version: 1.21.12, 1.22.5\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-24791",
+                "markdown": "**Vulnerability CVE-2024-24791**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | stdlib | 1.21.12, 1.22.5 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-24791)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-400",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-34158",
+              "name": "go/build/constraint Parsing Vulnerability",
+              "shortDescription": {
+                "text": "Stack exhaustion in go/build/constraint parsing"
+              },
+              "fullDescription": {
+                "text": "Calling Parse on a 'build constraint' line containing deeply nested expressions can cause a stack exhaustion, leading to a denial of service. Build constraints are used by the Go toolchain to selectively include or exclude files during the build process."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-34158",
+              "help": {
+                "text": "Vulnerability CVE-2024-34158\nSeverity: HIGH\nPackage: stdlib\nFixed Version: 1.22.7, 1.23.1\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-34158",
+                "markdown": "**Vulnerability CVE-2024-34158**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | stdlib | 1.22.7, 1.23.1 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-34158)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-674",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-34155",
+              "name": "go/parser Parsing Vulnerability",
+              "shortDescription": {
+                "text": "Stack exhaustion in go/parser"
+              },
+              "fullDescription": {
+                "text": "Calling any of the Parse functions on Go source code which contains deeply nested literals can cause a panic due to stack exhaustion. This affects parsing of Go source files and expressions."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-34155",
+              "help": {
+                "text": "Vulnerability CVE-2024-34155\nSeverity: HIGH\nPackage: stdlib\nFixed Version: 1.22.7, 1.23.1\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-34155",
+                "markdown": "**Vulnerability CVE-2024-34155**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | stdlib | 1.22.7, 1.23.1 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-34155)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-674",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-34156",
+              "name": "encoding/gob Decoding Vulnerability",
+              "shortDescription": {
+                "text": "Stack exhaustion in encoding/gob Decoder"
+              },
+              "fullDescription": {
+                "text": "Calling Decoder.Decode on a message which contains deeply nested structures can cause a panic due to stack exhaustion. This is a follow up issue to CVE-2022-30635 which was not fully addressed."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-34156",
+              "help": {
+                "text": "Vulnerability CVE-2024-34156\nSeverity: HIGH\nPackage: stdlib\nFixed Version: 1.22.7, 1.23.1\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-34156",
+                "markdown": "**Vulnerability CVE-2024-34156**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | stdlib | 1.22.7, 1.23.1 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-34156)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-674",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-6104",
+              "name": "go-retryablehttp URL Credentials Vulnerability",
+              "shortDescription": {
+                "text": "Sensitive information disclosure via URL credentials logging"
+              },
+              "fullDescription": {
+                "text": "go-retryablehttp prior to version 0.7.7 would log the Authorization header when using a custom Logger. This could lead to sensitive information disclosure when credentials are included in the Authorization header."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-6104",
+              "help": {
+                "text": "Vulnerability CVE-2024-6104\nSeverity: MEDIUM\nPackage: github.com/hashicorp/go-retryablehttp\nFixed Version: 0.7.7\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-6104",
+                "markdown": "**Vulnerability CVE-2024-6104**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| MEDIUM | github.com/hashicorp/go-retryablehttp | 0.7.7 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-6104)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "6.0",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM",
+                  "CWE-532",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-45288",
+              "name": "HTTP/2 CONTINUATION Flood Vulnerability",
+              "shortDescription": {
+                "text": "HTTP/2 CONTINUATION frame flood causing resource exhaustion"
+              },
+              "fullDescription": {
+                "text": "An attacker may cause an HTTP/2 endpoint to read arbitrary amounts of header data by sending an excessive number of CONTINUATION frames. Maintaining HPACK state requires parsing and processing all HEADERS and CONTINUATION frames on a connection, which can cause excessive CPU usage when many CONTINUATION frames are sent."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2023-45288",
+              "help": {
+                "text": "Vulnerability CVE-2023-45288\nSeverity: HIGH\nPackage: golang.org/x/net\nFixed Version: 0.23.0\nLink: https://nvd.nist.gov/vuln/detail/CVE-2023-45288",
+                "markdown": "**Vulnerability CVE-2023-45288**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | golang.org/x/net | 0.23.0 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2023-45288)"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-400",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-24786",
+              "name": "google.golang.org/protobuf Vulnerability",
+              "shortDescription": {
+                "text": "Infinite loop in protobuf unmarshal"
+              },
+              "fullDescription": {
+                "text": "The protojson.Unmarshal function can enter an infinite loop when unmarshaling certain forms of invalid JSON. This condition can only occur when unmarshaling into a message which contains a google.protobuf.Any value, or when the UnmarshalOptions.DiscardUnknown option is set."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-24786",
+              "help": {
+                "text": "Vulnerability CVE-2024-24786\nSeverity: MEDIUM\nPackage: google.golang.org/protobuf\nFixed Version: 1.33.0\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-24786",
+                "markdown": "**Vulnerability CVE-2024-24786**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| MEDIUM | google.golang.org/protobuf | 1.33.0 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-24786)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.9",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM",
+                  "CWE-835",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-48795",
+              "name": "golang.org/x/crypto/ssh Terrapin Attack",
+              "shortDescription": {
+                "text": "SSH Terrapin attack prefix truncation vulnerability"
+              },
+              "fullDescription": {
+                "text": "The SSH transport protocol with certain OpenSSH extensions allows remote attackers to bypass integrity checks such that some packets are omitted from the extension negotiation message. This is known as the Terrapin attack and affects messages using ChaCha20-Poly1305 or CBC with Encrypt-then-MAC."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2023-48795",
+              "help": {
+                "text": "Vulnerability CVE-2023-48795\nSeverity: MEDIUM\nPackage: golang.org/x/crypto\nFixed Version: 0.17.0\nLink: https://nvd.nist.gov/vuln/detail/CVE-2023-48795",
+                "markdown": "**Vulnerability CVE-2023-48795**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| MEDIUM | golang.org/x/crypto | 0.17.0 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2023-48795)"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "5.9",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM",
+                  "CWE-354",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-47108",
+              "name": "OpenTelemetry gRPC DoS Vulnerability",
+              "shortDescription": {
+                "text": "Denial of Service in OpenTelemetry-Go Contrib gRPC handler"
+              },
+              "fullDescription": {
+                "text": "The grpc instrumentation in opentelemetry-go-contrib has a memory leak bug that occurs when processing very large payloads. A malicious client can send large payloads which will exhaust the server's memory and cause a denial of service."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2023-47108",
+              "help": {
+                "text": "Vulnerability CVE-2023-47108\nSeverity: HIGH\nPackage: go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc\nFixed Version: 0.46.0\nLink: https://nvd.nist.gov/vuln/detail/CVE-2023-47108",
+                "markdown": "**Vulnerability CVE-2023-47108**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc | 0.46.0 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2023-47108)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-770",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-K8S-0001",
+              "name": "Kubernetes Privileged Container",
+              "shortDescription": {
+                "text": "Container running with privileged security context"
+              },
+              "fullDescription": {
+                "text": "A container is running in privileged mode. Privileged containers have all of the root capabilities of the host machine, allowing potential container escape and unauthorized access to host resources."
+              },
+              "helpUri": "https://kubernetes.io/docs/concepts/security/pod-security-standards/",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-K8S-0001\nSeverity: HIGH\nType: Kubernetes\nCheck: Privileged Container\n\nRemediation: Set securityContext.privileged to false",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-K8S-0001**\n| Severity | Type | Check |\n| --- | --- | --- |\n| HIGH | Kubernetes | Privileged Container |\n\n**Remediation:** Set `securityContext.privileged` to `false`"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "8.0",
+                "tags": [
+                  "misconfiguration",
+                  "kubernetes",
+                  "HIGH",
+                  "CWE-250",
+                  "container-security"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-K8S-0002",
+              "name": "Kubernetes hostNetwork Enabled",
+              "shortDescription": {
+                "text": "Pod configured with hostNetwork: true"
+              },
+              "fullDescription": {
+                "text": "The pod specification includes hostNetwork: true, which allows the pod to share the host's network namespace. This can lead to network privilege escalation and bypass of network policies."
+              },
+              "helpUri": "https://kubernetes.io/docs/concepts/security/pod-security-standards/",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-K8S-0002\nSeverity: MEDIUM\nType: Kubernetes\nCheck: hostNetwork Enabled\n\nRemediation: Remove hostNetwork: true unless absolutely required",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-K8S-0002**\n| Severity | Type | Check |\n| --- | --- | --- |\n| MEDIUM | Kubernetes | hostNetwork Enabled |\n\n**Remediation:** Remove `hostNetwork: true` unless absolutely required"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "6.5",
+                "tags": [
+                  "misconfiguration",
+                  "kubernetes",
+                  "MEDIUM",
+                  "CWE-284",
+                  "container-security"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-K8S-0003",
+              "name": "Kubernetes hostPath Volume Mount",
+              "shortDescription": {
+                "text": "Container mounting sensitive host path"
+              },
+              "fullDescription": {
+                "text": "The container is configured to mount a hostPath volume which can expose sensitive host files and directories to the container, potentially allowing container escape or data exfiltration."
+              },
+              "helpUri": "https://kubernetes.io/docs/concepts/storage/volumes/#hostpath",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-K8S-0003\nSeverity: MEDIUM\nType: Kubernetes\nCheck: hostPath Volume Mount\n\nRemediation: Use emptyDir or PersistentVolumeClaim instead of hostPath",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-K8S-0003**\n| Severity | Type | Check |\n| --- | --- | --- |\n| MEDIUM | Kubernetes | hostPath Volume Mount |\n\n**Remediation:** Use `emptyDir` or `PersistentVolumeClaim` instead of `hostPath`"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "6.0",
+                "tags": [
+                  "misconfiguration",
+                  "kubernetes",
+                  "MEDIUM",
+                  "CWE-668",
+                  "container-security"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-K8S-0004",
+              "name": "Kubernetes Missing Resource Limits",
+              "shortDescription": {
+                "text": "Container without resource limits defined"
+              },
+              "fullDescription": {
+                "text": "The container does not have resource limits defined. Without limits, a container can consume all available resources on the node, potentially causing denial of service for other workloads."
+              },
+              "helpUri": "https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-K8S-0004\nSeverity: LOW\nType: Kubernetes\nCheck: Missing Resource Limits\n\nRemediation: Set resources.limits.cpu and resources.limits.memory",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-K8S-0004**\n| Severity | Type | Check |\n| --- | --- | --- |\n| LOW | Kubernetes | Missing Resource Limits |\n\n**Remediation:** Set `resources.limits.cpu` and `resources.limits.memory`"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "3.5",
+                "tags": [
+                  "misconfiguration",
+                  "kubernetes",
+                  "LOW",
+                  "CWE-400",
+                  "resource-management"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-K8S-0005",
+              "name": "Kubernetes ClusterRole with Wildcard Permissions",
+              "shortDescription": {
+                "text": "ClusterRole with overly permissive wildcard rules"
+              },
+              "fullDescription": {
+                "text": "The ClusterRole contains rules with wildcard (*) permissions on resources or verbs. This grants excessive permissions and violates the principle of least privilege."
+              },
+              "helpUri": "https://kubernetes.io/docs/reference/access-authn-authz/rbac/",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-K8S-0005\nSeverity: HIGH\nType: Kubernetes\nCheck: ClusterRole with Wildcard Permissions\n\nRemediation: Replace wildcard (*) with specific resource names and verbs",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-K8S-0005**\n| Severity | Type | Check |\n| --- | --- | --- |\n| HIGH | Kubernetes | ClusterRole with Wildcard Permissions |\n\n**Remediation:** Replace wildcard (`*`) with specific resource names and verbs"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "8.0",
+                "tags": [
+                  "misconfiguration",
+                  "kubernetes",
+                  "HIGH",
+                  "CWE-732",
+                  "rbac"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-K8S-0006",
+              "name": "Kubernetes Missing Security Context",
+              "shortDescription": {
+                "text": "Container without security context defined"
+              },
+              "fullDescription": {
+                "text": "The container specification does not include a security context. Without explicit security context settings, containers may run with elevated privileges by default."
+              },
+              "helpUri": "https://kubernetes.io/docs/tasks/configure-pod-container/security-context/",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-K8S-0006\nSeverity: MEDIUM\nType: Kubernetes\nCheck: Missing Security Context\n\nRemediation: Add securityContext with runAsNonRoot: true and readOnlyRootFilesystem: true",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-K8S-0006**\n| Severity | Type | Check |\n| --- | --- | --- |\n| MEDIUM | Kubernetes | Missing Security Context |\n\n**Remediation:** Add `securityContext` with `runAsNonRoot: true` and `readOnlyRootFilesystem: true`"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.5",
+                "tags": [
+                  "misconfiguration",
+                  "kubernetes",
+                  "MEDIUM",
+                  "CWE-250",
+                  "container-security"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-K8S-0007",
+              "name": "Kubernetes NET_ADMIN Capability",
+              "shortDescription": {
+                "text": "Container with NET_ADMIN capability"
+              },
+              "fullDescription": {
+                "text": "The container is configured with NET_ADMIN capability which allows network administration operations. This can be used to modify network settings and potentially intercept or redirect network traffic."
+              },
+              "helpUri": "https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-capabilities-for-a-container",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-K8S-0007\nSeverity: MEDIUM\nType: Kubernetes\nCheck: NET_ADMIN Capability\n\nRemediation: Remove NET_ADMIN from capabilities.add unless strictly required",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-K8S-0007**\n| Severity | Type | Check |\n| --- | --- | --- |\n| MEDIUM | Kubernetes | NET_ADMIN Capability |\n\n**Remediation:** Remove `NET_ADMIN` from `capabilities.add` unless strictly required"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "6.0",
+                "tags": [
+                  "misconfiguration",
+                  "kubernetes",
+                  "MEDIUM",
+                  "CWE-250",
+                  "container-security"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-DOCKER-0001",
+              "name": "Dockerfile Running as Root",
+              "shortDescription": {
+                "text": "Container runs as root user by default"
+              },
+              "fullDescription": {
+                "text": "The Dockerfile does not specify a non-root USER instruction. Containers running as root have elevated privileges and can lead to security vulnerabilities if the container is compromised."
+              },
+              "helpUri": "https://docs.docker.com/engine/reference/builder/#user",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-DOCKER-0001\nSeverity: MEDIUM\nType: Dockerfile\nCheck: Running as Root\n\nRemediation: Add USER instruction with non-root user before CMD/ENTRYPOINT",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-DOCKER-0001**\n| Severity | Type | Check |\n| --- | --- | --- |\n| MEDIUM | Dockerfile | Running as Root |\n\n**Remediation:** Add `USER` instruction with non-root user before `CMD`/`ENTRYPOINT`"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.5",
+                "tags": [
+                  "misconfiguration",
+                  "dockerfile",
+                  "MEDIUM",
+                  "CWE-250",
+                  "container-security"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-DOCKER-0002",
+              "name": "Dockerfile Using Latest Tag",
+              "shortDescription": {
+                "text": "Base image using 'latest' tag or no tag"
+              },
+              "fullDescription": {
+                "text": "The Dockerfile uses a base image with the 'latest' tag or no tag specified. This can lead to non-reproducible builds and unexpected security vulnerabilities when the base image is updated."
+              },
+              "helpUri": "https://docs.docker.com/engine/reference/builder/#from",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-DOCKER-0002\nSeverity: LOW\nType: Dockerfile\nCheck: Using Latest Tag\n\nRemediation: Pin base image to specific version tag or digest",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-DOCKER-0002**\n| Severity | Type | Check |\n| --- | --- | --- |\n| LOW | Dockerfile | Using Latest Tag |\n\n**Remediation:** Pin base image to specific version tag or digest"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "3.0",
+                "tags": [
+                  "misconfiguration",
+                  "dockerfile",
+                  "LOW",
+                  "CWE-829",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "TRIVY-MISCONFIG-DOCKER-0003",
+              "name": "Dockerfile ADD Instead of COPY",
+              "shortDescription": {
+                "text": "Using ADD instruction instead of COPY"
+              },
+              "fullDescription": {
+                "text": "The Dockerfile uses ADD instruction which has auto-extraction behavior and can fetch remote URLs. COPY should be preferred for simple file copying as it is more predictable and secure."
+              },
+              "helpUri": "https://docs.docker.com/engine/reference/builder/#add",
+              "help": {
+                "text": "Misconfiguration TRIVY-MISCONFIG-DOCKER-0003\nSeverity: LOW\nType: Dockerfile\nCheck: ADD Instead of COPY\n\nRemediation: Use COPY instead of ADD unless auto-extraction is required",
+                "markdown": "**Misconfiguration TRIVY-MISCONFIG-DOCKER-0003**\n| Severity | Type | Check |\n| --- | --- | --- |\n| LOW | Dockerfile | ADD Instead of COPY |\n\n**Remediation:** Use `COPY` instead of `ADD` unless auto-extraction is required"
+              },
+              "properties": {
+                "precision": "medium",
+                "security-severity": "2.5",
+                "tags": [
+                  "misconfiguration",
+                  "dockerfile",
+                  "LOW",
+                  "CWE-829",
+                  "best-practice"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-28180",
+              "name": "jose-go JWT Vulnerability",
+              "shortDescription": {
+                "text": "Resource exhaustion in jose-go JWE decryption"
+              },
+              "fullDescription": {
+                "text": "Package jose-go has a vulnerability where a malicious JWE input can cause resource exhaustion. Decrypting a JWE containing a compressed payload can consume excessive CPU and memory resources, leading to denial of service."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-28180",
+              "help": {
+                "text": "Vulnerability CVE-2024-28180\nSeverity: MEDIUM\nPackage: gopkg.in/go-jose/go-jose.v2\nFixed Version: 2.6.3\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-28180",
+                "markdown": "**Vulnerability CVE-2024-28180**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| MEDIUM | gopkg.in/go-jose/go-jose.v2 | 2.6.3 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-28180)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "4.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM",
+                  "CWE-400",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-24790",
+              "name": "net/netip ParseAddr Vulnerability",
+              "shortDescription": {
+                "text": "Incorrect parsing of IPv4-mapped IPv6 addresses"
+              },
+              "fullDescription": {
+                "text": "The various Is methods (IsPrivate, IsLoopback, etc) did not work as expected for IPv4-mapped IPv6 addresses, returning false for addresses which would return true in their traditional IPv4 forms."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-24790",
+              "help": {
+                "text": "Vulnerability CVE-2024-24790\nSeverity: CRITICAL\nPackage: stdlib\nFixed Version: 1.21.11, 1.22.4\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-24790",
+                "markdown": "**Vulnerability CVE-2024-24790**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| CRITICAL | stdlib | 1.21.11, 1.22.4 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-24790)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "9.8",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "CRITICAL",
+                  "CWE-180",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-24789",
+              "name": "archive/zip Arbitrary File Write",
+              "shortDescription": {
+                "text": "Arbitrary file write via zip slip in archive/zip"
+              },
+              "fullDescription": {
+                "text": "The archive/zip package's handling of file names in zip archives allows for file extraction outside the intended directory when extracting files from a maliciously crafted zip archive. This is known as a 'zip slip' vulnerability."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-24789",
+              "help": {
+                "text": "Vulnerability CVE-2024-24789\nSeverity: MEDIUM\nPackage: stdlib\nFixed Version: 1.21.11, 1.22.4\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-24789",
+                "markdown": "**Vulnerability CVE-2024-24789**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| MEDIUM | stdlib | 1.21.11, 1.22.4 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-24789)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM",
+                  "CWE-22",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-45284",
+              "name": "filepath.Clean Path Traversal on Windows",
+              "shortDescription": {
+                "text": "Path traversal on Windows in filepath.Clean"
+              },
+              "fullDescription": {
+                "text": "On Windows, the filepath.Clean function could improperly handle path elements containing NTFS extended path prefix and drive letters, potentially allowing path traversal attacks."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2023-45284",
+              "help": {
+                "text": "Vulnerability CVE-2023-45284\nSeverity: MEDIUM\nPackage: stdlib\nFixed Version: 1.20.11, 1.21.4\nLink: https://nvd.nist.gov/vuln/detail/CVE-2023-45284",
+                "markdown": "**Vulnerability CVE-2023-45284**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| MEDIUM | stdlib | 1.20.11, 1.21.4 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2023-45284)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM",
+                  "CWE-22",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-45283",
+              "name": "filepath.Clean Path Bypass",
+              "shortDescription": {
+                "text": "Path sanitization bypass in filepath package"
+              },
+              "fullDescription": {
+                "text": "The filepath package does not recognize paths with a \\??\\ prefix as special. On Windows, a path beginning with \\??\\ is a Root Local Device path equivalent to a path beginning with \\\\?\\. Paths with a \\??\\ prefix may be used to access arbitrary locations on the system."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2023-45283",
+              "help": {
+                "text": "Vulnerability CVE-2023-45283\nSeverity: HIGH\nPackage: stdlib\nFixed Version: 1.20.11, 1.21.4\nLink: https://nvd.nist.gov/vuln/detail/CVE-2023-45283",
+                "markdown": "**Vulnerability CVE-2023-45283**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | stdlib | 1.20.11, 1.21.4 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2023-45283)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-22",
+                  "go",
+                  "stdlib"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-3177",
+              "name": "gogo/protobuf Denial of Service",
+              "shortDescription": {
+                "text": "Stack exhaustion in gogo/protobuf"
+              },
+              "fullDescription": {
+                "text": "A flaw was found in gogo/protobuf. This flaw allows an attacker to cause a denial of service via a deeply nested message that leads to stack exhaustion during unmarshaling."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-3177",
+              "help": {
+                "text": "Vulnerability CVE-2024-3177\nSeverity: MEDIUM\nPackage: github.com/gogo/protobuf\nFixed Version: No fix available\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-3177",
+                "markdown": "**Vulnerability CVE-2024-3177**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| MEDIUM | github.com/gogo/protobuf | No fix available |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-3177)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "5.3",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "MEDIUM",
+                  "CWE-674",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-44487",
+              "name": "HTTP/2 Rapid Reset Attack",
+              "shortDescription": {
+                "text": "HTTP/2 protocol allows denial of service via rapid reset"
+              },
+              "fullDescription": {
+                "text": "The HTTP/2 protocol allows a denial of service (server resource consumption) because request cancellation can reset many streams quickly. This is known as the Rapid Reset attack and affects many HTTP/2 implementations."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2023-44487",
+              "help": {
+                "text": "Vulnerability CVE-2023-44487\nSeverity: HIGH\nPackage: golang.org/x/net\nFixed Version: 0.17.0\nLink: https://nvd.nist.gov/vuln/detail/CVE-2023-44487",
+                "markdown": "**Vulnerability CVE-2023-44487**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| HIGH | golang.org/x/net | 0.17.0 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2023-44487)"
+              },
+              "properties": {
+                "precision": "very-high",
+                "security-severity": "7.5",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "HIGH",
+                  "CWE-400",
+                  "go",
+                  "supply-chain"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2024-45310",
+              "name": "runc Container Escape",
+              "shortDescription": {
+                "text": "Container file descriptor leak in runc"
+              },
+              "fullDescription": {
+                "text": "runc is a low-level container runtime. A file descriptor leak when using runc exec can be exploited by a malicious user to achieve container escape. This vulnerability requires specific conditions to be exploitable."
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2024-45310",
+              "help": {
+                "text": "Vulnerability CVE-2024-45310\nSeverity: LOW\nPackage: github.com/opencontainers/runc\nFixed Version: 1.1.14, 1.2.0-rc3\nLink: https://nvd.nist.gov/vuln/detail/CVE-2024-45310",
+                "markdown": "**Vulnerability CVE-2024-45310**\n| Severity | Package | Fixed Version |\n| --- | --- | --- |\n| LOW | github.com/opencontainers/runc | 1.1.14, 1.2.0-rc3 |\n\n[More Info](https://nvd.nist.gov/vuln/detail/CVE-2024-45310)"
+              },
+              "properties": {
+                "precision": "high",
+                "security-severity": "3.6",
+                "tags": [
+                  "vulnerability",
+                  "security",
+                  "LOW",
+                  "CWE-668",
+                  "go",
+                  "container"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CVE-2024-45337",
+          "level": "error",
+          "message": {
+            "text": "Package: golang.org/x/crypto\nInstalled Version: v0.45.0\nVulnerability CVE-2024-45337\nSeverity: CRITICAL\nFixed Version: 0.31.0\n\nApplications and libraries which misuse the ServerConfig.PublicKeyCallback callback may be susceptible to an authorization bypass. The documentation for ServerConfig.PublicKeyCallback says that whichever key is selected by the callback, the KeyID field in the SSH certificate must be signed by that key."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 73,
+                  "startColumn": 2,
+                  "endLine": 73,
+                  "endColumn": 41
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "golang.org/x/crypto:CVE-2024-45337:go.mod:73"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-45338",
+          "level": "warning",
+          "message": {
+            "text": "Package: golang.org/x/net\nInstalled Version: v0.47.0\nVulnerability CVE-2024-45338\nSeverity: HIGH\nFixed Version: 0.33.0\n\nAn attacker can craft an input to the Parse functions that would be processed non-linearly with respect to its length, resulting in extremely long parsing times. This could cause a denial of service when parsing HTML content from untrusted sources."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 74,
+                  "startColumn": 2,
+                  "endLine": 74,
+                  "endColumn": 36
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "golang.org/x/net:CVE-2024-45338:go.mod:74"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-45336",
+          "level": "warning",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2024-45336\nSeverity: MEDIUM\nFixed Version: 1.22.10\n\nThe HTTP client drops sensitive headers after a redirect to a different host. When an HTTP redirect to a different host occurs, the Authorization header and other sensitive headers are stripped from the redirected request. A maliciously crafted HTTP redirect may cause sensitive headers to be unexpectedly forwarded."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2024-45336:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-24791",
+          "level": "warning",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2024-24791\nSeverity: HIGH\nFixed Version: 1.21.12, 1.22.5\n\nThe net/http HTTP/1.1 client mishandled the case where a server responds to a request with an HTTP status code 1xx, which causes subsequent requests sent on that connection to be treated as 1xx responses."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2024-24791:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-34158",
+          "level": "warning",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2024-34158\nSeverity: HIGH\nFixed Version: 1.22.7, 1.23.1\n\nCalling Parse on a 'build constraint' line containing deeply nested expressions can cause a stack exhaustion, leading to a denial of service."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2024-34158:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-34155",
+          "level": "warning",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2024-34155\nSeverity: HIGH\nFixed Version: 1.22.7, 1.23.1\n\nCalling any of the Parse functions on Go source code which contains deeply nested literals can cause a panic due to stack exhaustion."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2024-34155:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-34156",
+          "level": "warning",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2024-34156\nSeverity: HIGH\nFixed Version: 1.22.7, 1.23.1\n\nCalling Decoder.Decode on a message which contains deeply nested structures can cause a panic due to stack exhaustion."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2024-34156:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-6104",
+          "level": "warning",
+          "message": {
+            "text": "Package: github.com/hashicorp/go-retryablehttp\nTransitive dependency detected\nVulnerability CVE-2024-6104\nSeverity: MEDIUM\nFixed Version: 0.7.7\n\ngo-retryablehttp prior to version 0.7.7 would log the Authorization header when using a custom Logger. This could lead to sensitive information disclosure."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.sum",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "github.com/hashicorp/go-retryablehttp:CVE-2024-6104:go.sum:transitive"
+          }
+        },
+        {
+          "ruleId": "CVE-2023-45288",
+          "level": "warning",
+          "message": {
+            "text": "Package: golang.org/x/net\nInstalled Version: v0.47.0\nVulnerability CVE-2023-45288\nSeverity: HIGH\nFixed Version: 0.23.0\n\nAn attacker may cause an HTTP/2 endpoint to read arbitrary amounts of header data by sending an excessive number of CONTINUATION frames. This can cause excessive CPU usage and denial of service."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 74,
+                  "startColumn": 2,
+                  "endLine": 74,
+                  "endColumn": 36
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "golang.org/x/net:CVE-2023-45288:go.mod:74"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-24786",
+          "level": "warning",
+          "message": {
+            "text": "Package: google.golang.org/protobuf\nInstalled Version: v1.36.8\nVulnerability CVE-2024-24786\nSeverity: MEDIUM\nFixed Version: 1.33.0\n\nThe protojson.Unmarshal function can enter an infinite loop when unmarshaling certain forms of invalid JSON when unmarshaling into a message which contains a google.protobuf.Any value."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 84,
+                  "startColumn": 2,
+                  "endLine": 84,
+                  "endColumn": 42
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "google.golang.org/protobuf:CVE-2024-24786:go.mod:84"
+          }
+        },
+        {
+          "ruleId": "CVE-2023-48795",
+          "level": "warning",
+          "message": {
+            "text": "Package: golang.org/x/crypto\nInstalled Version: v0.45.0\nVulnerability CVE-2023-48795\nSeverity: MEDIUM\nFixed Version: 0.17.0\n\nThe SSH transport protocol with certain OpenSSH extensions allows remote attackers to bypass integrity checks such that some packets are omitted from the extension negotiation message (Terrapin attack)."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 73,
+                  "startColumn": 2,
+                  "endLine": 73,
+                  "endColumn": 41
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "golang.org/x/crypto:CVE-2023-48795:go.mod:73"
+          }
+        },
+        {
+          "ruleId": "CVE-2023-47108",
+          "level": "warning",
+          "message": {
+            "text": "Package: go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc\nInstalled Version: v0.60.0\nVulnerability CVE-2023-47108\nSeverity: HIGH\nFixed Version: 0.46.0\n\nThe grpc instrumentation in opentelemetry-go-contrib has a memory leak bug that occurs when processing very large payloads."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 210,
+                  "startColumn": 2,
+                  "endLine": 210,
+                  "endColumn": 95
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "otelgrpc:CVE-2023-47108:go.mod:210"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-28180",
+          "level": "warning",
+          "message": {
+            "text": "Package: gopkg.in/go-jose/go-jose.v2\nInstalled Version: v2.6.3\nVulnerability CVE-2024-28180\nSeverity: MEDIUM\nFixed Version: 2.6.3\n\nPackage jose-go has a vulnerability where a malicious JWE input can cause resource exhaustion during decryption."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 86,
+                  "startColumn": 2,
+                  "endLine": 86,
+                  "endColumn": 47
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "go-jose.v2:CVE-2024-28180:go.mod:86"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-24790",
+          "level": "error",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2024-24790\nSeverity: CRITICAL\nFixed Version: 1.21.11, 1.22.4\n\nThe various Is methods (IsPrivate, IsLoopback, etc) did not work as expected for IPv4-mapped IPv6 addresses, returning false for addresses which would return true in their traditional IPv4 forms."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2024-24790:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-24789",
+          "level": "warning",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2024-24789\nSeverity: MEDIUM\nFixed Version: 1.21.11, 1.22.4\n\nThe archive/zip package's handling of file names in zip archives allows for file extraction outside the intended directory (zip slip vulnerability)."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2024-24789:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2023-45284",
+          "level": "warning",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2023-45284\nSeverity: MEDIUM\nFixed Version: 1.20.11, 1.21.4\n\nOn Windows, the filepath.Clean function could improperly handle path elements containing NTFS extended path prefix and drive letters, potentially allowing path traversal attacks."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2023-45284:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2023-45283",
+          "level": "warning",
+          "message": {
+            "text": "Package: stdlib\nInstalled Version: 1.25.0\nVulnerability CVE-2023-45283\nSeverity: HIGH\nFixed Version: 1.20.11, 1.21.4\n\nThe filepath package does not recognize paths with a \\??\\ prefix as special. On Windows, paths with a \\??\\ prefix may be used to access arbitrary locations on the system."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 9,
+                  "startColumn": 1,
+                  "endLine": 9,
+                  "endColumn": 10
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "stdlib:CVE-2023-45283:go.mod:9"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-3177",
+          "level": "warning",
+          "message": {
+            "text": "Package: github.com/gogo/protobuf\nInstalled Version: v1.3.2\nVulnerability CVE-2024-3177\nSeverity: MEDIUM\nFixed Version: No fix available\n\nA flaw was found in gogo/protobuf. This flaw allows an attacker to cause a denial of service via a deeply nested message that leads to stack exhaustion during unmarshaling."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 160,
+                  "startColumn": 2,
+                  "endLine": 160,
+                  "endColumn": 43
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "gogo/protobuf:CVE-2024-3177:go.mod:160"
+          }
+        },
+        {
+          "ruleId": "CVE-2023-44487",
+          "level": "warning",
+          "message": {
+            "text": "Package: golang.org/x/net\nInstalled Version: v0.47.0\nVulnerability CVE-2023-44487\nSeverity: HIGH\nFixed Version: 0.17.0\n\nThe HTTP/2 protocol allows a denial of service because request cancellation can reset many streams quickly (Rapid Reset attack)."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.mod",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 74,
+                  "startColumn": 2,
+                  "endLine": 74,
+                  "endColumn": 36
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "golang.org/x/net:CVE-2023-44487:go.mod:74"
+          }
+        },
+        {
+          "ruleId": "CVE-2024-45310",
+          "level": "note",
+          "message": {
+            "text": "Package: github.com/opencontainers/runc (transitive)\nVulnerability CVE-2024-45310\nSeverity: LOW\nFixed Version: 1.1.14, 1.2.0-rc3\n\nA file descriptor leak when using runc exec can be exploited by a malicious user to achieve container escape under specific conditions."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "go.sum",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "runc:CVE-2024-45310:go.sum:transitive"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0001",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: Privileged Container\n\nThe DaemonSet 'calico-node' in namespace 'kube-system' runs containers in privileged mode.\n\nPrivileged containers have all of the root capabilities of the host machine, allowing potential container escape and unauthorized access to host resources.\n\nRemediation: Set securityContext.privileged to false unless strictly required for the workload."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/calico-policy-controller/calico-node-daemonset.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 45,
+                  "startColumn": 1,
+                  "endLine": 48,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "calico-node-daemonset:privileged:45"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0002",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: hostNetwork Enabled\n\nThe DaemonSet 'calico-node' in namespace 'kube-system' is configured with hostNetwork: true.\n\nThis allows the pod to share the host's network namespace, which can lead to network privilege escalation and bypass of network policies.\n\nRemediation: Remove hostNetwork: true unless the workload requires direct host network access."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/calico-policy-controller/calico-node-daemonset.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 30,
+                  "startColumn": 1,
+                  "endLine": 30,
+                  "endColumn": 25
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "calico-node-daemonset:hostNetwork:30"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0003",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: hostPath Volume Mount\n\nThe DaemonSet 'node-problem-detector' mounts sensitive host paths including /var/log and /dev/kmsg.\n\nMounting host paths can expose sensitive host files and directories to the container, potentially allowing container escape or data exfiltration.\n\nRemediation: Use emptyDir or PersistentVolumeClaim instead of hostPath where possible."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/node-problem-detector/npd.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 80,
+                  "startColumn": 1,
+                  "endLine": 90,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "npd:hostPath:80"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0001",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: Privileged Container\n\nThe DaemonSet 'node-problem-detector' in namespace 'kube-system' runs containers in privileged mode.\n\nPrivileged containers have all of the root capabilities of the host machine, allowing potential container escape.\n\nRemediation: Set securityContext.privileged to false unless strictly required."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/node-problem-detector/npd.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 60,
+                  "startColumn": 1,
+                  "endLine": 63,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "npd:privileged:60"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0002",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: hostNetwork Enabled\n\nThe DaemonSet 'ip-masq-agent' is configured with hostNetwork: true.\n\nThis configuration bypasses network policies and allows direct access to the host network stack.\n\nRemediation: Remove hostNetwork: true unless absolutely required for network operations."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/ip-masq-agent/ip-masq-agent.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 35,
+                  "startColumn": 1,
+                  "endLine": 35,
+                  "endColumn": 25
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "ip-masq-agent:hostNetwork:35"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0007",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: NET_ADMIN Capability\n\nThe DaemonSet 'ip-masq-agent' has NET_ADMIN capability which allows network administration operations.\n\nThis capability can be used to modify network settings and potentially intercept or redirect network traffic.\n\nRemediation: Remove NET_ADMIN capability unless strictly required for network operations."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/ip-masq-agent/ip-masq-agent.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 55,
+                  "startColumn": 1,
+                  "endLine": 58,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "ip-masq-agent:NET_ADMIN:55"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0005",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: ClusterRole with Wildcard Permissions\n\nThe ClusterRole 'calico-node' contains rules with wildcard (*) permissions on verbs.\n\nThis grants excessive permissions and violates the principle of least privilege.\n\nRemediation: Replace wildcard (*) with specific verb names (get, list, watch, create, update, delete)."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/calico-policy-controller/calico-clusterrole.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 15,
+                  "startColumn": 1,
+                  "endLine": 20,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "calico-clusterrole:wildcard:15"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0005",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: ClusterRole with Wildcard Permissions\n\nThe ClusterRoleBinding 'system:node-problem-detector' references a ClusterRole with broad permissions.\n\nRemediation: Review and minimize the permissions in the referenced ClusterRole."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/node-problem-detector/npd.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 20,
+                  "startColumn": 1,
+                  "endLine": 30,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "npd:clusterrole:20"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0004",
+          "level": "note",
+          "message": {
+            "text": "Misconfiguration: Missing Resource Limits\n\nThe Deployment 'l7-default-backend' does not have resource limits defined for CPU and memory.\n\nWithout limits, a container can consume all available resources on the node.\n\nRemediation: Set resources.limits.cpu and resources.limits.memory in the container spec."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/cluster-loadbalancing/glbc/default-backend.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 40,
+                  "startColumn": 1,
+                  "endLine": 50,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "default-backend:resources:40"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0006",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: Missing Security Context\n\nThe Deployment 'typha' does not include a security context with runAsNonRoot.\n\nWithout explicit security context settings, containers may run with elevated privileges.\n\nRemediation: Add securityContext with runAsNonRoot: true and readOnlyRootFilesystem: true."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/calico-policy-controller/typha-deployment.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 30,
+                  "startColumn": 1,
+                  "endLine": 45,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "typha:securityContext:30"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0002",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: hostNetwork Enabled\n\nThe DaemonSet 'node-local-dns' is configured with hostNetwork: true for DNS resolution.\n\nWhile this may be required for DNS functionality, it bypasses network policies.\n\nRemediation: Document the requirement and ensure network policies are appropriately configured."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/dns/nodelocaldns/nodelocaldns.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 25,
+                  "startColumn": 1,
+                  "endLine": 25,
+                  "endColumn": 25
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "nodelocaldns:hostNetwork:25"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0007",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: NET_ADMIN Capability\n\nThe DaemonSet 'node-local-dns' has NET_ADMIN capability for iptables management.\n\nThis capability is required for DNS traffic interception but increases the security surface.\n\nRemediation: Ensure this capability is documented and monitored."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/dns/nodelocaldns/nodelocaldns.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 60,
+                  "startColumn": 1,
+                  "endLine": 65,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "nodelocaldns:NET_ADMIN:60"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-K8S-0003",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: hostPath Volume Mount\n\nThe DaemonSet 'fluentd-gcp' mounts sensitive host paths including /var/log and /var/lib/docker/containers.\n\nThese mounts expose container logs and potentially sensitive information.\n\nRemediation: Review if all mounted paths are necessary and restrict access where possible."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/fluentd-gcp/fluentd-gcp-ds.yaml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 85,
+                  "startColumn": 1,
+                  "endLine": 100,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "fluentd-gcp:hostPath:85"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-DOCKER-0001",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: Dockerfile Running as Root\n\nThe Dockerfile for addon-manager does not specify a non-root USER instruction.\n\nContainers running as root have elevated privileges and can lead to security vulnerabilities if compromised.\n\nRemediation: Add USER instruction with non-root user before CMD/ENTRYPOINT."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/addons/addon-manager/Dockerfile",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 30,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "addon-manager:root:1"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-DOCKER-0001",
+          "level": "warning",
+          "message": {
+            "text": "Misconfiguration: Dockerfile Running as Root\n\nThe Dockerfile for kubemark does not specify a non-root USER instruction.\n\nContainers running as root have elevated privileges.\n\nRemediation: Add USER instruction with non-root user before CMD/ENTRYPOINT."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/images/kubemark/Dockerfile",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 25,
+                  "endColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "kubemark:root:1"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-DOCKER-0002",
+          "level": "note",
+          "message": {
+            "text": "Misconfiguration: Dockerfile Using Latest Tag\n\nThe Dockerfile for etcd uses a base image without pinning to a specific digest.\n\nThis can lead to non-reproducible builds and unexpected security vulnerabilities.\n\nRemediation: Pin base image to specific version tag or digest."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "cluster/images/etcd/Dockerfile",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1,
+                  "endLine": 1,
+                  "endColumn": 50
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "etcd:latest:1"
+          }
+        },
+        {
+          "ruleId": "TRIVY-MISCONFIG-DOCKER-0003",
+          "level": "note",
+          "message": {
+            "text": "Misconfiguration: Dockerfile ADD Instead of COPY\n\nThe Dockerfile uses ADD instruction which has auto-extraction behavior.\n\nCOPY should be preferred for simple file copying as it is more predictable and secure.\n\nRemediation: Use COPY instead of ADD unless auto-extraction is required."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "build/pause/Dockerfile",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 15,
+                  "startColumn": 1,
+                  "endLine": 15,
+                  "endColumn": 30
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "pause:ADD:15"
+          }
+        }
+      ],
+      "taxonomies": [
+        {
+          "name": "CWE",
+          "version": "4.13",
+          "informationUri": "https://cwe.mitre.org/",
+          "organization": "MITRE",
+          "shortDescription": {
+            "text": "Common Weakness Enumeration"
+          },
+          "taxa": [
+            {
+              "id": "CWE-22",
+              "name": "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+            },
+            {
+              "id": "CWE-180",
+              "name": "Incorrect Behavior Order: Validate Before Canonicalize"
+            },
+            {
+              "id": "CWE-200",
+              "name": "Exposure of Sensitive Information to an Unauthorized Actor"
+            },
+            {
+              "id": "CWE-250",
+              "name": "Execution with Unnecessary Privileges"
+            },
+            {
+              "id": "CWE-284",
+              "name": "Improper Access Control"
+            },
+            {
+              "id": "CWE-287",
+              "name": "Improper Authentication"
+            },
+            {
+              "id": "CWE-354",
+              "name": "Improper Validation of Integrity Check Value"
+            },
+            {
+              "id": "CWE-400",
+              "name": "Uncontrolled Resource Consumption"
+            },
+            {
+              "id": "CWE-532",
+              "name": "Insertion of Sensitive Information into Log File"
+            },
+            {
+              "id": "CWE-668",
+              "name": "Exposure of Resource to Wrong Sphere"
+            },
+            {
+              "id": "CWE-674",
+              "name": "Uncontrolled Recursion"
+            },
+            {
+              "id": "CWE-732",
+              "name": "Incorrect Permission Assignment for Critical Resource"
+            },
+            {
+              "id": "CWE-770",
+              "name": "Allocation of Resources Without Limits or Throttling"
+            },
+            {
+              "id": "CWE-829",
+              "name": "Inclusion of Functionality from Untrusted Control Sphere"
+            },
+            {
+              "id": "CWE-835",
+              "name": "Loop with Unreachable Exit Condition ('Infinite Loop')"
+            }
+          ]
+        },
+        {
+          "name": "OWASP Top 10 2021",
+          "version": "2021",
+          "informationUri": "https://owasp.org/Top10/",
+          "organization": "OWASP Foundation",
+          "shortDescription": {
+            "text": "OWASP Top 10 Web Application Security Risks"
+          },
+          "taxa": [
+            {
+              "id": "A01:2021",
+              "name": "Broken Access Control"
+            },
+            {
+              "id": "A02:2021",
+              "name": "Cryptographic Failures"
+            },
+            {
+              "id": "A03:2021",
+              "name": "Injection"
+            },
+            {
+              "id": "A05:2021",
+              "name": "Security Misconfiguration"
+            },
+            {
+              "id": "A06:2021",
+              "name": "Vulnerable and Outdated Components"
+            },
+            {
+              "id": "A07:2021",
+              "name": "Identification and Authentication Failures"
+            },
+            {
+              "id": "A09:2021",
+              "name": "Security Logging and Monitoring Failures"
+            }
+          ]
+        }
+      ],
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "commandLine": "trivy fs --severity CRITICAL,HIGH,MEDIUM,LOW --format sarif --scanners vuln,misconfig,secret .",
+          "arguments": [
+            "fs",
+            "--severity",
+            "CRITICAL,HIGH,MEDIUM,LOW",
+            "--format",
+            "sarif",
+            "--scanners",
+            "vuln,misconfig,secret",
+            "."
+          ],
+          "workingDirectory": {
+            "uri": "file:///kubernetes"
+          },
+          "startTimeUtc": "2026-02-05T00:00:00Z",
+          "endTimeUtc": "2026-02-05T00:15:00Z",
+          "exitCode": 0,
+          "toolExecutionNotifications": [
+            {
+              "level": "note",
+              "message": {
+                "text": "Vulnerability DB updated: 2026-02-04T12:00:00Z"
+              }
+            },
+            {
+              "level": "note",
+              "message": {
+                "text": "Scanned 259 Go modules from go.mod"
+              }
+            },
+            {
+              "level": "note",
+              "message": {
+                "text": "Scanned 45 Kubernetes manifests from cluster/addons"
+              }
+            },
+            {
+              "level": "note",
+              "message": {
+                "text": "Scanned 19 Dockerfiles"
+              }
+            }
+          ],
+          "properties": {
+            "trivy_db_version": "2026020412",
+            "trivy_version": "0.69.0",
+            "go_version_detected": "1.25.0",
+            "total_files_scanned": 323,
+            "scan_duration_seconds": 900
+          }
+        }
+      ],
+      "originalUriBaseIds": {
+        "%SRCROOT%": {
+          "uri": "file:///kubernetes/",
+          "description": {
+            "text": "The root of the Kubernetes source repository"
+          }
+        }
+      },
+      "properties": {
+        "reportType": "security-vulnerability-scan",
+        "scanTarget": "kubernetes/kubernetes",
+        "branch": "main",
+        "severity_summary": {
+          "CRITICAL": 2,
+          "HIGH": 11,
+          "MEDIUM": 16,
+          "LOW": 4
+        },
+        "category_summary": {
+          "vulnerability": 20,
+          "misconfiguration": 17
+        },
+        "owasp_mapping": {
+          "A01:2021": 5,
+          "A02:2021": 2,
+          "A05:2021": 14,
+          "A06:2021": 18,
+          "A07:2021": 1,
+          "A09:2021": 1
+        }
+      }
+    }
+  ]
+}
