@@ -1,0 +1,58 @@
+# =============================================================================
+# Kubernetes Security Audit - Memory Monitor Log
+# =============================================================================
+#
+# Purpose:
+#   Resource usage tracking log capturing memory consumption of security
+#   scanning tools at 60-second intervals. Enables constraint validation
+#   against 16GB total and 12GB per-tool limits.
+#
+# Monitoring Constraints (per Agent Action Plan Section 0.9.5):
+#   - Total memory usage MUST stay <16GB
+#   - Individual tool processes MUST NOT exceed 12GB
+#   - Resource monitoring interval: 60 seconds
+#   - SIGTERM/SIGKILL triggered with parallelism reduction if limits exceeded
+#
+# Log Format:
+#   [HH:MM:SS] Memory usage: X.XX GB (total) | trivy: X.XX GB | gosec: X.XX GB | semgrep: X.XX GB
+#   [HH:MM:SS] WARNING: Process <name> approaching limit (X.XX GB / 12.00 GB)
+#   [HH:MM:SS] CRITICAL: Memory limit exceeded - triggering scope reduction
+#
+# Monitoring Script (from Section 0.9.5):
+#   while true; do
+#     MEMORY_USAGE=$(ps aux | grep -E 'trivy|gosec|semgrep' | awk '{sum+=$6} END {printf "%.2f GB", sum/1024/1024}')
+#     echo "[$(date +%H:%M:%S)] Memory usage: $MEMORY_USAGE" >> /audit-results/logs/memory-monitor.log
+#     sleep 60
+#   done &
+#   MONITOR_PID=$!
+#
+# Cleanup:
+#   kill $MONITOR_PID 2>/dev/null  # Stop monitor after audit completion
+#
+# Fields:
+#   - Timestamp: Time of measurement in [HH:MM:SS] format
+#   - Total Memory: Aggregate memory consumption across all scanner processes
+#   - Per-Tool Breakdown: Individual memory usage when approaching limits
+#   - Status Indicators: WARNING (>80% of limit), CRITICAL (limit exceeded)
+#
+# Tool Process Names Monitored:
+#   - trivy: Dependency scanning, SBOM generation, misconfiguration detection
+#   - gosec: Go AST/SSA static security analysis
+#   - semgrep: Multi-language pattern-based security scanning
+#
+# Threshold Actions:
+#   - >9.6GB per tool (80%): Log WARNING, increase monitoring frequency
+#   - >12GB per tool: SIGTERM, wait 10s, SIGKILL if needed, reduce parallelism
+#   - >12.8GB total (80%): Log WARNING, prepare scope reduction
+#   - >16GB total: Halt non-critical scans, prioritize Critical/High analysis
+#
+# Scope Reduction Fallback (if limits exceeded):
+#   Priority 1: cmd/kube-apiserver/** - Critical authentication/authorization
+#   Priority 2: pkg/kubelet/** - Node-level security critical
+#   Priority 3: cmd/kubelet/** - Kubelet entrypoint
+#   Priority 4: pkg/controller/** - Controller security
+#   Priority 5: plugin/pkg/admission/** - Admission plugins (if capacity)
+#
+# =============================================================================
+# Memory Monitoring Log Entries Begin Below
+# =============================================================================
