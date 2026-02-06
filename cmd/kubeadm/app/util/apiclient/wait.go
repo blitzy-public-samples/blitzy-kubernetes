@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"text/template"
@@ -260,8 +261,18 @@ func (w *KubeWaiter) WaitForControlPlaneComponents(podMap map[string]*v1.Pod, ap
 		_, _ = fmt.Fprintf(w.writer, "[control-plane-check] Checking %s at %s\n", comp.name, url)
 
 		go func(comp controlPlaneComponent) {
+			// Check environment variable for InsecureSkipVerify setting
+			// Defaults to false (secure) for production use
+			// SECURITY FIX (VULN-013 - CWE-295): Certificate validation is now enabled by default
+			// to prevent Man-in-the-Middle attacks during kubeadm init/join cluster initialization.
+			// Set KUBEADM_INSECURE_SKIP_TLS_VERIFY=true for development/testing with self-signed certificates.
+			insecureSkipVerify := os.Getenv("KUBEADM_INSECURE_SKIP_TLS_VERIFY") == "true"
+
 			tr := &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: insecureSkipVerify,
+					MinVersion:         tls.VersionTLS12,
+				},
 			}
 			client := &http.Client{Transport: tr}
 			start := time.Now()

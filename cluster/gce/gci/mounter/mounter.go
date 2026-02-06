@@ -32,7 +32,42 @@ const (
 	nfsRPCBindErrMsg = "mount.nfs: rpc.statd is not running but is required for remote locking.\nmount.nfs: Either use '-o nolock' to keep locks local, or start statd.\nmount.nfs: an incorrect mount option was specified\n"
 	rpcBindCmd       = "/sbin/rpcbind"
 	defaultRootfs    = "/home/kubernetes/containerized_mounter/rootfs"
+	// SECURITY FIX (VULN-010 - CWE-78): Characters that could enable command injection
+	// Includes: semicolon, pipe, ampersand, backtick, dollar, parentheses, braces,
+	// brackets, angle brackets, backslash, exclamation, hash, tilde, asterisk
+	dangerousChars = ";|&`$(){}[]<>\\!#~*"
 )
+
+// validateArgs checks for potentially dangerous characters that could enable command injection
+// and path traversal patterns in command arguments.
+// SECURITY FIX (VULN-010 - CWE-78): Validate arguments before passing to exec.Command
+func validateArgs(args []string) error {
+	for _, arg := range args {
+		// Check for dangerous shell characters that could enable command injection
+		if strings.ContainsAny(arg, dangerousChars) {
+			return fmt.Errorf("argument contains invalid characters: %q", arg)
+		}
+		// Check for path traversal patterns that could escape intended directories
+		if strings.Contains(arg, "..") {
+			return fmt.Errorf("argument contains path traversal pattern: %q", arg)
+		}
+	}
+	return nil
+}
+
+// validatePath validates a file path to prevent command injection and path traversal attacks.
+// SECURITY FIX (VULN-010 - CWE-78): Validate paths before using in exec.Command
+func validatePath(path string) error {
+	// Check for dangerous shell characters that could enable command injection
+	if strings.ContainsAny(path, dangerousChars) {
+		return fmt.Errorf("path contains invalid characters: %q", path)
+	}
+	// Check for path traversal patterns that could escape intended directories
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("path contains path traversal pattern: %q", path)
+	}
+	return nil
+}
 
 func main() {
 
@@ -64,6 +99,14 @@ func main() {
 func mountInChroot(rootfsPath string, args []string) error {
 	if _, err := os.Stat(rootfsPath); os.IsNotExist(err) {
 		return fmt.Errorf("path <%s> does not exist", rootfsPath)
+	}
+	// SECURITY FIX (VULN-010 - CWE-78): Validate rootfsPath to prevent path traversal attacks
+	if err := validatePath(rootfsPath); err != nil {
+		return fmt.Errorf("invalid rootfs path: %w", err)
+	}
+	// SECURITY FIX (VULN-010 - CWE-78): Validate arguments before command execution
+	if err := validateArgs(args); err != nil {
+		return fmt.Errorf("invalid argument: %w", err)
 	}
 	args = append([]string{rootfsPath, mountCmd}, args...)
 	output, err := exec.Command(chrootCmd, args...).CombinedOutput()

@@ -1221,8 +1221,15 @@ func RunKubelet(ctx context.Context, kubeServer *options.KubeletServer, kubeDeps
 		logger.Info("Could not parse some node IP(s), ignoring them", "IPs", invalidNodeIps)
 	}
 
+	// SECURITY FIX (VULN-003 - CWE-250): Privileged container access is controlled
+	// by the DisablePrivilegedByDefault feature gate. When the feature gate is enabled,
+	// privileged containers are blocked by default, enforcing least-privilege principles.
+	// When disabled (default for backward compatibility), AllowPrivileged is set to true
+	// to preserve existing behavior. Cluster administrators should enable
+	// DisablePrivilegedByDefault for production security hardening.
+	allowPrivileged := !utilfeature.DefaultFeatureGate.Enabled(features.DisablePrivilegedByDefault)
 	capabilities.Initialize(capabilities.Capabilities{
-		AllowPrivileged: true,
+		AllowPrivileged: allowPrivileged,
 	})
 
 	credentialprovider.SetPreferredDockercfgPath(kubeServer.RootDirectory)

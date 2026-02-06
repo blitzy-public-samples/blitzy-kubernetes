@@ -19,6 +19,7 @@ package apiserver
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"time"
@@ -55,6 +56,7 @@ import (
 	controlplaneadmission "k8s.io/kubernetes/pkg/controlplane/apiserver/admission"
 	"k8s.io/kubernetes/pkg/controlplane/apiserver/options"
 	"k8s.io/kubernetes/pkg/controlplane/controller/clusterauthenticationtrust"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubeapiserver"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
 	rbacrest "k8s.io/kubernetes/pkg/registry/rbac/rest"
@@ -286,7 +288,15 @@ func CreateConfig(
 	[]admission.PluginInitializer,
 	error,
 ) {
-	proxyTransport := CreateProxyTransport()
+	// Determine TLS verification behavior based on StrictTLSVerification feature gate.
+	// When StrictTLSVerification is enabled, TLS certificate verification is enforced
+	// for proxy connections, preventing MITM attacks (CWE-295).
+	// When disabled (default for backward compatibility), InsecureSkipVerify is true
+	// because proxying to pods and services is IP-based, making hostname verification
+	// impractical. In production environments with strict security requirements,
+	// enable the StrictTLSVerification feature gate or use a service mesh with mTLS.
+	insecureSkipVerify := !utilfeature.DefaultFeatureGate.Enabled(features.StrictTLSVerification)
+	proxyTransport := CreateProxyTransport(insecureSkipVerify, nil)
 
 	opts.Metrics.Apply()
 	serviceaccount.RegisterMetrics()
@@ -412,10 +422,29 @@ func CreateConfig(
 }
 
 // CreateProxyTransport creates the dialer infrastructure to connect to the nodes.
-func CreateProxyTransport() *http.Transport {
+//
+// Security parameters:
+//   - insecureSkipVerify: When true, TLS certificate verification is disabled. This should
+//     only be used when hostname verification is not possible (e.g., IP-based proxying to
+//     pods/services) and proper network isolation is in place. Default should be false.
+//   - rootCAs: Optional trusted CA pool for certificate verification. When nil and
+//     insecureSkipVerify is false, the system root CA pool is used.
+//
+// WARNING: Setting insecureSkipVerify to true exposes connections to MITM attacks.
+// Use with caution and only when necessary for internal cluster communication.
+func CreateProxyTransport(insecureSkipVerify bool, rootCAs *x509.CertPool) *http.Transport {
 	var proxyDialerFn utilnet.DialFunc
-	// Proxying to pods and services is IP-based... don't expect to be able to verify the hostname
-	proxyTLSClientConfig := &tls.Config{InsecureSkipVerify: true}
+	// WARNING: Security implications of InsecureSkipVerify:
+	// - Setting InsecureSkipVerify to true disables TLS certificate validation
+	// - This exposes the connection to Man-in-the-Middle (MITM) attacks
+	// - For internal pod/service IP proxying where hostname verification isn't possible,
+	//   this may be acceptable with proper network isolation
+	// - RECOMMENDATION: Provide a proper CA pool (rootCAs) when security is critical
+	proxyTLSClientConfig := &tls.Config{
+		InsecureSkipVerify: insecureSkipVerify,
+		RootCAs:            rootCAs,
+		MinVersion:         tls.VersionTLS12,
+	}
 	proxyTransport := utilnet.SetTransportDefaults(&http.Transport{
 		DialContext:     proxyDialerFn,
 		TLSClientConfig: proxyTLSClientConfig,

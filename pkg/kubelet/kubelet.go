@@ -19,6 +19,7 @@ package kubelet
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"math"
@@ -277,6 +278,24 @@ func getContainerEtcHostsPath() string {
 		return windowsEtcHostsPath
 	}
 	return linuxEtcHostsPath
+}
+
+// loadCAPool loads a certificate pool from a PEM-encoded CA certificate file.
+// This is used to configure TLS verification for container lifecycle HTTP requests
+// when a custom CA file is provided. Returns an error if the file cannot be read
+// or contains no valid certificates.
+func loadCAPool(caFilePath string) (*x509.CertPool, error) {
+	caCert, err := os.ReadFile(caFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA file %q: %w", caFilePath, err)
+	}
+
+	certPool := x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("failed to parse CA certificates from %q: no valid certificates found", caFilePath)
+	}
+
+	return certPool, nil
 }
 
 // SyncHandler is an interface implemented by Kubelet, for testability
@@ -583,14 +602,45 @@ func NewMainKubelet(ctx context.Context,
 		}
 	}
 
-	// A TLS transport is needed to make HTTPS-based container lifecycle requests,
-	// but we do not have the information necessary to do TLS verification.
+	// A TLS transport is needed to make HTTPS-based container lifecycle requests.
+	// TLS verification can be configured through environment variables:
+	// - KUBELET_CONTAINER_LIFECYCLE_INSECURE_SKIP_TLS_VERIFY: Set to "false" to enable TLS verification (default: "true" for backward compatibility)
+	// - KUBELET_CONTAINER_LIFECYCLE_TLS_CA_FILE: Path to CA certificate file for TLS verification
+	//
+	// SECURITY NOTE (VULN-014 - CWE-295): InsecureSkipVerify defaults to true for backward
+	// compatibility, but should be set to false in production environments where CA certificates
+	// can be provided. MinVersion is set to TLS 1.2 to ensure secure protocol versions.
+	// Consider using network policies to restrict container lifecycle endpoint access.
 	//
 	// This client must not be modified to include credentials, because it is
 	// critical that credentials not leak from the client to arbitrary hosts.
-	insecureContainerLifecycleHTTPClient := &http.Client{
+	// Determine InsecureSkipVerify based on the StrictTLSVerification feature gate.
+	// When StrictTLSVerification is enabled, TLS verification is enforced.
+	// When disabled, the environment variable KUBELET_CONTAINER_LIFECYCLE_INSECURE_SKIP_TLS_VERIFY
+	// controls TLS verification behavior (defaults to true for backward compatibility).
+	insecureSkipTLSVerify := !utilfeature.DefaultFeatureGate.Enabled(features.StrictTLSVerification)
+	if insecureSkipTLSVerify {
+		// Feature gate not enabled, fall back to environment variable control
+		insecureSkipTLSVerify = os.Getenv("KUBELET_CONTAINER_LIFECYCLE_INSECURE_SKIP_TLS_VERIFY") != "false"
+	}
+	containerLifecycleTLSConfig := &tls.Config{
+		InsecureSkipVerify: insecureSkipTLSVerify,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	// Optionally configure RootCAs if a CA file path is provided via environment variable
+	if containerLifecycleTLSCAFile := os.Getenv("KUBELET_CONTAINER_LIFECYCLE_TLS_CA_FILE"); containerLifecycleTLSCAFile != "" {
+		rootCAs, err := loadCAPool(containerLifecycleTLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load container lifecycle TLS CA: %w", err)
+		}
+		containerLifecycleTLSConfig.RootCAs = rootCAs
+		klog.InfoS("Loaded custom CA certificates for container lifecycle HTTP client", "caFile", containerLifecycleTLSCAFile)
+	}
+
+	containerLifecycleHTTPClient := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: containerLifecycleTLSConfig,
 		},
 		CheckRedirect: httpprobe.RedirectChecker(false),
 	}
@@ -775,7 +825,7 @@ func NewMainKubelet(ctx context.Context,
 		kubeCfg.MaxPods,
 		kubeDeps.OSInterface,
 		klet,
-		insecureContainerLifecycleHTTPClient,
+		containerLifecycleHTTPClient,
 		imageBackOff,
 		kubeCfg.SerializeImagePulls,
 		kubeCfg.MaxParallelImagePulls,

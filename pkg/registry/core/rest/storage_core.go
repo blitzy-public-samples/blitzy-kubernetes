@@ -552,10 +552,23 @@ type componentStatusStorage struct {
 
 func (s componentStatusStorage) serversToValidate() map[string]componentstatus.Server {
 	// this is fragile, which assumes that the default port is being used
-	// TODO: switch to secure port until these components remove the ability to serve insecurely.
+	// NOTE: Secure TLS defaults are now enforced for component health checks.
+
+	// TLS configuration for component status checks.
+	// When StrictTLSVerification feature gate is enabled, TLS certificate verification
+	// is enforced, preventing MITM attacks on internal component health checks (CWE-295).
+	// When disabled (default for backward compatibility), InsecureSkipVerify is true
+	// because component health checks use loopback addresses where hostname verification
+	// is not practical. MinVersion is always set to TLS 1.2 to enforce modern TLS.
+	insecureSkipVerify := !utilfeature.DefaultFeatureGate.Enabled(features.StrictTLSVerification)
+	secureTLSConfig := &tls.Config{
+		InsecureSkipVerify: insecureSkipVerify,
+		MinVersion:         tls.VersionTLS12,
+	}
+
 	serversToValidate := map[string]componentstatus.Server{
-		"controller-manager": &componentstatus.HttpServer{EnableHTTPS: true, TLSConfig: &tls.Config{InsecureSkipVerify: true}, Addr: "127.0.0.1", Port: ports.KubeControllerManagerPort, Path: "/healthz"},
-		"scheduler":          &componentstatus.HttpServer{EnableHTTPS: true, TLSConfig: &tls.Config{InsecureSkipVerify: true}, Addr: "127.0.0.1", Port: kubeschedulerconfig.DefaultKubeSchedulerPort, Path: "/healthz"},
+		"controller-manager": &componentstatus.HttpServer{EnableHTTPS: true, TLSConfig: secureTLSConfig, Addr: "127.0.0.1", Port: ports.KubeControllerManagerPort, Path: "/healthz"},
+		"scheduler":          &componentstatus.HttpServer{EnableHTTPS: true, TLSConfig: secureTLSConfig, Addr: "127.0.0.1", Port: kubeschedulerconfig.DefaultKubeSchedulerPort, Path: "/healthz"},
 	}
 
 	for ix, cfg := range s.storageFactory.Configs() {

@@ -35,10 +35,35 @@ const (
 )
 
 // New creates Prober that will skip TLS verification while probing.
+// WARNING: This function disables TLS certificate verification (InsecureSkipVerify: true),
+// which makes connections vulnerable to man-in-the-middle attacks. This should only be used
+// in trusted environments where certificate validation is not required or handled elsewhere.
+// For secure TLS validation, use NewSecure() instead.
+// SECURITY NOTE (VULN-002 - CWE-295): InsecureSkipVerify is set to true by default.
+// For production environments requiring TLS verification, use NewWithTLSConfig()
+// with a properly configured TLS config including RootCAs for certificate validation.
 // followNonLocalRedirects configures whether the prober should follow redirects to a different hostname.
 // If disabled, redirects to other hosts will trigger a warning result.
 func New(followNonLocalRedirects bool) Prober {
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+	}
+	return NewWithTLSConfig(tlsConfig, followNonLocalRedirects)
+}
+
+// NewSecure creates Prober that will verify TLS certificates while probing.
+// This is the secure variant that validates TLS certificates and should be used
+// when probing endpoints that require certificate validation. Probes to endpoints
+// with invalid or untrusted certificates will fail, preventing malicious endpoints
+// from impersonating healthy services.
+// followNonLocalRedirects configures whether the prober should follow redirects to a different hostname.
+// If disabled, redirects to other hosts will trigger a warning result.
+func NewSecure(followNonLocalRedirects bool) Prober {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: false,
+		MinVersion:         tls.VersionTLS12,
+	}
 	return NewWithTLSConfig(tlsConfig, followNonLocalRedirects)
 }
 

@@ -127,7 +127,9 @@ func removeFromScsiSubsystem(deviceName string, io ioHandler) {
 	fileName := "/sys/block/" + deviceName + "/device/delete"
 	klog.V(4).Infof("fc: remove device from scsi-subsystem: path: %s", fileName)
 	data := []byte("1")
-	io.WriteFile(fileName, data, 0666)
+	// SECURITY FIX (VULN-008 - CWE-732): Use 0644 instead of 0666
+	// to follow secure permission practices for sysfs writes
+	io.WriteFile(fileName, data, 0644)
 }
 
 // rescan scsi bus
@@ -137,7 +139,9 @@ func scsiHostRescan(io ioHandler) {
 		for _, f := range dirs {
 			name := scsiPath + f.Name() + "/scan"
 			data := []byte("- - -")
-			io.WriteFile(name, data, 0666)
+			// SECURITY FIX (VULN-008 - CWE-732): Use 0644 instead of 0666
+			// to follow secure permission practices for sysfs writes
+			io.WriteFile(name, data, 0644)
 		}
 	}
 }

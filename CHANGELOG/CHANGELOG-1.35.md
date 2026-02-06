@@ -1,5 +1,10 @@
 <!-- BEGIN MUNGE: GENERATED_TOC -->
 
+- [Security Hardening Feature Gates](#security-hardening-feature-gates)
+  - [StrictTLSVerification (Alpha)](#stricttlsverification-alpha)
+  - [DisablePrivilegedByDefault (Alpha)](#disableprivilegedbydefault-alpha)
+  - [SecureKubeletDefaults (Alpha)](#securekubeletdefaults-alpha)
+  - [Additional Security Fixes](#additional-security-fixes)
 - [v1.35.0-rc.0](#v1350-rc0)
   - [Downloads for v1.35.0-rc.0](#downloads-for-v1350-rc0)
     - [Source Code](#source-code)
@@ -89,6 +94,64 @@
     - [Removed](#removed-4)
 
 <!-- END MUNGE: GENERATED_TOC -->
+
+# Security Hardening Feature Gates
+
+Three new alpha feature gates have been introduced to improve Kubernetes security posture.
+These feature gates default to disabled (alpha) and can be enabled via `--feature-gates` flags
+on the relevant components. See the [migration guide](docs/security-hardening-migration-guide.md)
+for upgrade procedures.
+
+## StrictTLSVerification (Alpha)
+
+- **Feature Gate**: `StrictTLSVerification`
+- **Default**: Disabled (Alpha)
+- **Components Affected**: kube-apiserver, kubelet, kube-scheduler
+- **Security Impact**: Enforces TLS certificate verification for internal component communication,
+  preventing Man-in-the-Middle attacks (CWE-295). When enabled, the API server proxy transport,
+  kubelet container lifecycle HTTP client, component status health checks, and HTTP probes
+  will validate TLS certificates instead of skipping verification.
+- **Migration**: Enable with `--feature-gates=StrictTLSVerification=true`. Ensure all internal
+  endpoints have valid certificates signed by a trusted CA before enabling.
+- **Breaking Change**: Connections to endpoints with self-signed or invalid certificates will fail.
+
+## DisablePrivilegedByDefault (Alpha)
+
+- **Feature Gate**: `DisablePrivilegedByDefault`
+- **Default**: Disabled (Alpha)
+- **Components Affected**: kubelet
+- **Security Impact**: Prevents privileged container creation by default (CWE-250), enforcing
+  the principle of least privilege. When enabled, `AllowPrivileged` is set to `false` on the
+  kubelet, rejecting workloads that request `privileged: true` in their security context.
+- **Migration**: Enable with `--feature-gates=DisablePrivilegedByDefault=true`. Review all
+  workloads for privileged container usage before enabling. Workloads that legitimately require
+  privileged mode need explicit cluster-level configuration.
+- **Breaking Change**: Existing privileged pods will fail to be scheduled on nodes with this
+  feature gate enabled.
+
+## SecureKubeletDefaults (Alpha)
+
+- **Feature Gate**: `SecureKubeletDefaults`
+- **Default**: Disabled (Alpha)
+- **Components Affected**: kubelet
+- **Security Impact**: Hardens kubelet authentication and authorization defaults (CWE-285,
+  CWE-287). When enabled:
+  - Anonymous authentication is disabled (`--anonymous-auth=false`)
+  - Webhook authentication is enabled (`--authentication-token-webhook=true`)
+  - Authorization mode defaults to Webhook (`--authorization-mode=Webhook`)
+- **Migration**: Enable with `--feature-gates=SecureKubeletDefaults=true`. Ensure the API server
+  is configured to serve as the webhook authentication/authorization backend before enabling.
+- **Breaking Change**: Unauthenticated requests to the kubelet API will be rejected.
+
+## Additional Security Fixes
+
+- **File Permissions Hardened**: etcd data directory permissions changed from 0777 to 0700,
+  version file permissions from 0666 to 0600 (CWE-732)
+- **Kubeconfig Permissions**: Kubeconfig file write permissions changed from 0666 to 0600
+- **FC Volume Permissions**: Fibre Channel volume sysfs writes changed from 0666 to 0644
+- **Command Injection Prevention**: Input validation added to GCE mounter to prevent
+  OS command injection (CWE-78)
+- **Bootstrap Token Masking**: Bootstrap tokens are now masked in log output (CWE-532)
 
 # v1.35.0-rc.0
 
