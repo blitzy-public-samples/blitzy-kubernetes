@@ -614,10 +614,17 @@ func NewMainKubelet(ctx context.Context,
 	//
 	// This client must not be modified to include credentials, because it is
 	// critical that credentials not leak from the client to arbitrary hosts.
+	// Determine InsecureSkipVerify based on the StrictTLSVerification feature gate.
+	// When StrictTLSVerification is enabled, TLS verification is enforced.
+	// When disabled, the environment variable KUBELET_CONTAINER_LIFECYCLE_INSECURE_SKIP_TLS_VERIFY
+	// controls TLS verification behavior (defaults to true for backward compatibility).
+	insecureSkipTLSVerify := !utilfeature.DefaultFeatureGate.Enabled(features.StrictTLSVerification)
+	if insecureSkipTLSVerify {
+		// Feature gate not enabled, fall back to environment variable control
+		insecureSkipTLSVerify = os.Getenv("KUBELET_CONTAINER_LIFECYCLE_INSECURE_SKIP_TLS_VERIFY") != "false"
+	}
 	containerLifecycleTLSConfig := &tls.Config{
-		// Default to InsecureSkipVerify: true for backward compatibility.
-		// Set KUBELET_CONTAINER_LIFECYCLE_INSECURE_SKIP_TLS_VERIFY=false to enable verification.
-		InsecureSkipVerify: os.Getenv("KUBELET_CONTAINER_LIFECYCLE_INSECURE_SKIP_TLS_VERIFY") != "false",
+		InsecureSkipVerify: insecureSkipTLSVerify,
 		MinVersion:         tls.VersionTLS12,
 	}
 

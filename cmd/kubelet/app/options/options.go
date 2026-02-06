@@ -34,6 +34,7 @@ import (
 	"k8s.io/kubelet/config/v1beta1"
 	kubeletapis "k8s.io/kubelet/pkg/apis"
 	"k8s.io/kubernetes/pkg/cluster/ports"
+	"k8s.io/kubernetes/pkg/features"
 	kubeletconfigapi "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	kubeletscheme "k8s.io/kubernetes/pkg/kubelet/apis/config/scheme"
 	kubeletconfigvalidation "k8s.io/kubernetes/pkg/kubelet/apis/config/validation"
@@ -211,18 +212,33 @@ func NewKubeletConfiguration() (*kubeletconfigapi.KubeletConfiguration, error) {
 // preserve the command line API. This is used to construct the baseline default KubeletConfiguration
 // before the first round of flag parsing.
 func applyLegacyDefaults(kc *kubeletconfigapi.KubeletConfiguration) {
-	// --anonymous-auth
-	// SECURITY FIX (VULN-011 - CWE-287): Disable anonymous authentication by default
-	// to prevent unauthenticated access to kubelet API endpoints
-	kc.Authentication.Anonymous.Enabled = false
-	// --authentication-token-webhook
-	// SECURITY FIX (VULN-012 - CWE-287): Enable webhook authentication by default
-	// to ensure proper authentication of requests to the kubelet API
-	kc.Authentication.Webhook.Enabled = true
-	// --authorization-mode
-	// SECURITY FIX (VULN-004 - CWE-285): Use Webhook authorization mode by default
-	// instead of AlwaysAllow to enforce proper authorization checks
-	kc.Authorization.Mode = kubeletconfigapi.KubeletAuthorizationModeWebhook
+	// SecureKubeletDefaults feature gate controls whether kubelet uses secure
+	// authentication and authorization defaults. When enabled, anonymous auth is
+	// disabled, webhook authentication is enabled, and authorization mode is Webhook.
+	// When disabled (default for backward compatibility), legacy insecure defaults
+	// are preserved to avoid breaking existing deployments.
+	if utilfeature.DefaultFeatureGate.Enabled(features.SecureKubeletDefaults) {
+		// --anonymous-auth
+		// SECURITY FIX (VULN-011 - CWE-287): Disable anonymous authentication by default
+		// to prevent unauthenticated access to kubelet API endpoints
+		kc.Authentication.Anonymous.Enabled = false
+		// --authentication-token-webhook
+		// SECURITY FIX (VULN-012 - CWE-287): Enable webhook authentication by default
+		// to ensure proper authentication of requests to the kubelet API
+		kc.Authentication.Webhook.Enabled = true
+		// --authorization-mode
+		// SECURITY FIX (VULN-004 - CWE-285): Use Webhook authorization mode by default
+		// instead of AlwaysAllow to enforce proper authorization checks
+		kc.Authorization.Mode = kubeletconfigapi.KubeletAuthorizationModeWebhook
+	} else {
+		// Legacy defaults preserved for backward compatibility.
+		// WARNING: These defaults are insecure and should be explicitly overridden
+		// in production environments. Enable the SecureKubeletDefaults feature gate
+		// to use secure defaults.
+		kc.Authentication.Anonymous.Enabled = true
+		kc.Authentication.Webhook.Enabled = false
+		kc.Authorization.Mode = kubeletconfigapi.KubeletAuthorizationModeAlwaysAllow
+	}
 	// --read-only-port
 	kc.ReadOnlyPort = ports.KubeletReadOnlyPort
 }

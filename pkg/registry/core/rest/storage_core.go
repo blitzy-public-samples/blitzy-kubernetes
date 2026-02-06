@@ -554,15 +554,16 @@ func (s componentStatusStorage) serversToValidate() map[string]componentstatus.S
 	// this is fragile, which assumes that the default port is being used
 	// NOTE: Secure TLS defaults are now enforced for component health checks.
 
-	// TLS configuration for component status checks with secure defaults.
-	// InsecureSkipVerify defaults to false to enable proper certificate validation
-	// and prevent Man-in-the-Middle (MITM) attacks on internal component health checks.
-	// MinVersion is set to TLS 1.2 to enforce modern TLS requirements.
-	// To allow insecure connections for backwards compatibility or testing,
-	// configure the components to use certificates trusted by the API server's CA pool.
+	// TLS configuration for component status checks.
+	// When StrictTLSVerification feature gate is enabled, TLS certificate verification
+	// is enforced, preventing MITM attacks on internal component health checks (CWE-295).
+	// When disabled (default for backward compatibility), InsecureSkipVerify is true
+	// because component health checks use loopback addresses where hostname verification
+	// is not practical. MinVersion is always set to TLS 1.2 to enforce modern TLS.
+	insecureSkipVerify := !utilfeature.DefaultFeatureGate.Enabled(features.StrictTLSVerification)
 	secureTLSConfig := &tls.Config{
-		InsecureSkipVerify: false,            // Secure default: verify certificates
-		MinVersion:         tls.VersionTLS12, // Enforce modern TLS
+		InsecureSkipVerify: insecureSkipVerify,
+		MinVersion:         tls.VersionTLS12,
 	}
 
 	serversToValidate := map[string]componentstatus.Server{

@@ -23,11 +23,13 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/record"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/events"
 	"k8s.io/kubernetes/pkg/kubelet/prober/results"
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/probe"
 	execprobe "k8s.io/kubernetes/pkg/probe/exec"
 	grpcprobe "k8s.io/kubernetes/pkg/probe/grpc"
@@ -58,9 +60,19 @@ func newProber(
 	recorder record.EventRecorder) *prober {
 
 	const followNonLocalRedirects = false
+	// When StrictTLSVerification is enabled, use NewSecure() to enforce TLS
+	// certificate validation for HTTP probes, preventing MITM attacks (CWE-295).
+	// When disabled (default), use New() which skips TLS verification for
+	// backward compatibility with endpoints using self-signed certificates.
+	var httpProber httpprobe.Prober
+	if utilfeature.DefaultFeatureGate.Enabled(features.StrictTLSVerification) {
+		httpProber = httpprobe.NewSecure(followNonLocalRedirects)
+	} else {
+		httpProber = httpprobe.New(followNonLocalRedirects)
+	}
 	return &prober{
 		exec:     execprobe.New(),
-		http:     httpprobe.New(followNonLocalRedirects),
+		http:     httpProber,
 		tcp:      tcpprobe.New(),
 		grpc:     grpcprobe.New(),
 		runner:   runner,

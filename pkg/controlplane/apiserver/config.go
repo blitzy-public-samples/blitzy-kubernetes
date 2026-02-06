@@ -56,6 +56,7 @@ import (
 	controlplaneadmission "k8s.io/kubernetes/pkg/controlplane/apiserver/admission"
 	"k8s.io/kubernetes/pkg/controlplane/apiserver/options"
 	"k8s.io/kubernetes/pkg/controlplane/controller/clusterauthenticationtrust"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubeapiserver"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
 	rbacrest "k8s.io/kubernetes/pkg/registry/rbac/rest"
@@ -287,13 +288,15 @@ func CreateConfig(
 	[]admission.PluginInitializer,
 	error,
 ) {
-	// NOTE: InsecureSkipVerify is set to true for backward compatibility because proxying
-	// to pods and services is IP-based, making hostname verification impractical.
-	// In production environments with strict security requirements, consider:
-	// - Using a service mesh with mTLS
-	// - Providing a proper CA pool via the rootCAs parameter
-	// - Implementing network-level security controls to mitigate MITM risks
-	proxyTransport := CreateProxyTransport(true, nil)
+	// Determine TLS verification behavior based on StrictTLSVerification feature gate.
+	// When StrictTLSVerification is enabled, TLS certificate verification is enforced
+	// for proxy connections, preventing MITM attacks (CWE-295).
+	// When disabled (default for backward compatibility), InsecureSkipVerify is true
+	// because proxying to pods and services is IP-based, making hostname verification
+	// impractical. In production environments with strict security requirements,
+	// enable the StrictTLSVerification feature gate or use a service mesh with mTLS.
+	insecureSkipVerify := !utilfeature.DefaultFeatureGate.Enabled(features.StrictTLSVerification)
+	proxyTransport := CreateProxyTransport(insecureSkipVerify, nil)
 
 	opts.Metrics.Apply()
 	serviceaccount.RegisterMetrics()

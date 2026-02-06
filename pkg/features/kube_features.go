@@ -290,6 +290,16 @@ const (
 	// DisableNodeKubeProxyVersion disable the status.nodeInfo.kubeProxyVersion field of v1.Node
 	DisableNodeKubeProxyVersion featuregate.Feature = "DisableNodeKubeProxyVersion"
 
+	// owner: @kubernetes/sig-node-security
+	// kep: https://kep.k8s.io/security-hardening
+	//
+	// When enabled, prevents privileged container creation by default.
+	// Containers requesting privileged mode will be rejected unless the cluster
+	// administrator explicitly enables privileged containers via kubelet flags.
+	// This mitigates container escape risks (CWE-250) by enforcing the principle
+	// of least privilege.
+	DisablePrivilegedByDefault featuregate.Feature = "DisablePrivilegedByDefault"
+
 	// owner: @pohly
 	// kep: http://kep.k8s.io/4381
 	//
@@ -905,6 +915,16 @@ const (
 	// which benefits to reduce the useless requeueing.
 	SchedulerQueueingHints featuregate.Feature = "SchedulerQueueingHints"
 
+	// owner: @kubernetes/sig-node-security
+	// kep: https://kep.k8s.io/security-hardening
+	//
+	// When enabled, kubelet defaults to secure authentication and authorization settings:
+	// - Anonymous authentication is disabled (requires client certificates)
+	// - Webhook authentication is enabled by default
+	// - Authorization mode defaults to Webhook instead of AlwaysAllow
+	// This hardens the kubelet API against unauthorized access (CWE-285, CWE-287).
+	SecureKubeletDefaults featuregate.Feature = "SecureKubeletDefaults"
+
 	// owner: @atosatto @yuanchen8911
 	// kep: http://kep.k8s.io/3902
 	//
@@ -996,6 +1016,15 @@ const (
 	//
 	// Requires stricter validation of IP addresses and CIDR values in API objects.
 	StrictIPCIDRValidation featuregate.Feature = "StrictIPCIDRValidation"
+
+	// owner: @kubernetes/sig-node-security
+	// kep: https://kep.k8s.io/security-hardening
+	//
+	// When enabled, enforces strict TLS certificate verification for internal
+	// component communication including API server proxy transport, kubelet
+	// lifecycle handlers, and health check probes. Disabling InsecureSkipVerify
+	// prevents Man-in-the-Middle attacks (CWE-295) on internal cluster traffic.
+	StrictTLSVerification featuregate.Feature = "StrictTLSVerification"
 
 	// owner: @everpeace
 	// kep: https://kep.k8s.io/3619
@@ -1287,6 +1316,10 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.29"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("1.31"), Default: false, PreRelease: featuregate.Deprecated},
 		{Version: version.MustParse("1.33"), Default: true, PreRelease: featuregate.Deprecated}, // lock to default in 1.34 and remove in v1.37
+	},
+
+	DisablePrivilegedByDefault: {
+		{Version: version.MustParse("1.35"), Default: false, PreRelease: featuregate.Alpha},
 	},
 
 	DynamicResourceAllocation: {
@@ -1766,6 +1799,10 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
 	},
 
+	SecureKubeletDefaults: {
+		{Version: version.MustParse("1.35"), Default: false, PreRelease: featuregate.Alpha},
+	},
+
 	SeparateTaintEvictionController: {
 		{Version: version.MustParse("1.29"), Default: true, PreRelease: featuregate.Beta},
 		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.37 (locked to default in 1.34)
@@ -1844,6 +1881,10 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 
 	StrictIPCIDRValidation: {
 		{Version: version.MustParse("1.33"), Default: false, PreRelease: featuregate.Alpha},
+	},
+
+	StrictTLSVerification: {
+		{Version: version.MustParse("1.35"), Default: false, PreRelease: featuregate.Alpha},
 	},
 
 	SupplementalGroupsPolicy: {
@@ -2237,6 +2278,8 @@ var defaultKubernetesFeatureGateDependencies = map[featuregate.Feature][]feature
 
 	DisableNodeKubeProxyVersion: {},
 
+	DisablePrivilegedByDefault: {},
+
 	DynamicResourceAllocation: {},
 
 	EnvFiles: {},
@@ -2427,6 +2470,8 @@ var defaultKubernetesFeatureGateDependencies = map[featuregate.Feature][]feature
 
 	SchedulerQueueingHints: {},
 
+	SecureKubeletDefaults: {},
+
 	SeparateTaintEvictionController: {},
 
 	ServiceAccountNodeAudienceRestriction: {},
@@ -2456,6 +2501,8 @@ var defaultKubernetesFeatureGateDependencies = map[featuregate.Feature][]feature
 	StreamingCollectionEncodingToProtobuf: {},
 
 	StrictIPCIDRValidation: {},
+
+	StrictTLSVerification: {},
 
 	SupplementalGroupsPolicy: {},
 
