@@ -2,20 +2,20 @@
 
 The Kubernetes v1.35 codebase (`k8s.io/kubernetes`) exhibits strong engineering discipline at the tooling and CI enforcement layer, with 49 merge-blocking verification gates (`hack/verify-*.sh`), 13 enabled linters including three custom Kubernetes plugins (`hack/golangci.yaml`), and consistent architectural patterns across all 25 CLI entry points. The project enforces formatting (`hack/verify-gofmt.sh`), import boundaries (`hack/verify-import-boss.sh`), import alias consistency (`hack/verify-import-aliases.sh`), license headers (`hack/verify-boilerplate.sh`), and dead code elimination (`hack/verify-deadcode-elimination.sh`) as CI gates.
 
-Beneath this enforcement layer, core packages show significant maintainability variance. Well-focused modules like `pkg/capabilities/` (97 lines) coexist with high-coupling packages like `pkg/kubelet/kubelet.go` (122 import paths). A partially-complete contextual logging migration, systemic GoDoc exemptions, and 53 disabled staticcheck rules represent measurable quality debt. Copyright headers spanning 2014–present confirm evolutionary layering across older and newer modules.
+Beneath this enforcement layer, core packages show significant maintainability variance. Well-focused modules like `pkg/capabilities/` (96 lines) coexist with high-coupling packages like `pkg/kubelet/kubelet.go` (122 import paths). A partially-complete contextual logging migration, systemic GoDoc exemptions, and 53 disabled staticcheck rules represent measurable quality debt. Copyright headers spanning 2014–present confirm evolutionary layering across older and newer modules.
 
 This assessment covers `pkg/`, `cmd/`, `hack/`, `test/`, `build/`, `staging/`, and `plugin/` directories — static inspection of 9,441 Go source files across 2,072,327 lines of code (`audit-results/metadata.json`). No runtime benchmarking was performed.
 
 ## Key Findings
 
 ### Code Consistency & Style
-- All 25 `cmd/` binaries follow an identical `main.go` → `app.NewXCommand()` → `component-base/cli.Run()` Cobra pattern (`cmd/kube-apiserver/apiserver.go`, `cmd/kubelet/kubelet.go`, `cmd/kube-scheduler/scheduler.go`) — reducing onboarding cost for new component development.
+- 9 of 25 `cmd/` packages follow an identical `main.go` → `app.NewXCommand()` → `component-base/cli.Run()` Cobra pattern (`cmd/kube-apiserver/apiserver.go`, `cmd/kubelet/kubelet.go`, `cmd/kube-scheduler/scheduler.go`); the remaining 16 are development tools.
 - `.gitattributes` enforces LF line endings globally and marks generated files (`zz_generated.*.go`, `generated.pb.go`) as `linguist-generated=true`.
-- `hack/golangci.yaml` (lines 96–109) intentionally permits underscores in `Convert_*_To_*` and `SetDefaults_*` generated functions — a documented deviation from standard Go naming.
+- `hack/golangci.yaml` (lines 94–110) intentionally permits underscores in `Convert_*_To_*` and `SetDefaults_*` generated functions — a documented deviation from standard Go naming.
 
 ### Readability & Maintainability
 - `pkg/kubelet/kubelet.go` contains 122 import paths, indicating high coupling and excessive responsibility concentration — significant change risk and onboarding friction for the kubelet subsystem.
-- Clean counterexamples exist: `pkg/capabilities/capabilities.go` (97 lines, `sync.Once` + `Mutex` singleton) and `pkg/fieldpath/fieldpath.go` (optimized string building with clear GoDoc) demonstrate achievable package focus.
+- Clean counterexamples exist: `pkg/capabilities/capabilities.go` (96 lines, `sync.Once` + `Mutex` singleton) and `pkg/fieldpath/fieldpath.go` (optimized string building with clear GoDoc) demonstrate achievable package focus.
 - `hack/verify-deadcode-elimination.sh` enforces dead code detection as a CI gate.
 
 ### Best Practices & Design Quality
@@ -24,7 +24,7 @@ This assessment covers `pkg/`, `cmd/`, `hack/`, `test/`, `build/`, `staging/`, a
 - Multi-era codebase (2014–present): core packages like `pkg/capabilities/` and `pkg/scheduler/schedule_one.go` originate from 2014, creating evolutionary layering that complicates consistency.
 
 ### Code Efficiency & Correctness
-- 53 staticcheck rules disabled in `hack/golangci.yaml` (lines 440–510), including `SA1019` (deprecated API usage), `SA4006` (dead stores), and 25 simplification rules (`S1000`–`S1040`) — reducing static analysis coverage for correctness and simplification.
+- 53 staticcheck rules disabled in `hack/golangci.yaml` (lines 443–498), including `SA1019` (deprecated API usage), `SA4006` (dead stores), and 25 simplification rules (`S1000`–`S1040`) — reducing static analysis coverage for correctness and simplification.
 - Race detector (`-race`) is enabled by default in test configuration, and `KUBE_CACHE_MUTATION_DETECTOR` enforces informer cache safety — strong concurrency correctness enforcement.
 
 ### Documentation & Comments
@@ -34,17 +34,17 @@ This assessment covers `pkg/`, `cmd/`, `hack/`, `test/`, `build/`, `staging/`, a
 ### Testability & Reliability
 - 17-category test pyramid under `test/` (unit, integration, e2e, fuzz, conformance, kubemark, and others) — comprehensive coverage structure.
 - Race detector default-on, `go.uber.org/goleak` v1.3.0 for goroutine leak detection, `hack/verify-mocks.sh` for mock freshness.
-- E2E uses Ginkgo v2 (v2.27.2) + Gomega; unit tests use testify (v1.11.1) and go-cmp (v7.0.0).
+- E2E uses Ginkgo v2 (v2.27.2) + Gomega; unit tests use testify (v1.11.1) and go-cmp (v0.7.0).
 
 ### Tooling & Process Signals
 - 49 `hack/verify-*.sh` scripts enforce formatting, linting, imports, codegen freshness, boilerplate, shellcheck, type checking, and vulnerability scanning — mature CI infrastructure.
 - 13 enabled linters (`hack/golangci.yaml`): `depguard`, `forbidigo`, `ginkgolinter`, `gocritic`, `govet`, `ineffassign`, `kubeapilinter`, `logcheck`, `revive`, `sorted`, `staticcheck`, `testifylint`, `unused` — three are custom Kubernetes plugins.
-- Partial contextual logging migration (`hack/golangci.yaml` lines 213–298): structured logging disabled globally then re-enabled for select packages; contextual logging enforced for ~35 paths — migration incomplete.
+- Partial contextual logging migration (`hack/golangci.yaml` lines 213–298): structured logging disabled globally then re-enabled for select packages; contextual logging enforced for ~65 paths — migration incomplete.
 - Lint exclusion debt: TODO referencing issue #131475 (line 111) acknowledges excluded directories requiring multi-PR remediation.
 
 ## Representative Patterns Observed
 
-**CI-as-quality-backbone**: The 49 verification scripts, strict shell modes in `Makefile` (`set -o errexit -o nounset -o pipefail`), and ShellCheck enforcement on 176 Bash scripts (`hack/verify-shellcheck.sh`) create a deterministic quality floor. Quality is bounded by what gates check — gaps in linter coverage (53 disabled rules) translate directly into undetected issues.
+**CI-as-quality-backbone**: The 49 verification scripts, a strict `SHELL` directive in `Makefile` (`bash -o errexit -o pipefail -o nounset`), and ShellCheck enforcement on 176 Bash scripts (`hack/verify-shellcheck.sh`) create a deterministic quality floor. Quality is bounded by what gates check — gaps in linter coverage (53 disabled rules) translate directly into undetected issues.
 
 **Core package accumulation**: `pkg/kubelet/kubelet.go` (122 imports) and `pkg/controller/controller_utils.go` exemplify long-lived files that accumulate responsibility over 10+ years. Newer modules remain focused, but older core packages resist decomposition due to entrenched coupling. `build/dependencies.yaml` pins external dependency versions, maintaining configuration discipline.
 
