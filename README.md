@@ -33,8 +33,8 @@ This assessment covers `pkg/`, `cmd/`, `hack/`, `test/`, `build/`, `staging/`, a
 
 ### Testability & Reliability
 - 17-category test pyramid under `test/` (unit, integration, e2e, fuzz, conformance, kubemark, and others) — comprehensive coverage structure.
-- Race detector default-on, `go.uber.org/goleak` v1.3.0 for goroutine leak detection, `hack/verify-mocks.sh` for mock freshness.
-- E2E uses Ginkgo v2 (v2.27.2) + Gomega; unit tests use testify (v1.11.1) and go-cmp (v0.7.0).
+- Race detector default-on, `go.uber.org/goleak` v1.3.0 for goroutine leak detection, `hack/verify-mocks.sh` for mock freshness — enforcing concurrency safety and test infrastructure consistency.
+- E2E uses Ginkgo v2 (v2.27.2) + Gomega; unit tests use testify (v1.11.1) and go-cmp (v0.7.0) — standardized assertion libraries reduce test fragmentation.
 
 ### Tooling & Process Signals
 - 49 `hack/verify-*.sh` scripts enforce formatting, linting, imports, codegen freshness, boilerplate, shellcheck, type checking, and vulnerability scanning — mature CI infrastructure.
