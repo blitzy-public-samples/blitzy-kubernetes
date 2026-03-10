@@ -4,1725 +4,698 @@
 
 ## 0.1 Intent Clarification
 
-Based on the provided requirements, the Blitzy platform understands that the documentation objective is to **produce a comprehensive security audit report** of the Kubernetes main branch codebase, identifying all vulnerabilities, classifying them by CVSS severity, analyzing supply chain security, and generating actionable remediation guidance.
-
 ### 0.1.1 Core Documentation Objective
 
-**Request Category:** Create new documentation (Security Audit Report)
+Based on the provided requirements, the Blitzy platform understands that the documentation objective is to **create a new, single-page `README.md` file** that serves as a comprehensive code quality review of the Kubernetes v1.35 codebase (`k8s.io/kubernetes`). This is not a traditional project README or user-facing documentation; it is an **engineering-quality assessment document** that evaluates systemic code quality patterns across a 2,072,327-line Go monorepo spanning 9,441 source files.
 
-**Documentation Type:** Technical Security Assessment / Vulnerability Report
+- **Category**: Create new documentation
+- **Documentation type**: Code Quality Assessment / Technical Audit Report
+- **Target audience**: Experienced engineers and reviewers
+- **Output format**: Single Markdown file (`README.md`)
+- **Tone**: Direct, evidence-based, no filler or moralizing
 
-**Primary Documentation Requirements:**
+The assessment must cover seven distinct evaluation dimensions:
 
-- **Vulnerability Identification:** Produce exhaustive documentation of all security vulnerabilities discovered in the Kubernetes codebase through static code analysis and dependency scanning
-- **CVSS Classification:** Document each vulnerability with proper severity scoring using CVSS 3.1 framework (Critical ≥9.0, High 7.0-8.9, Medium 4.0-6.9, Low <4.0)
-- **Supply Chain Analysis:** Generate Software Bill of Materials (SBOM) and document all dependency vulnerabilities with CVE references
-- **Remediation Roadmap:** Create prioritized remediation guidance with risk-based recommendations for Critical and High severity issues
-- **OWASP Mapping:** Document compliance assessment against OWASP Top 10 categories
+| Dimension | Focus |
+|---|---|
+| Code Consistency & Style | Naming conventions, formatting, architectural pattern uniformity |
+| Readability & Maintainability | Self-documenting code, function/class size, separation of concerns, dead code |
+| Best Practices & Design Quality | Abstractions, error handling, anti-patterns, configuration vs. hardcoding |
+| Code Efficiency & Correctness | Static-inspection inefficiencies, language feature misuse, correctness risks |
+| Documentation & Comments | Comment usefulness, outdated comments, public API documentation |
+| Testability & Reliability | Test isolation, coupling, hidden side effects |
+| Tooling & Process Signals | Linter/formatter configs, CI gates, pre-commit hooks |
 
-**Implicit Documentation Needs Identified:**
-
-- Executive summary with severity distribution visualizations for stakeholder communication
-- Machine-readable SARIF reports for CI/CD integration capabilities
-- Detailed CSV exports for vulnerability tracking and ticketing system integration
-- False positive classification documentation with rationale for audit transparency
-- Tool version and database timestamp metadata for reproducibility
-- Scope limitation documentation explaining any constraints encountered during audit execution
+The output README.md must contain exactly five sections in this order:
+- Overview (2–3 short paragraphs)
+- Key Findings (bullet-pointed, grouped by category)
+- Representative Patterns Observed (with file/component references)
+- Improvement Recommendations (actionable, prioritized)
+- Quality Risk Assessment (long-term maintainability and change risk)
 
 ### 0.1.2 Special Instructions and Constraints
 
-**CRITICAL: Read-Only Audit Preservation Requirements:**
-- This is a static analysis only - NO code modifications to the repository
-- NO execution of code from the repository (no `go build`, `go test`, or binary execution)
-- All analysis outputs written to separate `/audit-results/` directory outside repository root
-- Repository clone to be deleted after audit completion, retaining only audit outputs
-
-**Template Requirements:**
-- SARIF reports must validate against schema specification for CI/CD compatibility
-- HTML executive summary requires interactive charts and severity distribution tables
-- CSV exports must include: CVE-ID, CVSS Score, Severity, Component, File Path, Line Number, Description, Remediation
-- Markdown remediation roadmap grouped by component (API server, kubelet, etc.)
-
-**USER PROVIDED TEMPLATE: Vulnerability Report Entry Format**
-```
-CVE identifier (if applicable)
-CVSS v3.1 score and vector string
-Severity classification
-Affected component and file path
-Vulnerable code snippet (10 lines context)
-Exploit scenario description
-Remediation recommendation with code references
-```
-
-**Style Preferences:**
-- Technical precision with actionable specificity
-- Enterprise-ready documentation suitable for security team consumption
-- Clear distinction between confirmed vulnerabilities and potential security concerns
-- Grouped organization by severity, then by component
+- **Single-page constraint**: The output must not exceed one page — brevity and density are paramount
+- **Evidence requirement**: Every observation must cite evidence or explicitly mark inferred conclusions
+- **No generic advice**: All findings must be specific to the Kubernetes codebase
+- **No runtime benchmarking**: Efficiency analysis must be limited to static inspection
+- **Tooling claims require evidence**: Assertions about linters, CI, or process must be backed by visible configuration files or consistent formatting signals; if not observed, the document must state whether this is "inferred from inconsistent patterns" or "indeterminate due to missing configuration context"
+- **Recurrent issues only**: Report inconsistencies only when they are recurrent or cross-cutting, not isolated
+- **Validation criteria**: The review fails if observations lack evidence, recommendations lack justification, major issues lack impact explanation, or output exceeds one page
 
 ### 0.1.3 Technical Interpretation
 
 These documentation requirements translate to the following technical documentation strategy:
 
-- **To document dependency vulnerabilities**, we will execute Trivy filesystem scanning with SARIF output against go.mod/go.sum, cross-reference findings with NVD and GitHub Security Advisories, and generate a comprehensive SBOM
-- **To document code-level vulnerabilities**, we will execute gosec with SARIF output against all Go source files (excluding vendor/), execute Semgrep with security rulesets, aggregate findings with deduplication
-- **To document false positive classifications**, we will apply systematic exclusion criteria for test code paths while retaining all Critical/High findings for manual validation
-- **To document OWASP compliance**, we will map all identified vulnerabilities to applicable OWASP Top 10 categories and produce a compliance scorecard
-- **To document remediation priorities**, we will sort findings by exploitability and CVSS score, group by affected component, estimate fix effort, and provide specific file/line change recommendations
+- To **produce the code quality assessment**, we will create a new `README.md` file at the repository root (replacing or supplementing the existing `README.md`, as determined by the documentation file mapping below) that synthesizes findings from static analysis of the Go source code across `cmd/`, `pkg/`, `hack/`, `test/`, `staging/`, `build/`, and `plugin/` directories
+- To **evaluate code consistency and style**, we will inspect naming conventions across representative files in `pkg/capabilities/`, `pkg/fieldpath/`, `pkg/scheduler/`, `pkg/controller/`, `pkg/kubelet/`, and `cmd/` entry points; review formatting signals from `hack/golangci.yaml`, `hack/verify-gofmt.sh`; and examine import alias enforcement via `cmd/preferredimports/` and `hack/verify-import-aliases.sh`
+- To **assess readability and maintainability**, we will analyze function/file sizes in `pkg/kubelet/kubelet.go` (80+ imports), `pkg/controller/controller_utils.go`, and `pkg/scheduler/schedule_one.go`; review separation of concerns across the monorepo's 30+ `pkg/` packages; and identify dead code signals via `hack/verify-deadcode-elimination.sh`
+- To **evaluate best practices and design quality**, we will examine error handling patterns in controllers (`pkg/controller/`), scheduler (`pkg/scheduler/`), and kubelet (`pkg/kubelet/`); review feature gate usage (`pkg/features/kube_features.go`); and assess configuration management via `build/dependencies.yaml`
+- To **assess tooling and process signals**, we will reference the 50+ verification scripts in `hack/verify-*.sh`, the `hack/golangci.yaml` linter configuration (12 enabled linters with custom Kubernetes plugins), `hack/verify-shellcheck.sh`, and the Makefile-driven CI integration
+- To **document code efficiency concerns**, we will review static patterns for redundant logic, improper async usage, and correctness risks visible in representative source files
+- To **evaluate testability**, we will analyze the 17-category test pyramid (`test/`), coverage configuration (`KUBE_COVER`), race detector usage (`-race`), and mock generation via `hack/update-mocks.sh`
 
 ### 0.1.4 Inferred Documentation Needs
 
-**Based on Repository Analysis:**
+Based on repository analysis, the following implicit needs are surfaced:
 
-| Discovery | Documentation Need |
-|-----------|-------------------|
-| Go 1.25.0 specified in go.mod | Document Go version compatibility for all scanning tools |
-| `hack/verify-govulncheck.sh` exists | Document integration with existing vulnerability checking infrastructure |
-| Extensive admission controller plugins in `plugin/pkg/` | Document security-critical plugin code requiring focused analysis |
-| Staging modules with complex dependency graph | Document transitive dependency risk analysis for k8s.io/* modules |
-| Shell scripts in `hack/`, `cluster/`, `build/` | Document shell script security analysis (command injection, credential exposure) |
-| `.github/SECURITY.md` references external disclosure process | Document alignment with Kubernetes Security Response Committee processes |
-
-**Based on Audit Structure:**
-
-- Module `cmd/kube-apiserver/` contains authentication/authorization entry points requiring detailed vulnerability documentation
-- Module `pkg/kubelet/` contains node-level security critical code (CRI, device plugins, volume handling)
-- Module `staging/src/k8s.io/client-go/` is widely imported and requires transitive dependency documentation
-- Shell scripts in `cluster/common.sh` handle credential generation requiring secret detection analysis
-
-**Based on User Journey:**
-
-- Security engineers need executive summary for rapid risk assessment
-- DevOps teams need SARIF integration for CI/CD pipeline blocking
-- Compliance teams need OWASP mapping for audit evidence
-- Maintainers need specific file/line remediation guidance for fix implementation
+- **Contextual logging migration status**: The `hack/golangci.yaml` logcheck configuration (lines 213–298) reveals a partially-complete migration from unstructured to contextual logging. Only specific packages under `pkg/kubelet/`, `pkg/proxy/`, `pkg/scheduler/`, and `pkg/controller/` have been migrated, while others remain exempt. This inconsistency is a finding that must be documented
+- **Lint exclusion debt**: The golangci-lint configuration contains multiple `TODO` items and excluded directories (e.g., `pkg/volume/*`, `test/*` at line 113) marked for future resolution per issue #131475, indicating unresolved code quality gaps
+- **API documentation comment gaps**: The linter configuration (lines 62–69) explicitly exempts most packages from the "exported symbols must be documented" rule, with only `cmd/kubeadm` opted in — suggesting a systemic documentation deficit for exported APIs
+- **Generated code volume**: The `.gitattributes` file marks extensive generated patterns (`zz_generated.*.go`, `generated.pb.go`, `types_swagger_doc_generated.go`, OpenAPI JSON) as linguist-generated, implying a substantial portion of the codebase is auto-generated and should be excluded from quality analysis
+- **Multi-era codebase**: Copyright headers span from 2014 to present, with core packages like `pkg/capabilities/capabilities.go` and `pkg/scheduler/schedule_one.go` originating in 2014, indicating significant evolutionary layering that may surface as inconsistent patterns
 
 ## 0.2 Documentation Discovery and Analysis
 
 ### 0.2.1 Existing Documentation Infrastructure Assessment
 
-**CRITICAL Repository Analysis Conducted:**
+Repository analysis reveals a **governance-oriented documentation structure** at the root level, with technical documentation distributed across subdirectory-specific READMEs and external references. The project does not use a centralized documentation generator (no `mkdocs.yml`, `docusaurus.config.js`, or `sphinx/conf.py` detected in-repo). Documentation is maintained as standalone Markdown files.
 
-Repository analysis reveals the Kubernetes repository (`k8s.io/kubernetes`) is a monorepo with extensive security infrastructure already in place. The documentation framework assessment identifies the following:
+**Root-level documentation files discovered:**
 
-**Existing Security Documentation Located:**
+| File | Purpose | Status |
+|---|---|---|
+| `README.md` | Project landing page with badges, description, quick-start, community links | Exists — will be the replacement target |
+| `CONTRIBUTING.md` | Contributor onboarding (links to external community repo) | Exists — out of scope |
+| `SUPPORT.md` | Support channel directory (Stack Overflow, Slack, forum) | Exists — out of scope |
+| `code-of-conduct.md` | Link to Kubernetes community conduct policy | Exists — out of scope |
+| `CHANGELOG.md` | Index of per-release changelog files | Exists — out of scope |
+| `LICENSE` | Apache 2.0 license text | Exists — out of scope |
 
-| File Path | Content Type | Relevance |
-|-----------|--------------|-----------|
-| `.github/SECURITY.md` | Security Policy | Links to Kubernetes version skew policy and vulnerability reporting instructions via kubernetes.io/security |
-| `staging/src/k8s.io/*/SECURITY_CONTACTS` | Contact Files | Per-module security contact listings for staged repositories |
-| `hack/verify-govulncheck.sh` | Vulnerability Script | Existing govulncheck integration using `golang.org/x/vuln/cmd/govulncheck` |
-| `hack/verify-*.sh` | Verification Scripts | Suite of security-relevant verification scripts |
+**Subdirectory documentation discovered:**
 
-**Documentation Infrastructure Assessment:**
+| File | Purpose |
+|---|---|
+| `build/README.md` | Containerized build flow documentation |
+| `hack/README.md` | Developer tooling and script documentation |
+| `cluster/README.md` | Cluster lifecycle script documentation |
+| `staging/README.md` | Staged module publishing and contribution guide |
+| `logo/usage_guidelines.md` | Logo usage guidelines |
+| `logo/colors.md` | Logo color specifications |
+| `.github/SECURITY.md` | Vulnerability disclosure policy |
+| `.github/PULL_REQUEST_TEMPLATE.md` | PR submission template |
+| `audit-results/owasp-compliance.md` | OWASP compliance narrative |
+| `audit-results/remediation-roadmap.md` | Security remediation plan |
 
-- **Current Documentation Framework:** Markdown-based documentation with no dedicated documentation generator (mkdocs, docusaurus)
-- **Documentation Generator Configuration:** None detected - audit reports will be standalone deliverables
-- **API Documentation Tools:** No JSDoc/Godoc configuration detected for security-specific documentation
-- **Diagram Tools:** Mermaid diagrams supported via standard markdown rendering
-- **Documentation Hosting:** Not applicable - audit deliverables are file-based outputs
+**Documentation infrastructure findings:**
+
+- **No centralized documentation generator**: The repository relies on standalone Markdown and external sites (kubernetes.io). Generated docs (man pages, kubectl docs, Swagger docs) are produced by specialized tools in `cmd/genkubedocs/`, `cmd/genman/`, `cmd/gendocs/`, `cmd/genyaml/`, and `cmd/genswaggertypedocs/`, but these are not documentation-site generators
+- **API documentation tools**: Go source comments serve as the basis for generated Swagger/OpenAPI documentation via `cmd/genswaggertypedocs/` and `k8s.io/kube-openapi/cmd/openapi-gen`
+- **Diagram tools**: Mermaid is used in the tech spec and audit documentation; no dedicated diagram generation tool is configured in the repository itself
+- **No documentation hosting/deployment setup detected in-repo**: kubernetes.io documentation lives in a separate repository (`kubernetes/website`)
 
 ### 0.2.2 Repository Code Analysis for Documentation
 
-**Search Patterns Applied for Security-Relevant Code:**
+Search patterns employed for understanding code to be analyzed in the quality review:
 
-| Pattern | Target | Results |
-|---------|--------|---------|
-| `cmd/**/*.go` | Core component entrypoints | `kube-apiserver`, `kubelet`, `kube-controller-manager`, `kube-scheduler`, `kube-proxy`, `kubectl`, `kubeadm` |
-| `pkg/**/*.go` | Core library implementations | `kubelet`, `controller`, `scheduler`, `volume`, `registry`, `api`, `auth` packages |
-| `plugin/pkg/**/*.go` | Admission controllers | Mutating/validating admission plugins, authentication/authorization implementations |
-| `staging/src/k8s.io/**/*.go` | Staged external modules | `client-go`, `api`, `apimachinery`, `apiserver`, `component-base` |
-| `hack/*.sh`, `cluster/**/*.sh`, `build/*.sh` | Shell scripts | Build, verification, cluster lifecycle automation scripts |
+- **Core Go packages**: `pkg/` — 30 first-order packages including `controller/`, `scheduler/`, `kubelet/`, `registry/`, `apis/`, `volume/`, `proxy/`, `features/`, `printers/`, `capabilities/`, `fieldpath/`, `kubemark/`
+- **CLI entry points**: `cmd/` — 25 binary entry points all following Cobra + `component-base/cli` patterns
+- **Tooling and CI**: `hack/` — 90+ verification/update scripts with shared Bash library (`hack/lib/`)
+- **Test infrastructure**: `test/` — 17 test categories including unit, integration, e2e, fuzz, conformance, kubemark
+- **Build system**: `build/` — containerized build environment, release scripts, dependency manifests
+- **Staged modules**: `staging/src/k8s.io/` — 32 independently-published Go modules
+- **Linter configuration**: `hack/golangci.yaml` — 12 enabled linters (depguard, forbidigo, ginkgolinter, gocritic, govet, ineffassign, kubeapilinter, logcheck, revive, sorted, staticcheck, testifylint, unused) with extensive exclusion rules and custom Kubernetes plugins
 
-**Key Directories Examined:**
+**Key directories examined for quality signals:**
 
-```
-cmd/                    # Core component CLI entrypoints
-├── kube-apiserver/     # API server with auth/authz critical paths
-├── kubelet/            # Node agent with CRI/volume security
-├── kube-controller-manager/  # Controller loops
-├── kube-scheduler/     # Scheduling decisions
-├── kube-proxy/         # Network proxy
-├── kubectl/            # CLI client
-└── kubeadm/            # Cluster bootstrap
-
-pkg/                    # Core library packages
-├── kubelet/            # Node agent core implementation
-├── controller/         # Shared controller primitives
-├── scheduler/          # Scheduling framework
-├── volume/             # Volume plugin framework
-├── registry/           # API server storage registry
-└── auth/               # Authentication utilities
-
-plugin/pkg/             # Admission and auth plugins
-├── admission/          # Admission controller implementations
-└── auth/               # Authentication plugins
-
-staging/src/k8s.io/     # Staged external modules
-├── client-go/          # Kubernetes client library
-├── api/                # API type definitions
-├── apimachinery/       # API machinery utilities
-└── apiserver/          # API server library
-
-hack/                   # Build/test/verification scripts
-├── verify-govulncheck.sh  # Existing vulnerability checking
-├── verify-*.sh         # Verification suite
-└── update-*.sh         # Update automation
-
-build/                  # Build system
-├── common.sh           # Shared shell library
-├── dependencies.yaml   # External tool pinning
-└── release.sh          # Release automation
-```
-
-**Related Documentation Found:**
-
-| Existing Document | Context Provided |
-|-------------------|------------------|
-| `staging/README.md` | Explains staged module consumption and publishing rules |
-| `cluster/README.md` | Notes maintenance mode status for cluster scripts |
-| `test/README.md` (per suite) | Test suite documentation for understanding test coverage |
+| Directory | File Count (approx) | Key Patterns Observed |
+|---|---|---|
+| `pkg/capabilities/` | 4 files | Clean singleton pattern, sync.Once + Mutex, small focused package |
+| `pkg/fieldpath/` | 3 files | Optimized string building, clear function documentation |
+| `pkg/controller/` | 50+ files | Shared primitives (expectations, slow-start batch), consistent retry patterns |
+| `pkg/scheduler/` | 30+ files | Multi-phase scheduling pipeline, clear constant documentation |
+| `pkg/kubelet/` | 100+ files | Very large import lists (80+), complex initialization, platform-specific code |
+| `cmd/` (entry points) | 25 packages | Minimal main + app constructor pattern, consistent Cobra wiring |
+| `hack/` | 90+ scripts | Strict shell modes, shared library sourcing, deterministic CI |
 
 ### 0.2.3 Web Search Research Conducted
 
-**Research Topic: Security Scanning Tool Versions (February 2026)**
-
-| Tool | Latest Version | Release Date | Key Features |
-|------|---------------|--------------|--------------|
-| <cite index="31-1,31-3">Trivy</cite> | v0.69.0 | January 30, 2026 | Filesystem scanning, SBOM generation, SARIF output, Go module analysis |
-| <cite index="12-1,12-2,12-3">gosec</cite> | v2.22.11 | December 11, 2025 | Go AST/SSA security analysis, SARIF output, CWE mapping |
-| <cite index="22-1,22-3">Semgrep</cite> | v1.150.0 | January 30, 2026 | Multi-language pattern matching, security rulesets, SARIF output |
-
-**Research Topic: Go Security Best Practices for Kubernetes**
-
-- <cite index="6-8,6-9,6-10,6-11">Trivy detects vulnerabilities in OS packages and application dependencies, supports most programming languages including Go</cite>
-- <cite index="15-15">gosec inspects source code for security problems by scanning the Go AST and SSA code representation</cite>
-- <cite index="24-2,24-3">Semgrep Supply Chain now includes malicious dependency detection with 80,000 SCA rules</cite>
-
-**Research Topic: SARIF Report Standards**
-
-- All three primary tools (Trivy, gosec, Semgrep) support SARIF output format for CI/CD integration
-- SARIF schema validation required for GitHub Code Scanning integration compatibility
-
-### 0.2.4 Dependency Analysis Framework
-
-**Go Module Structure Analysis:**
-
-The repository uses Go 1.25.0 (per `go.mod`) with extensive internal and external dependencies:
-
-**Internal Module Dependencies (k8s.io/*):**
-- `k8s.io/api` - Core API type definitions
-- `k8s.io/apimachinery` - API machinery utilities
-- `k8s.io/client-go` - Client library
-- `k8s.io/component-base` - Shared component utilities
-- `k8s.io/apiserver` - API server library
-
-**External Critical Dependencies (from go.mod analysis):**
-- `go.etcd.io/etcd/*` - etcd client/server components
-- `github.com/prometheus/*` - Metrics infrastructure
-- `golang.org/x/crypto` - Cryptographic primitives
-- `google.golang.org/grpc` - gRPC framework
-
-**Dependency Documentation Strategy:**
-- Generate complete SBOM using `go list -m all`
-- Execute Trivy dependency scanning against go.mod
-- Cross-reference with NVD and GitHub Security Advisories
-- Document transitive dependency risk chains
+No external web search was required for documentation best practices in this case. The task is to produce a code quality review document — not a documentation-framework setup. The review content derives entirely from direct codebase inspection. The Kubernetes project itself provides extensive examples of code quality enforcement patterns (50+ verification scripts, comprehensive linter configuration) that serve as the evidence base for all findings.
 
 ## 0.3 Documentation Scope Analysis
 
 ### 0.3.1 Code-to-Documentation Mapping
 
-**Core Components Requiring Security Documentation:**
+The single output file (`README.md`) must synthesize quality findings across the following code modules. Each module represents a source of evidence for the seven analysis dimensions.
 
-| Component | Source Location | Public APIs | Current Documentation | Documentation Needed |
-|-----------|----------------|-------------|----------------------|---------------------|
-| kube-apiserver | `cmd/kube-apiserver/` | REST API endpoints, authentication handlers | Minimal inline comments | Vulnerability assessment, auth bypass analysis |
-| kubelet | `cmd/kubelet/`, `pkg/kubelet/` | CRI interface, volume plugins, device plugins | Scattered documentation | Node security assessment, privilege escalation analysis |
-| kube-controller-manager | `cmd/kube-controller-manager/`, `pkg/controller/` | Controller interfaces | Limited | Service account token exposure analysis |
-| kube-scheduler | `cmd/kube-scheduler/`, `pkg/scheduler/` | Scheduling framework | Limited | Resource exhaustion vulnerability analysis |
-| kube-proxy | `cmd/kube-proxy/` | Network proxy configuration | Minimal | Network policy bypass analysis |
-| kubectl | `cmd/kubectl/` | CLI commands | Good user docs | Credential handling security analysis |
-| kubeadm | `cmd/kubeadm/` | Cluster bootstrap API | Good user docs | Bootstrap token security analysis |
+**Core packages requiring analysis (`pkg/`):**
 
-**Admission Controller Security Analysis Scope:**
+- Module: `pkg/controller/`
+  - Public APIs: `ControllerExpectations`, `PodControlInterface`, `ComputeHash`, controller sync patterns
+  - Quality signals: Consistent retry/backoff patterns, rate-limiting workqueue usage, table-driven tests
+  - Documentation relevance: Error handling patterns, shared primitives, constant documentation quality
 
-| Plugin Category | Location | Security Relevance | Documentation Priority |
-|----------------|----------|-------------------|----------------------|
-| Mutating Admission | `plugin/pkg/admission/` | Can modify pod specs, inject content | HIGH - potential mutation bypass |
-| Validating Admission | `plugin/pkg/admission/` | Authorization decisions | HIGH - potential validation bypass |
-| Image Policy | `plugin/pkg/admission/imagepolicy/` | External webhook delegation | CRITICAL - external trust boundary |
-| Certificates | `plugin/pkg/admission/certificates/` | RBAC for CSR signing | HIGH - certificate authority abuse |
-| Event Rate Limit | `plugin/pkg/admission/eventratelimit/` | DoS protection | MEDIUM - rate limit bypass |
-| Limit Ranger | `plugin/pkg/admission/limitranger/` | Resource limits | MEDIUM - resource exhaustion |
+- Module: `pkg/scheduler/`
+  - Public APIs: `ScheduleOne`, scheduling framework plugin interface, preemption logic
+  - Quality signals: Well-documented constants, multi-phase pipeline design, metrics sampling patterns
+  - Documentation relevance: Design quality, comment quality, magic number handling
 
-**Staged Module Analysis Scope:**
+- Module: `pkg/kubelet/`
+  - Public APIs: `NewMainKubelet`, `Run`, `syncLoop/SyncPod`, volume/image managers
+  - Quality signals: Very large files with 80+ imports, platform-specific code splits, complex initialization
+  - Documentation relevance: File/function size concerns, separation of concerns, maintainability risks
 
-| Module | Location | Import Count | Security Priority |
-|--------|----------|--------------|-------------------|
-| client-go | `staging/src/k8s.io/client-go/` | Very High (core client) | CRITICAL - credential handling |
-| apiserver | `staging/src/k8s.io/apiserver/` | High | CRITICAL - auth/authz core |
-| apimachinery | `staging/src/k8s.io/apimachinery/` | Very High | HIGH - serialization/deserialization |
-| api | `staging/src/k8s.io/api/` | Very High | HIGH - type definitions |
-| component-base | `staging/src/k8s.io/component-base/` | High | MEDIUM - shared utilities |
+- Module: `pkg/capabilities/`
+  - Public APIs: `Initialize`, `Setup`, `Get`, `ResetForTest`
+  - Quality signals: Clean singleton pattern, sync.Once + Mutex, small focused package
+  - Documentation relevance: Good example of focused, well-documented code
 
-### 0.3.2 Shell Script Security Analysis Scope
+- Module: `pkg/fieldpath/`
+  - Public APIs: `FormatMap`, `ExtractFieldPathAsString`, `SplitMaybeSubscriptedPath`
+  - Quality signals: Optimized string building, clear GoDoc examples, deterministic output
+  - Documentation relevance: Good example of readable utility code with examples
 
-**Shell Scripts Requiring Security Analysis:**
+- Module: `pkg/features/`
+  - Public APIs: `kube_features.go` — 100+ versioned feature gate registrations
+  - Quality signals: Sorted enforcement via custom linter, dependency declarations
+  - Documentation relevance: Configuration management, feature lifecycle patterns
 
-| Directory | Script Pattern | Security Concerns | Files to Analyze |
-|-----------|---------------|-------------------|------------------|
-| `hack/` | `*.sh` | Command injection, credential exposure in verification scripts | `verify-govulncheck.sh`, `verify-*.sh`, `update-*.sh` |
-| `cluster/` | `*.sh` | Credential generation, PKI handling, kubeconfig manipulation | `common.sh`, `kube-up.sh`, `validate-cluster.sh`, `kubectl.sh` |
-| `build/` | `*.sh` | Build-time credential exposure, supply chain integrity | `common.sh`, `release.sh` |
-| `cluster/gce/` | `*.sh` | Cloud credential handling, GCE-specific secrets | `util.sh`, `configure-vm.sh` |
+**CLI entry points (`cmd/`):**
 
-**Configuration File Security Analysis Scope:**
+- Module: `cmd/kube-apiserver/`, `cmd/kubelet/`, `cmd/kube-scheduler/`, etc.
+  - Pattern: Minimal `main.go` → `app.NewXCommand()` → `component-base/cli.Run()`
+  - Quality signals: High consistency across all 25 entry points, blank imports for side effects
+  - Documentation relevance: Architectural consistency evidence
 
-| File Type | Locations | Security Concerns |
-|-----------|-----------|-------------------|
-| YAML Manifests | `cluster/addons/**/*.yaml` | RBAC misconfigurations, excessive permissions |
-| Dockerfile | `build/**`, `test/images/**` | Base image vulnerabilities, insecure defaults |
-| Go Configuration | `staging/publishing/rules.yaml` | Publishing automation security |
+**Tooling and CI (`hack/`):**
 
-### 0.3.3 Documentation Gap Analysis
+- Module: `hack/verify-*.sh` (50+ scripts)
+  - Quality signals: Strict shell modes (`set -o errexit -o nounset -o pipefail`), shared library usage, deterministic CI
+  - Documentation relevance: Tooling maturity, enforcement evidence
 
-**Given the requirements and repository analysis, documentation gaps include:**
+- Module: `hack/golangci.yaml`
+  - Quality signals: 12 enabled linters, custom Kubernetes plugins (logcheck, sorted, kubeapilinter), extensive exclusion rules with TODO markers
+  - Documentation relevance: Lint debt, enforcement gaps, style standards
 
-**Undocumented Security-Critical Code Paths:**
+**Test infrastructure (`test/`):**
 
-| Code Path | Gap Description | Impact |
-|-----------|-----------------|--------|
-| `pkg/kubelet/cri/` | CRI interface security analysis | Container escape vectors |
-| `pkg/kubelet/volumeplugin/` | Volume plugin security assessment | Data exfiltration paths |
-| `pkg/kubelet/deviceplugin/` | Device plugin security review | Host privilege escalation |
-| `plugin/pkg/auth/` | Authentication plugin vulnerabilities | Auth bypass potential |
-| `staging/src/k8s.io/apiserver/pkg/authentication/` | Token authentication security | Credential theft vectors |
+- Module: `test/integration/`, `test/e2e/`, `test/fuzz/`
+  - Quality signals: 17 test categories, Ginkgo v2, table-driven unit tests, fuzz targets
+  - Documentation relevance: Testability, reliability, test coverage approach
 
-**Missing Vulnerability Documentation:**
+### 0.3.2 Documentation Gap Analysis
 
-- No existing CVE tracking documentation in repository
-- No security audit history documentation
-- No dependency vulnerability policy documentation
-- No OWASP compliance mapping documentation
+Given the requirements and repository analysis, the documentation gap is straightforward: **no code quality review document exists in the repository**. The task is purely a creation exercise.
 
-**Outdated or Incomplete Security Documentation:**
+- **Existing README.md content**: The current `README.md` (101 lines) is a project landing page with badges, project description, quick-start instructions, community links, governance references, and roadmap pointers. It contains zero code quality analysis
+- **Audit results**: The `audit-results/` directory contains security-focused audit artifacts (vulnerability reports, OWASP compliance, remediation roadmaps) but no code quality or maintainability assessment
+- **No existing code quality documentation**: No file in the repository provides a systematic evaluation of code consistency, maintainability, design quality, or the other dimensions specified in the user requirements
 
-- `.github/SECURITY.md` only links external resources, no internal security architecture
-- No documented security testing procedures beyond `verify-govulncheck.sh`
-- No threat model documentation for core components
+**Quality signals that the review document must synthesize:**
 
-### 0.3.4 Vulnerability Category Coverage Requirements
-
-**Vulnerability Categories to Document:**
-
-| Category | Detection Method | Documentation Output |
-|----------|-----------------|---------------------|
-| Code Execution (command injection, unsafe deserialization, code injection) | gosec, Semgrep | Code path analysis with exploit scenarios |
-| Authentication/Authorization (credential exposure, broken access control) | gosec, Semgrep, manual review | Auth flow documentation with bypass vectors |
-| Data Exposure (sensitive data in logs, insecure storage, cleartext transmission) | Secret scanning, log analysis | Data flow diagrams with exposure points |
-| Cryptographic Issues (weak algorithms, insecure RNG, hardcoded keys) | gosec G401-G505 rules | Cryptographic inventory with weakness analysis |
-| Denial of Service (resource exhaustion, algorithmic complexity) | Semgrep, code review | Resource consumption analysis |
-| Supply Chain (vulnerable dependencies, malicious packages, outdated libraries) | Trivy, SBOM analysis | Dependency tree with vulnerability mapping |
-| Configuration (insecure defaults, excessive permissions, exposed debug endpoints) | Config analysis, YAML review | Configuration inventory with risk assessment |
-
-**OWASP Top 10 Coverage Matrix:**
-
-| OWASP Category | Applicable K8s Components | Detection Approach |
-|----------------|--------------------------|-------------------|
-| A01:2021 Broken Access Control | API server, admission controllers, RBAC | gosec, Semgrep authorization rules |
-| A02:2021 Cryptographic Failures | TLS config, credential handling, encryption | gosec G401-G505, crypto pattern analysis |
-| A03:2021 Injection | Shell scripts, command execution, SQL-like queries | gosec G104, Semgrep injection rules |
-| A04:2021 Insecure Design | Architecture review | Manual architecture assessment |
-| A05:2021 Security Misconfiguration | YAML manifests, default configs | Config analysis, RBAC review |
-| A06:2021 Vulnerable Components | go.mod dependencies | Trivy, dependency scanning |
-| A07:2021 Authentication Failures | Auth plugins, token handling | Auth code path analysis |
-| A08:2021 Software Integrity | Build process, artifact signing | Supply chain analysis |
-| A09:2021 Logging Failures | Audit logging, sensitive data logging | Log statement analysis |
-| A10:2021 SSRF | Webhook configurations, external calls | HTTP client analysis |
+| Signal Source | Location | Finding Type |
+|---|---|---|
+| Linter configuration | `hack/golangci.yaml` | 12 linters enabled; many checks disabled with tracked TODOs |
+| Contextual logging migration | `hack/golangci.yaml` lines 213–298 | Partial migration — only select packages opted in |
+| Export documentation exemptions | `hack/golangci.yaml` lines 62–69 | Most packages exempt from "exported must be documented" |
+| Formatting enforcement | `hack/verify-gofmt.sh` | Consistent formatting enforced by CI gate |
+| Import alias enforcement | `cmd/preferredimports/`, `hack/verify-import-aliases.sh` | Import alias consistency enforced |
+| Import boundary policy | `cmd/import-boss/`, `hack/verify-import-boss.sh` | Cross-package import restrictions enforced |
+| Naming convention exceptions | `hack/golangci.yaml` lines 96–109 | Intentional underscore usage for conversion/defaulter functions |
+| Shell script quality | `hack/verify-shellcheck.sh` | ShellCheck enforcement on 176 Bash scripts |
+| Boilerplate enforcement | `hack/verify-boilerplate.sh`, `hack/boilerplate/boilerplate.py` | Apache 2.0 license header enforcement |
+| Dead code detection | `hack/verify-deadcode-elimination.sh` | Dead code elimination verification |
+| Vendor integrity | `hack/verify-vendor.sh` | Vendor directory consistency enforcement |
+| Race detector | Test configuration (`-race` default on) | Concurrency safety enforcement |
+| Cache mutation detection | `KUBE_CACHE_MUTATION_DETECTOR=true` | Informer cache safety enforcement |
+| Mock synchronization | `hack/verify-mocks.sh` | Mock freshness CI gate |
+| Code generation freshness | `hack/verify-codegen.sh` | Generated code synchronization enforcement |
 
 ## 0.4 Documentation Implementation Design
 
 ### 0.4.1 Documentation Structure Planning
 
-**Audit Output Hierarchy:**
+The output is a single file with a prescribed five-section structure. No directory hierarchy or navigation system is needed.
 
 ```
-/audit-results/
-├── metadata.json                    # Audit metadata (timestamps, tool versions)
-├── executive-summary.html           # HTML executive summary with charts
-├── vulnerability-report.sarif       # Aggregated SARIF report
-├── vulnerability-report.csv         # Detailed CSV export
-├── remediation-roadmap.md           # Prioritized remediation guidance
-├── sbom.json                        # Software Bill of Materials
-├── owasp-compliance.md              # OWASP Top 10 compliance scorecard
-├── false-positives.csv              # Excluded findings with rationale
-├── logs/                            # Tool execution logs
-│   ├── trivy-scan.log
-│   ├── gosec-scan.log
-│   └── semgrep-scan.log
-├── sarif/                           # Individual SARIF reports
-│   ├── trivy-report.sarif
-│   ├── gosec-report.sarif
-│   └── semgrep-report.sarif
-└── dependencies/                    # Dependency analysis
-    ├── sbom-full.json
-    ├── vulnerable-deps.json
-    └── license-compliance.json
+README.md
+├── Overview (2–3 short paragraphs)
+│   ├── High-level code quality assessment
+│   ├── Summary of consistency, maintainability, design health
+│   └── Scope and limits statement
+├── Key Findings (bullet-pointed)
+│   ├── Consistency findings
+│   ├── Maintainability findings
+│   ├── Design quality findings
+│   ├── Efficiency & correctness findings
+│   ├── Documentation & comments findings
+│   ├── Testability & reliability findings
+│   └── Tooling & process findings
+├── Representative Patterns Observed
+│   ├── Pattern descriptions with file/component references
+│   ├── Impact on quality, risk, and velocity
+│   └── No exhaustive file listings
+├── Improvement Recommendations
+│   ├── Prioritized actionable items
+│   ├── Each addresses specific findings
+│   └── Expected benefit per recommendation
+└── Quality Risk Assessment
+    ├── Areas most likely to degrade
+    ├── Architectural/organizational risks
+    └── Long-term maintainability concerns
 ```
 
 ### 0.4.2 Content Generation Strategy
 
 **Information Extraction Approach:**
 
-| Data Source | Extraction Method | Documentation Target |
-|-------------|-------------------|---------------------|
-| Go source files (`**/*.go` excluding `vendor/`) | gosec AST/SSA analysis, Semgrep pattern matching | Code vulnerability report |
-| Shell scripts (`hack/*.sh`, `cluster/**/*.sh`, `build/*.sh`) | Semgrep shell security rules | Script vulnerability report |
-| Dependencies (`go.mod`, `go.sum`) | Trivy filesystem scan, `go list -m all` | SBOM, dependency vulnerability report |
-| YAML manifests (`cluster/addons/**/*.yaml`) | Trivy misconfiguration scan | Configuration security report |
-| Container definitions (`**/Dockerfile`) | Trivy container analysis | Container security report |
+- "Extract code quality patterns from representative files across `pkg/capabilities/`, `pkg/fieldpath/`, `pkg/scheduler/`, `pkg/controller/`, `pkg/kubelet/`, and `cmd/` entry points to identify consistency and divergence"
+- "Analyze `hack/golangci.yaml` (512 lines) to catalog enforced vs. disabled linters, exclusion patterns, and tracked TODOs as evidence for tooling and process signals"
+- "Parse `hack/verify-*.sh` scripts to enumerate all CI verification gates and categorize enforcement coverage"
+- "Examine `test/` directory structure and framework configuration to assess testability, including race detector defaults, cache mutation detection, and goroutine leak checking"
+- "Review import patterns in `pkg/kubelet/kubelet.go` (80+ imports), `pkg/controller/controller_utils.go` (25+ imports), and `pkg/scheduler/schedule_one.go` (17 imports) to assess coupling and maintainability"
+- "Compare architectural patterns between older modules (copyright 2014: `pkg/capabilities/`, `pkg/controller/`) and newer modules for consistency evaluation"
+- "Catalog error handling patterns across controller sync functions, scheduler error recovery, and kubelet error categories to assess defensive programming quality"
 
-**Template Application Strategy:**
+**Documentation Standards for the Output:**
 
-For each vulnerability entry, apply the following template structure:
-
-```
-### [CVE-XXXX-XXXXX] Vulnerability Title
-
-**CVSS Score:** X.X (SEVERITY)
-**Vector:** CVSS:3.1/AV:X/AC:X/PR:X/UI:X/S:X/C:X/I:X/A:X
-
-**Affected Component:** component-name
-**File Path:** path/to/vulnerable/file.go:LINE
-
-**Vulnerable Code:**
-[10 lines of context around vulnerability]
-
-**Exploit Scenario:**
-[Description of how vulnerability could be exploited]
-
-**Remediation:**
-[Specific code changes or configuration updates required]
-Source: [file:line reference]
-```
-
-**Documentation Standards Applied:**
-
-| Standard | Implementation |
-|----------|---------------|
-| Markdown formatting | Proper heading hierarchy (# ## ###), consistent bullet styles |
-| Code blocks | Language-specific syntax highlighting with \`\`\`go, \`\`\`yaml blocks |
-| Tables | Aligned columns for vulnerability summaries and comparisons |
-| Diagrams | Mermaid diagrams for architecture and data flow visualization |
-| Citations | Source file:line references for all technical claims |
-| Terminology | Consistent use of CVSS, CVE, OWASP terminology |
+- Markdown formatting with `#` headers matching the five prescribed sections
+- No Mermaid diagrams (single-page constraint demands density over visuals)
+- Bullet points for Key Findings with category grouping
+- File path references in inline code format (e.g., `pkg/kubelet/kubelet.go`)
+- Concise prose paragraphs for Overview, Patterns, and Risk Assessment sections
+- No code blocks unless unavoidable for clarity — the user specification explicitly discourages code rewriting
+- Source citations as inline parenthetical references: `(observed in pkg/scheduler/schedule_one.go)`
+- Consistent terminology aligned with Go community conventions (goroutines, interfaces, receivers, etc.)
 
 ### 0.4.3 Diagram and Visual Strategy
 
-**Mermaid Diagrams to Create:**
+No diagrams are required or appropriate for this deliverable. The user-specified format is a single-page document optimized for experienced engineers. The one-page constraint makes visual elements counterproductive — space must be reserved for evidence-based findings and actionable recommendations. All architectural relationships and patterns will be described through concise prose with file path citations.
 
-**1. Audit Process Flow:**
-```mermaid
-flowchart TD
-    A[Clone Repository] --> B[Environment Setup]
-    B --> C[Install Go 1.25.0]
-    C --> D[Install Security Tools]
-    D --> E{Parallel Execution}
-    E --> F[Trivy Dependency Scan]
-    E --> G[gosec Code Analysis]
-    E --> H[Semgrep Pattern Scan]
-    F --> I[Aggregate Results]
-    G --> I
-    H --> I
-    I --> J[False Positive Filtering]
-    J --> K[CVSS Scoring]
-    K --> L[Generate Reports]
-    L --> M[Executive Summary HTML]
-    L --> N[SARIF Reports]
-    L --> O[Remediation Roadmap]
-```
+### 0.4.4 Key Quality Themes to Document
 
-**2. Vulnerability Severity Distribution (Example):**
-```mermaid
-pie title Vulnerability Distribution by Severity
-    "Critical" : 5
-    "High" : 23
-    "Medium" : 87
-    "Low" : 142
-```
+Based on comprehensive codebase analysis, the following themes have been identified for documentation across the five output sections:
 
-**3. Component Security Risk Map:**
-```mermaid
-graph TB
-    subgraph "Critical Risk Components"
-        A[kube-apiserver]
-        B[kubelet]
-    end
-    subgraph "High Risk Components"
-        C[kube-controller-manager]
-        D[admission-controllers]
-    end
-    subgraph "Medium Risk Components"
-        E[kube-scheduler]
-        F[kube-proxy]
-    end
-    A --> |"Auth/AuthZ"| D
-    B --> |"CRI Interface"| G[Container Runtime]
-    C --> |"Service Accounts"| A
-```
+**Strengths (to be documented):**
+- Mature CI enforcement with 50+ merge-blocking verification gates
+- Consistent CLI entry point pattern across all 25 binaries
+- Comprehensive linter configuration with custom Kubernetes-specific plugins
+- Race detector and cache mutation detector enabled by default
+- Boilerplate, import alias, and import boundary enforcement
+- Well-structured test pyramid spanning 17 categories
+- Deterministic build infrastructure with reproducibility guarantees
 
-**4. Dependency Vulnerability Chain:**
-```mermaid
-flowchart LR
-    A[k8s.io/kubernetes] --> B[k8s.io/client-go]
-    A --> C[k8s.io/apiserver]
-    B --> D[golang.org/x/crypto]
-    C --> D
-    D --> E{CVE-XXXX}
-    style E fill:#ff6b6b
-```
-
-### 0.4.4 Report Generation Pipeline
-
-**Executive Summary (HTML) Requirements:**
-
-| Section | Content | Visualization |
-|---------|---------|--------------|
-| Overview | Total vulnerabilities, scan duration, coverage metrics | Summary cards |
-| Severity Distribution | Count by Critical/High/Medium/Low | Pie chart + bar chart |
-| Top 10 Critical Findings | Highest priority vulnerabilities | Sortable table |
-| Component Risk Matrix | Risk by Kubernetes component | Heat map |
-| Supply Chain Risk | Dependency vulnerabilities | Dependency graph |
-| OWASP Compliance | Category compliance status | Scorecard |
-| Remediation Effort | Estimated hours by severity | Effort breakdown |
-
-**SARIF Report Requirements:**
-
-| Field | Content |
-|-------|---------|
-| `$schema` | SARIF 2.1.0 schema URI |
-| `version` | "2.1.0" |
-| `runs[].tool` | Tool name, version, informationUri |
-| `runs[].results[]` | Finding ID, rule ID, message, location, level |
-| `runs[].results[].locations[]` | File path, region (startLine, endLine) |
-| `runs[].results[].partialFingerprints` | Unique finding identifier |
-
-**CSV Export Columns:**
-
-```
-CVE_ID, CVSS_Score, CVSS_Vector, Severity, Component, File_Path, Line_Number, 
-CWE_ID, Description, Exploit_Scenario, Remediation, Tool_Source, 
-OWASP_Category, Confidence, Date_Identified
-```
+**Systemic Issues (to be documented):**
+- Large file/import sizes in core packages (kubelet: 80+ imports)
+- Partial contextual logging migration creating inconsistent logging patterns
+- Exported API documentation exemptions across most packages
+- Lint exclusion debt (tracked TODOs in golangci.yaml, issue #131475)
+- Multi-era codebase (2014–present) with evolutionary pattern layering
+- Naming convention exceptions for generated code (Convert_*, SetDefaults_*)
+- Multiple disabled staticcheck rules (30+) reducing static analysis coverage
 
 ## 0.5 Documentation File Transformation Mapping
 
 ### 0.5.1 File-by-File Documentation Plan
 
-**CRITICAL: Complete Documentation File Mapping**
+The documentation task has a single output file target. All source files listed in the "Source Code/Docs" column serve as evidence sources for the code quality assessment.
 
 | Target Documentation File | Transformation | Source Code/Docs | Content/Changes |
-|---------------------------|----------------|------------------|-----------------|
-| `/audit-results/metadata.json` | CREATE | Tool installations, go.mod | Audit timestamp, Go version (1.25.0), Trivy version (0.69.0), gosec version (2.22.11), Semgrep version (1.150.0), database timestamps |
-| `/audit-results/executive-summary.html` | CREATE | All SARIF outputs | HTML report with severity distribution charts, top 10 findings, component risk matrix, OWASP scorecard |
-| `/audit-results/vulnerability-report.sarif` | CREATE | `sarif/*.sarif` | Aggregated SARIF from Trivy, gosec, Semgrep with deduplication |
-| `/audit-results/vulnerability-report.csv` | CREATE | `sarif/*.sarif` | CSV export with all columns: CVE_ID, CVSS_Score, Severity, Component, File_Path, Line_Number, Description, Remediation |
-| `/audit-results/remediation-roadmap.md` | CREATE | `vulnerability-report.sarif` | Prioritized Markdown remediation guide grouped by component (API server, kubelet, etc.) |
-| `/audit-results/sbom.json` | CREATE | `go.mod`, `go.sum` | Complete Software Bill of Materials in CycloneDX/SPDX format |
-| `/audit-results/owasp-compliance.md` | CREATE | Vulnerability mappings | OWASP Top 10 compliance scorecard with per-category findings |
-| `/audit-results/false-positives.csv` | CREATE | Scan exclusions | Excluded findings with ID, file path, severity, exclusion reason, confidence score |
-| `/audit-results/sarif/trivy-report.sarif` | CREATE | `go.mod`, filesystem | Trivy dependency and misconfiguration scan results in SARIF format |
-| `/audit-results/sarif/gosec-report.sarif` | CREATE | `cmd/**/*.go`, `pkg/**/*.go` | gosec static analysis results for Go code |
-| `/audit-results/sarif/semgrep-report.sarif` | CREATE | `**/*.go`, `**/*.sh`, `**/*.yaml` | Semgrep multi-language security scan results |
-| `/audit-results/logs/trivy-scan.log` | CREATE | Trivy execution | Trivy scan execution logs with timing and progress |
-| `/audit-results/logs/gosec-scan.log` | CREATE | gosec execution | gosec scan execution logs |
-| `/audit-results/logs/semgrep-scan.log` | CREATE | Semgrep execution | Semgrep scan execution logs |
-| `/audit-results/dependencies/sbom-full.json` | CREATE | `go list -m all` | Complete dependency tree with versions |
-| `/audit-results/dependencies/vulnerable-deps.json` | CREATE | Trivy output | Vulnerable dependencies with CVE mappings |
-| `/audit-results/dependencies/license-compliance.json` | CREATE | Trivy license scan | License compliance summary for all dependencies |
+|---|---|---|---|
+| `README.md` | CREATE | Multiple source files (see below) | Complete code quality review document with Overview, Key Findings, Representative Patterns, Improvement Recommendations, and Quality Risk Assessment |
 
-### 0.5.2 New Documentation Files Detail
+**Source evidence files feeding into the README.md content:**
 
-**File: /audit-results/metadata.json**
+| Source File/Directory | Role | Evidence Category |
+|---|---|---|
+| `hack/golangci.yaml` | REFERENCE | Tooling & Process — linter configuration, enabled/disabled checks, exclusion rules, TODO debt |
+| `hack/golangci-hints.yaml` | REFERENCE | Tooling & Process — additional hint-level linter configuration |
+| `hack/verify-gofmt.sh` | REFERENCE | Tooling & Process — formatting enforcement CI gate |
+| `hack/verify-golangci-lint.sh` | REFERENCE | Tooling & Process — lint enforcement CI gate |
+| `hack/verify-shellcheck.sh` | REFERENCE | Tooling & Process — shell script quality gate |
+| `hack/verify-boilerplate.sh` | REFERENCE | Tooling & Process — license header enforcement |
+| `hack/verify-import-boss.sh` | REFERENCE | Tooling & Process — import boundary enforcement |
+| `hack/verify-import-aliases.sh` | REFERENCE | Tooling & Process — import alias consistency |
+| `hack/verify-codegen.sh` | REFERENCE | Tooling & Process — code generation freshness |
+| `hack/verify-mocks.sh` | REFERENCE | Tooling & Process — mock synchronization |
+| `hack/verify-govulncheck.sh` | REFERENCE | Tooling & Process — security vulnerability scanning |
+| `hack/verify-deadcode-elimination.sh` | REFERENCE | Tooling & Process — dead code detection |
+| `hack/verify-typecheck.sh` | REFERENCE | Tooling & Process — cross-platform type safety |
+| `hack/verify-all.sh` | REFERENCE | Tooling & Process — orchestration of 50+ verification gates |
+| `hack/make-rules/test.sh` | REFERENCE | Testability — unit test runner configuration, race detector, coverage |
+| `hack/make-rules/test-integration.sh` | REFERENCE | Testability — integration test runner configuration |
+| `hack/lib/init.sh` | REFERENCE | Consistency — build environment bootstrap patterns |
+| `Makefile` | REFERENCE | Tooling & Process — build system configuration, strict shell modes |
+| `go.mod` | REFERENCE | Dependencies — Go 1.25.0, module dependencies, staging replaces |
+| `.gitattributes` | REFERENCE | Consistency — generated file markers, LF line endings |
+| `build/dependencies.yaml` | REFERENCE | Configuration — pinned external dependency versions |
+| `build/common.sh` | REFERENCE | Design Quality — container image version management |
+| `pkg/capabilities/capabilities.go` | REFERENCE | Code Quality — exemplar of clean singleton pattern, small focused package |
+| `pkg/fieldpath/fieldpath.go` | REFERENCE | Code Quality — exemplar of optimized utilities with clear docs |
+| `pkg/scheduler/schedule_one.go` | REFERENCE | Design Quality — multi-phase pipeline, constant documentation, TODO comments |
+| `pkg/controller/controller_utils.go` | REFERENCE | Design Quality — shared controller primitives, complex import set |
+| `pkg/kubelet/kubelet.go` | REFERENCE | Maintainability — large file with 80+ imports, complex initialization |
+| `pkg/features/kube_features.go` | REFERENCE | Design Quality — feature gate registry, sorted enforcement |
+| `cmd/kube-apiserver/apiserver.go` | REFERENCE | Consistency — CLI entry point pattern |
+| `cmd/kubelet/kubelet.go` | REFERENCE | Consistency — CLI entry point pattern |
+| `cmd/kube-scheduler/scheduler.go` | REFERENCE | Consistency — CLI entry point pattern |
+| `cmd/preferredimports/preferredimports.go` | REFERENCE | Tooling — import alias enforcement tool |
+| `cmd/import-boss/` | REFERENCE | Tooling — import boundary enforcement tool |
+| `hack/boilerplate/boilerplate.py` | REFERENCE | Tooling — license header verification |
+| `test/` directory structure | REFERENCE | Testability — 17 test categories, test pyramid |
+| `audit-results/metadata.json` | REFERENCE | Quality Metrics — scan scope (9,441 Go files, 176 shell scripts) |
+
+### 0.5.2 New Documentation File Detail
+
 ```
-Type: Audit Metadata
-Source Code: go.mod, tool installations
+File: README.md
+Type: Code Quality Assessment Report
+Source Code: Multiple files across pkg/, cmd/, hack/, test/, build/ (see table above)
 Sections:
-    - audit_timestamp (ISO 8601 format)
-    - go_version (extracted from go.mod: "1.25.0")
-    - trivy_version ("0.69.0")
-    - trivy_db_timestamp (vulnerability database timestamp)
-    - gosec_version ("2.22.11")
-    - semgrep_version ("1.150.0")
-    - semgrep_rules_sha (ruleset commit SHA)
-    - scan_duration_seconds
-    - files_scanned_count
-    - lines_of_code_analyzed
-Key Citations: go.mod, tool version outputs
-```
-
-**File: /audit-results/executive-summary.html**
-```
-Type: Executive Summary Report
-Source Code: All SARIF outputs, aggregated analysis
-Sections:
-    - Executive Overview (audit scope, methodology, key findings)
-    - Severity Distribution (pie chart, bar chart)
-    - Top 10 Critical/High Findings (sortable table)
-    - Component Risk Assessment (risk by cmd/*, pkg/*, plugin/*)
-    - Supply Chain Risk Summary (dependency vulnerabilities)
-    - OWASP Top 10 Compliance Scorecard (category status)
-    - Remediation Effort Estimates (hours by severity class)
-    - Recommendations (prioritized action items)
+    - Overview (2–3 paragraphs: high-level assessment, consistency/maintainability/design summary, scope statement)
+    - Key Findings (bullet-pointed by category: Consistency, Maintainability, Design, Efficiency, Documentation, Testability, Tooling)
+    - Representative Patterns Observed (recurring patterns with file references, impact on quality/risk/velocity)
+    - Improvement Recommendations (prioritized, actionable, each addresses specific findings, expected benefit)
+    - Quality Risk Assessment (degradation areas, architectural/organizational risks, long-term change risk)
 Diagrams:
-    - Severity distribution pie chart (Chart.js or similar)
-    - Component risk heat map
-    - Trend visualization (if historical data available)
-Key Citations: SARIF reports, CVSS database
+    - None (single-page constraint)
+Key Citations:
+    - hack/golangci.yaml (linter configuration, enforcement gaps, TODO debt)
+    - hack/verify-*.sh (50+ verification gate scripts)
+    - pkg/kubelet/kubelet.go (large file, 80+ imports)
+    - pkg/scheduler/schedule_one.go (well-documented constants, TODO markers)
+    - pkg/controller/controller_utils.go (shared primitives, complex imports)
+    - pkg/capabilities/capabilities.go (clean small package exemplar)
+    - Makefile (build system strictness)
+    - go.mod (Go 1.25.0, module structure)
 ```
 
-**File: /audit-results/remediation-roadmap.md**
-```
-Type: Remediation Guide
-Source Code: vulnerability-report.sarif
-Sections:
-    - Priority 1: Critical Vulnerabilities (CVSS ≥9.0)
-    - Priority 2: High Vulnerabilities (CVSS 7.0-8.9)
-    - Priority 3: Medium Vulnerabilities (CVSS 4.0-6.9)
-    - Priority 4: Low Vulnerabilities (CVSS <4.0)
-    - By Component: API Server, kubelet, Controllers, Scheduler
-    - Effort Estimates (hours per fix)
-    - Testing Recommendations (per fix)
-    - Regression Risk Assessment
-Key Citations: SARIF findings, code file references
-```
+### 0.5.3 Documentation Configuration Updates
 
-**File: /audit-results/owasp-compliance.md**
-```
-Type: Compliance Scorecard
-Source Code: vulnerability-report.sarif, OWASP mappings
-Sections:
-    - A01:2021 Broken Access Control (findings, status)
-    - A02:2021 Cryptographic Failures (findings, status)
-    - A03:2021 Injection (findings, status)
-    - A04:2021 Insecure Design (findings, status)
-    - A05:2021 Security Misconfiguration (findings, status)
-    - A06:2021 Vulnerable and Outdated Components (findings, status)
-    - A07:2021 Identification and Authentication Failures (findings, status)
-    - A08:2021 Software and Data Integrity Failures (findings, status)
-    - A09:2021 Security Logging and Monitoring Failures (findings, status)
-    - A10:2021 Server-Side Request Forgery (findings, status)
-    - Overall Compliance Score
-Key Citations: CVE-to-OWASP mapping references
-```
+No documentation configuration files need to be created or updated. The deliverable is a standalone Markdown file (`README.md`) that does not depend on any documentation generator, site builder, or navigation configuration. There is no `mkdocs.yml`, `docusaurus.config.js`, `.readthedocs.yml`, or equivalent to maintain.
 
-### 0.5.3 Source Code Files to Analyze (Not Modify)
+### 0.5.4 Cross-Documentation Dependencies
 
-**Go Source Files (Static Analysis Input):**
-
-| Pattern | Description | Estimated Files | Analysis Tool |
-|---------|-------------|-----------------|--------------|
-| `cmd/**/*.go` | Core component entrypoints | ~500 files | gosec, Semgrep |
-| `pkg/**/*.go` | Core library implementations | ~3000 files | gosec, Semgrep |
-| `plugin/pkg/**/*.go` | Admission and auth plugins | ~200 files | gosec, Semgrep |
-| `staging/src/k8s.io/**/*.go` | Staged external modules | ~5000 files | gosec, Semgrep |
-| `test/**/*.go` | Test files (for false positive classification) | ~2000 files | Exclude from findings |
-
-**Shell Scripts (Static Analysis Input):**
-
-| Pattern | Description | Files | Analysis Tool |
-|---------|-------------|-------|--------------|
-| `hack/*.sh` | Build/verification scripts | ~50 files | Semgrep |
-| `cluster/**/*.sh` | Cluster lifecycle scripts | ~30 files | Semgrep |
-| `build/*.sh` | Build automation | ~10 files | Semgrep |
-
-**Configuration Files (Misconfiguration Analysis Input):**
-
-| Pattern | Description | Analysis Tool |
-|---------|-------------|--------------|
-| `cluster/addons/**/*.yaml` | Addon manifests | Trivy misconfig |
-| `build/**/*.yaml` | Build configurations | Trivy misconfig |
-| `**/Dockerfile` | Container definitions | Trivy container |
-
-### 0.5.4 Exclusion Patterns (Files NOT to Analyze)
-
-**Explicitly Excluded from Analysis:**
-
-| Pattern | Reason |
-|---------|--------|
-| `vendor/**` | Third-party code copies (not maintained by project) |
-| `staging/src/k8s.io/**/zz_generated.*` | Generated code (protobuf, deepcopy, etc.) |
-| `**/api.pb.go`, `**/*_grpc.pb.go` | Protocol buffer generated code |
-| `**/*_test.go` | Test files (used for false positive classification only) |
-| `test/fixtures/**` | Test fixtures and mock data |
-| `**/*.md`, `LICENSE`, `OWNERS` | Documentation and metadata files |
-
-### 0.5.5 Cross-Documentation Dependencies
-
-**Report Generation Dependencies:**
-
-```mermaid
-flowchart LR
-    A[trivy-report.sarif] --> D[vulnerability-report.sarif]
-    B[gosec-report.sarif] --> D
-    C[semgrep-report.sarif] --> D
-    D --> E[vulnerability-report.csv]
-    D --> F[executive-summary.html]
-    D --> G[remediation-roadmap.md]
-    D --> H[owasp-compliance.md]
-    I[sbom-full.json] --> J[vulnerable-deps.json]
-    J --> F
-```
-
-**Shared Content Elements:**
-
-| Element | Used In | Source |
-|---------|---------|--------|
-| Vulnerability counts by severity | executive-summary.html, remediation-roadmap.md | vulnerability-report.sarif |
-| Component mapping | executive-summary.html, remediation-roadmap.md | File path analysis |
-| OWASP category mapping | owasp-compliance.md, executive-summary.html | CVE database cross-reference |
-| CVSS scores | All reports | NVD/GHSA databases |
+- **No shared content or includes**: The output file is self-contained
+- **No navigation links**: Single file, no cross-document navigation needed
+- **No table of contents updates**: The README.md is the sole deliverable
+- **No index or glossary updates**: Not applicable for a single-file deliverable
+- **Existing README.md**: The current `README.md` (101 lines) is a project landing page. The new file will replace it entirely with the code quality assessment document as specified by the user requirements
 
 ## 0.6 Dependency Inventory
 
-### 0.6.1 Security Scanning Tool Dependencies
+### 0.6.1 Documentation Dependencies
 
-**Primary Security Tools:**
+This documentation task produces a standalone Markdown file and does not require any documentation generation tools, site builders, or rendering frameworks. The `README.md` output is plain Markdown consumable by any Markdown renderer (GitHub, GitLab, VS Code, etc.).
 
-| Registry | Package Name | Version | Purpose |
-|----------|--------------|---------|---------|
-| GitHub Release | aquasecurity/trivy | 0.69.0 | Vulnerability scanning, SBOM generation, dependency analysis, misconfiguration detection |
-| Go Install | github.com/securego/gosec/v2/cmd/gosec | 2.22.11 | Go static security analysis, AST/SSA inspection, CWE mapping |
-| PyPI | semgrep | 1.150.0 | Multi-language pattern-based security scanning, custom rules |
-| Go Install | golang.org/x/vuln/cmd/govulncheck | latest | Go module vulnerability checking (existing K8s tooling) |
+No documentation-specific packages need to be installed, configured, or invoked. The task is purely analytical — all content is derived from static inspection of the codebase.
 
-**Installation Commands:**
+**Project dependencies relevant to the quality assessment findings (not dependencies for generating documentation):**
 
-```bash
-# Trivy installation
+| Registry | Package Name | Version | Purpose (in Quality Assessment Context) |
+|---|---|---|---|
+| Go module | `k8s.io/kubernetes` | go 1.25.0 | Primary module — Go version determines available language features and tooling compatibility |
+| Go toolchain | `go` | 1.25.4 | Upstream toolchain pin (`build/dependencies.yaml` line 120) — determines gofmt, go vet behavior |
+| Go module | `github.com/onsi/ginkgo/v2` | v2.27.2 | E2E test framework — evidence for testability assessment |
+| Go module | `github.com/onsi/gomega` | v1.38.2 | E2E matcher library — evidence for testability assessment |
+| Go module | `github.com/stretchr/testify` | v1.11.1 | Unit test assertions — evidence for testability assessment |
+| Go module | `github.com/google/go-cmp` | v7.0.0 | Structural comparison — evidence for testability assessment |
+| Go module | `go.uber.org/goleak` | v1.3.0 | Goroutine leak detection — evidence for reliability assessment |
+| Go tool | `golangci-lint` | v2 config | Linting framework — primary evidence source for tooling assessment |
+| Go tool | `gotestsum` | v1.12.0 | Test runner — evidence for CI/testing infrastructure |
+| Go tool | `mockery/v3` | v3.5.4 | Mock generation — evidence for testability assessment |
+| Go module | `k8s.io/klog/v2` | v2.130.1 | Structured logging — evidence for consistency assessment (contextual logging migration) |
+| External | `shellcheck` | external | Shell script linter — evidence for tooling assessment |
 
-curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-  | sh -s -- -b /usr/local/bin v0.69.0
+### 0.6.2 Documentation Reference Updates
 
-#### gosec installation
+Not applicable. The output `README.md` is a new standalone document that replaces the existing project landing page. No link updates in other documentation files are required because:
 
-go install github.com/securego/gosec/v2/cmd/gosec@v2.22.11
-
-#### Semgrep installation
-
-pip install semgrep==1.150.0
-
-#### govulncheck installation (for comparison with existing K8s tooling)
-
-go install golang.org/x/vuln/cmd/govulncheck@latest
-```
-
-### 0.6.2 Runtime Dependencies
-
-**Go Toolchain:**
-
-| Component | Version | Source | Purpose |
-|-----------|---------|--------|---------|
-| Go | 1.25.0 | go.dev/dl | Required Go version per Kubernetes go.mod |
-| Go modules | enabled | Built-in | Dependency resolution for scanning |
-
-**Go Installation Command:**
-
-```bash
-# Extract Go version from go.mod
-
-GO_VERSION=$(go mod edit -json | jq -r .Go)
-echo "Detected Go version: $GO_VERSION"
-
-#### Download and install Go 1.25.0
-
-wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
-export PATH=$PATH:/usr/local/go/bin
-
-#### Verification
-
-go version  # Must output "go version go1.25.0"
-```
-
-**Python Runtime (for Semgrep):**
-
-| Component | Version | Purpose |
-|-----------|---------|---------|
-| Python | 3.10+ | Semgrep runtime requirement |
-| pip | latest | Package installation |
-
-### 0.6.3 Database and Reference Dependencies
-
-**Vulnerability Databases:**
-
-| Database | Update Method | Update Frequency | Purpose |
-|----------|--------------|------------------|---------|
-| Trivy Vulnerability DB | `trivy image --download-db-only` | Within 24 hours of audit | CVE matching for dependencies |
-| NVD (National Vulnerability Database) | Trivy DB includes | Daily sync | CVE severity data |
-| GitHub Security Advisories | Trivy DB includes | Continuous | Go-specific advisories |
-| Go Vulnerability Database | govulncheck fetch | Continuous | Go module vulnerabilities |
-
-**Semgrep Rule Dependencies:**
-
-| Ruleset | Configuration | Purpose |
-|---------|--------------|---------|
-| semgrep/p/security-audit | `--config=auto` | General security patterns |
-| semgrep/p/golang | `--config=p/golang` | Go-specific security rules |
-| semgrep/p/secrets | `--config=p/secrets` | Hardcoded credential detection |
-| semgrep/p/command-injection | `--config=p/command-injection` | Command injection patterns |
-
-### 0.6.4 Kubernetes Repository Dependencies (Analysis Targets)
-
-**Critical Dependencies from go.mod (Security Analysis Focus):**
-
-| Module | Version Range | Security Relevance |
-|--------|--------------|-------------------|
-| `go.etcd.io/etcd/client/v3` | v3.5.x | etcd client - data store access |
-| `go.etcd.io/etcd/server/v3` | v3.5.x | etcd server - data persistence |
-| `google.golang.org/grpc` | v1.x | gRPC framework - RPC security |
-| `golang.org/x/crypto` | latest | Cryptographic primitives |
-| `golang.org/x/oauth2` | latest | OAuth2 implementation |
-| `github.com/prometheus/client_golang` | v1.x | Metrics exposure |
-| `github.com/coreos/go-oidc` | v3.x | OIDC authentication |
-| `k8s.io/client-go` | internal | Kubernetes client library |
-| `k8s.io/apiserver` | internal | API server library |
-| `k8s.io/apimachinery` | internal | API machinery utilities |
-
-**Transitive Dependency Chains (High Risk):**
-
-```mermaid
-flowchart TD
-    A[k8s.io/kubernetes] --> B[k8s.io/client-go]
-    A --> C[k8s.io/apiserver]
-    B --> D[golang.org/x/crypto]
-    B --> E[golang.org/x/oauth2]
-    C --> D
-    C --> F[go.etcd.io/etcd]
-    F --> G[google.golang.org/grpc]
-    D --> H{Potential CVEs}
-    E --> H
-    G --> H
-```
-
-### 0.6.5 Output Format Dependencies
-
-**Report Generation Libraries:**
-
-| Purpose | Tool/Library | Output Format |
-|---------|-------------|---------------|
-| SARIF generation | Built into Trivy, gosec, Semgrep | SARIF 2.1.0 JSON |
-| CSV generation | Standard text processing | RFC 4180 CSV |
-| HTML generation | Template-based | HTML5 with embedded CSS/JS |
-| JSON generation | Native tool output | JSON (CycloneDX for SBOM) |
-| Markdown generation | Text processing | CommonMark Markdown |
-
-**SARIF Schema Validation:**
-
-| Validator | Purpose |
-|-----------|---------|
-| SARIF 2.1.0 JSON Schema | Validate generated SARIF reports |
-| GitHub Code Scanning compatibility | Ensure CI/CD integration |
-
-### 0.6.6 Infrastructure Dependencies
-
-**System Requirements:**
-
-| Resource | Requirement | Purpose |
-|----------|-------------|---------|
-| Memory | <16GB total across tools | Constraint per user requirements |
-| Storage | ~50GB for repository clone + analysis | Clone + scan artifacts |
-| Network | Internet access | Vulnerability database updates |
-| CPU | Multi-core recommended | Parallel scanning |
-
-**Container/Isolation (Optional):**
-
-| Tool | Image | Purpose |
-|------|-------|---------|
-| Trivy | `aquasec/trivy:0.69.0` | Containerized scanning |
-| Semgrep | `returntocorp/semgrep:1.150.0` | Containerized analysis |
+- The existing `README.md` is not cross-referenced by other in-repo documentation (it is a root landing page)
+- The `CONTRIBUTING.md` links to the external community repo, not to README.md
+- The `SUPPORT.md` is self-contained with no references to README.md
+- No documentation index or navigation system exists that would require updating
 
 ## 0.7 Coverage and Quality Targets
 
 ### 0.7.1 Documentation Coverage Metrics
 
-**Target Coverage Requirements:**
+The deliverable is a single code quality review document. Coverage in this context means the breadth and depth of the seven analysis dimensions applied to the codebase.
 
-| Metric | Current State | Target | Measurement Method |
-|--------|--------------|--------|-------------------|
-| Go source file coverage | 0% (no audit exists) | ≥95% of non-vendor Go files | File count in SARIF results / total Go files |
-| Dependency vulnerability coverage | 0% | 100% of go.mod dependencies | Dependencies scanned / total in go.mod |
-| CVE detection rate | N/A | ≥98% against NVD snapshot | Detected CVEs / known CVEs in database |
-| Critical/High finding coverage | N/A | 100% of GitHub Security Advisories | Findings detected / known advisories |
-| Shell script coverage | 0% | 100% of hack/, cluster/, build/ scripts | Scripts analyzed / total scripts |
+**Current coverage analysis (pre-task):**
 
-**Component Coverage Targets:**
+- Code quality review documents: 0/1 (0%) — no existing code quality assessment exists
+- Analysis dimensions covered by existing documentation: 0/7 (0%) — the `audit-results/` directory covers security only, not code quality
+- Repository areas with existing quality documentation: The `hack/golangci.yaml` configuration file implicitly documents some style standards, but no human-readable quality narrative exists
 
-| Component | Files (Estimated) | Target Coverage | Priority |
-|-----------|------------------|-----------------|----------|
-| cmd/kube-apiserver/ | ~100 | 100% | CRITICAL |
-| cmd/kubelet/ | ~50 | 100% | CRITICAL |
-| pkg/kubelet/ | ~500 | 100% | CRITICAL |
-| pkg/controller/ | ~300 | 100% | HIGH |
-| plugin/pkg/admission/ | ~150 | 100% | HIGH |
-| staging/src/k8s.io/client-go/ | ~800 | 100% | CRITICAL |
-| staging/src/k8s.io/apiserver/ | ~400 | 100% | CRITICAL |
-| hack/*.sh | ~50 | 100% | MEDIUM |
-| cluster/**/*.sh | ~30 | 100% | MEDIUM |
+**Target coverage (post-task):**
 
-### 0.7.2 Quality Validation Criteria
+| Analysis Dimension | Target Coverage | Evidence Sources |
+|---|---|---|
+| Code Consistency & Style | 100% — all seven sub-dimensions | `hack/golangci.yaml`, `hack/verify-gofmt.sh`, `hack/verify-import-aliases.sh`, representative source files |
+| Readability & Maintainability | 100% — all five sub-dimensions | `pkg/kubelet/kubelet.go`, `pkg/capabilities/`, `pkg/fieldpath/`, `pkg/controller/` |
+| Best Practices & Design Quality | 100% — all five sub-dimensions | Error handling patterns across controllers/scheduler/kubelet, feature gate system, configuration management |
+| Code Efficiency & Correctness | 100% — all four sub-dimensions | Static inspection of representative files, import analysis, allocation patterns |
+| Documentation & Comments | 100% — all four sub-dimensions | `hack/golangci.yaml` export doc exemptions, GoDoc coverage, comment quality in sampled files |
+| Testability & Reliability | 100% — all four sub-dimensions | `test/` directory structure, `hack/make-rules/test.sh`, race detector config, mock infrastructure |
+| Tooling & Process Signals | 100% — all observed/inferred signals | 50+ `hack/verify-*.sh` scripts, `Makefile`, `.gitattributes`, `hack/golangci.yaml` |
 
-**Success Criteria (Per User Requirements):**
+### 0.7.2 Documentation Quality Criteria
 
-| Criterion | Target | Validation Method |
-|-----------|--------|-------------------|
-| Codebase coverage | ≥95% (excluding vendor/) | Compare scanned files to total file count |
-| CVE detection rate | ≥98% | Compare against NVD database snapshot |
-| Critical/High CVE detection | 100% of GHSA Go advisories | Cross-reference GHSA database |
-| Cross-validation threshold | Top 20 dependencies confirmed by 2+ tools | Compare Trivy + gosec/Semgrep findings |
-| False negative documentation | All known K8s advisories checked | Compare against kubernetes.io/security |
-| Tool execution | All tools complete without fatal errors | Exit code validation |
-| Report validation | SARIF validates against schema | Schema validation |
+**Completeness requirements:**
 
-### 0.7.3 Documentation Quality Criteria
+- All seven analysis dimensions must have at least one finding in the Key Findings section
+- Every finding must include a "why it matters" explanation
+- Every observation must reference evidence (file paths, configuration values, or explicit inference markers)
+- The Overview section must state analysis scope and limitations
+- The Improvement Recommendations section must be prioritized and address specific findings
+- The Quality Risk Assessment must identify degradation areas and long-term risks
 
-**Completeness Requirements:**
+**Accuracy validation:**
 
-| Documentation Element | Requirement |
-|----------------------|-------------|
-| All Critical/High vulnerabilities | Complete description, CVSS score, vector, remediation |
-| All detected CVEs | CVE identifier linked to NVD database |
-| All affected files | Full path and line number reference |
-| All remediation recommendations | Actionable with specific code/config changes |
-| OWASP mappings | All applicable vulnerabilities mapped to OWASP Top 10 |
+- File path references must correspond to actual files in the repository (validated during context gathering)
+- Linter configuration claims must match the actual `hack/golangci.yaml` content
+- Verification gate counts must match the actual `hack/verify-*.sh` script count
+- Go version claims must match `go.mod` (1.25.0) and `build/dependencies.yaml` (1.25.4 toolchain)
+- Test category counts must match the actual `test/` directory structure (17 categories)
 
-**Accuracy Validation:**
+**Clarity standards:**
 
-| Check | Method | Acceptance |
-|-------|--------|------------|
-| CVE references exist in NVD | Automated URL validation | All links resolve |
-| CVSS scores match official records | Cross-reference with NVD | ±0.1 score tolerance |
-| File paths are valid | Path existence verification | 100% valid paths |
-| Code snippets match source | Line number verification | Exact match |
+- Technical accuracy with language appropriate for experienced engineers
+- No moralizing, filler, or subjective judgments
+- Progressive disclosure: Overview provides high-level summary, subsequent sections add specificity
+- Consistent terminology aligned with Go community conventions
 
-**Clarity Standards:**
+**Validation failure criteria (from user requirements):**
 
-| Standard | Implementation |
-|----------|---------------|
-| Technical accuracy | Security-precise language, correct terminology |
-| Accessible explanation | Progressive disclosure (summary → detail) |
-| Consistent terminology | CVSS, CVE, CWE, OWASP terms used correctly |
-| Actionable guidance | Specific file/line changes, not generic advice |
+| Failure Condition | Mitigation Strategy |
+|---|---|
+| Observations without evidence or inference boundaries | Every claim cites a file path or marks the conclusion as inferred |
+| Major issues without impact explanation | Each finding in Key Findings includes a "why it matters" clause |
+| Recommendations without justification or prioritization | Each recommendation addresses specific findings and states expected benefit |
+| Tooling/process claims without visible evidence | Tooling section explicitly distinguishes "observed" from "inferred" |
+| Output exceeds one page | Strict editorial discipline — favor density over exhaustiveness |
+| Generic guidance | All findings grounded in specific Kubernetes codebase observations |
 
-### 0.7.4 Cross-Validation Requirements
+### 0.7.3 Example and Diagram Requirements
 
-**Multi-Tool Correlation (Top 20 Dependencies):**
-
-For the top 20 most-imported dependencies (by import count), vulnerabilities must be confirmed by minimum 2 independent scanning tools:
-
-| Validation Pair | Purpose |
-|-----------------|---------|
-| Trivy + gosec | Dependency CVE + code pattern correlation |
-| Trivy + Semgrep | Dependency CVE + multi-language pattern |
-| gosec + Semgrep | Code pattern cross-validation |
-
-**False Positive Rate Benchmarks:**
-
-| Category | Expected Exclusion Rate | Alert Threshold |
-|----------|------------------------|-----------------|
-| Test code findings | 25-35% of total | >40% requires review |
-| Example code findings | 5-10% of total | >15% requires review |
-| Generated code findings | Should be 0% (excluded) | Any finding requires review |
-
-### 0.7.5 Example and Diagram Requirements
-
-**Minimum Example Requirements:**
-
-| Report Section | Example Count | Example Type |
-|----------------|---------------|--------------|
-| Executive Summary | 3-5 | High-priority finding summaries |
-| Critical Vulnerabilities | All | Full vulnerability entry with code snippet |
-| High Vulnerabilities | All | Full vulnerability entry with code snippet |
-| Medium/Low Vulnerabilities | Representative samples | Abbreviated entries |
-| Remediation Roadmap | 1 per component | Detailed fix example |
-
-**Diagram Requirements:**
-
-| Diagram Type | Count | Purpose |
-|--------------|-------|---------|
-| Severity Distribution | 1 | Pie/bar chart in executive summary |
-| Component Risk Matrix | 1 | Heat map in executive summary |
-| Audit Process Flow | 1 | Methodology documentation |
-| Dependency Chain | 1 per critical transitive vulnerability | Supply chain visualization |
-
-### 0.7.6 Performance Validation Criteria
-
-**Time Constraints:**
-
-| Metric | Target | Enforcement |
-|--------|--------|-------------|
-| Total audit duration | ≤4 hours | Hard deadline with scope reduction if exceeded |
-| Progress checkpoints | Every 30 minutes | Logged completion percentage |
-| Early warning trigger | 3.5 hours with <80% progress | Scope reduction to Critical/High only |
-
-**Resource Constraints:**
-
-| Metric | Target | Enforcement |
-|--------|--------|-------------|
-| Peak memory usage | <16GB total | Monitoring every 60 seconds |
-| Per-tool memory limit | <12GB individual | SIGTERM/SIGKILL with parallelism reduction |
-| Scope reduction (last resort) | Core components only | Analyze cmd/, pkg/apiserver/, pkg/kubelet/, pkg/controller/ |
-
-**Deliverable Validation:**
-
-| Deliverable | Validation Check |
-|-------------|-----------------|
-| SARIF reports | Schema validation passes |
-| HTML report | Renders correctly with charts/tables |
-| CSV export | RFC 4180 compliance |
-| CVE references | All URLs resolve |
-| Remediation guidance | References valid file paths |
+- **Minimum examples per finding**: Each Key Finding bullet must include at least one file path reference or configuration evidence citation
+- **Diagram types required**: None — single-page constraint prohibits diagrams
+- **Code example policy**: No code rewriting per user specification ("Do not rewrite code unless unavoidable for clarity")
+- **Visual content**: None required or appropriate
 
 ## 0.8 Scope Boundaries
 
 ### 0.8.1 Exhaustively In Scope
 
-**Go Source Code Analysis:**
+**New documentation file:**
+- `README.md` — Single-page code quality review document (CREATE mode)
 
-| Pattern | Description | Analysis Type |
-|---------|-------------|--------------|
-| `cmd/**/*.go` | Core component CLI entrypoints (kube-apiserver, kubelet, kube-controller-manager, kube-scheduler, kube-proxy, kubectl, kubeadm) | gosec, Semgrep |
-| `pkg/**/*.go` | Core library implementations (kubelet, controller, scheduler, volume, registry, auth) | gosec, Semgrep |
-| `plugin/pkg/**/*.go` | Admission controllers and authentication plugins | gosec, Semgrep |
-| `staging/src/k8s.io/**/*.go` | Staged external modules (client-go, api, apimachinery, apiserver, component-base) | gosec, Semgrep |
+**Source code directories analyzed for quality findings (read-only reference):**
+- `pkg/**/*.go` — Core internal packages (30+ packages, primary analysis surface)
+- `cmd/**/*.go` — CLI entry points (25 binary packages)
+- `hack/**` — Build scripts, verification gates, linter configuration, shared Bash library
+- `test/**` — Test infrastructure (17 categories, framework configuration)
+- `build/**` — Build system configuration, dependency manifests, release infrastructure
+- `staging/src/k8s.io/**` — Staged modules (32 independently-published modules)
+- `plugin/**` — Admission controllers and authentication plugins
 
-**Shell Script Analysis:**
+**Configuration files analyzed for tooling/process findings (read-only reference):**
+- `hack/golangci.yaml` — Linter configuration (12 enabled linters, exclusion rules)
+- `hack/golangci-hints.yaml` — Hint-level linter configuration
+- `hack/logcheck.conf` — Structured/contextual logging enforcement rules
+- `hack/verify-*.sh` — 50+ verification gate scripts
+- `hack/update-*.sh` — Code generation and update scripts
+- `Makefile` — Build system entry point
+- `go.mod` — Module declaration, Go version, dependencies
+- `.gitattributes` — Generated file markers, line ending policy
+- `build/dependencies.yaml` — External dependency version pins
+- `build/common.sh` — Container image version management
 
-| Pattern | Description | Analysis Type |
-|---------|-------------|--------------|
-| `hack/*.sh` | Build, verification, and update scripts | Semgrep shell rules |
-| `hack/**/*.sh` | Nested hack directory scripts | Semgrep shell rules |
-| `cluster/*.sh` | Cluster lifecycle scripts (kube-up, kube-down, validate-cluster) | Semgrep shell rules |
-| `cluster/**/*.sh` | Provider-specific and addon scripts | Semgrep shell rules |
-| `build/*.sh` | Build automation scripts | Semgrep shell rules |
-| `build/**/*.sh` | Nested build scripts | Semgrep shell rules |
-
-**Configuration File Analysis:**
-
-| Pattern | Description | Analysis Type |
-|---------|-------------|--------------|
-| `cluster/addons/**/*.yaml` | Kubernetes addon manifests (RBAC, services, deployments) | Trivy misconfiguration |
-| `build/**/*.yaml` | Build configuration files | Trivy misconfiguration |
-| `staging/publishing/*.yaml` | Publishing rules and import restrictions | Trivy misconfiguration |
-| `**/Dockerfile` | Container image definitions | Trivy container analysis |
-| `test/images/**/Dockerfile` | Test image definitions | Trivy container analysis |
-
-**Dependency Analysis:**
-
-| Pattern | Description | Analysis Type |
-|---------|-------------|--------------|
-| `go.mod` | Primary Go module dependencies | Trivy, SBOM generation |
-| `go.sum` | Dependency checksums | Trivy verification |
-| `staging/src/k8s.io/*/go.mod` | Staged module dependencies | Trivy per-module |
-
-**Documentation Outputs:**
-
-| Pattern | Description |
-|---------|-------------|
-| `/audit-results/**/*.sarif` | SARIF vulnerability reports |
-| `/audit-results/**/*.csv` | CSV vulnerability exports |
-| `/audit-results/**/*.html` | HTML executive summary |
-| `/audit-results/**/*.md` | Markdown documentation |
-| `/audit-results/**/*.json` | JSON metadata and SBOM |
-| `/audit-results/logs/**` | Execution logs |
+**Metadata files referenced:**
+- `audit-results/metadata.json` — Scan scope metrics (file counts, tool versions)
 
 ### 0.8.2 Explicitly Out of Scope
 
-**Excluded from Analysis:**
-
-| Pattern | Reason |
-|---------|--------|
-| `vendor/**` | Third-party code copies - not maintained by project |
-| `staging/src/k8s.io/**/zz_generated.*` | Auto-generated code (protobuf, deepcopy, defaults) |
-| `**/api.pb.go` | Protocol buffer generated code |
-| `**/*_grpc.pb.go` | gRPC generated code |
-| `**/*_test.go` | Test files (used for false positive classification, not primary findings) |
-| `test/fixtures/**` | Test fixtures and mock data |
-| `test/testdata/**` | Test data files |
-| `**/*.md` | Documentation files (non-code) |
-| `**/LICENSE` | License files |
-| `**/OWNERS` | Ownership metadata files |
-| `**/README.md` | README documentation |
-| `**/CONTRIBUTING.md` | Contribution guidelines |
-| `**/code-of-conduct.md` | Code of conduct |
-
-**Explicitly Out of Scope Activities:**
-
-| Activity | Reason |
-|----------|--------|
-| Source code modifications | Read-only audit requirement |
-| Test file modifications | Preservation requirement |
-| Feature additions or code refactoring | Not a development task |
-| Deployment configuration changes | Static analysis only |
-| Runtime penetration testing | Dynamic analysis out of scope |
-| Historical vulnerability analysis | Focus on current main branch state |
-| Documentation file editing | Audit produces new deliverables only |
-
-### 0.8.3 Conditional Scope (Based on Constraints)
-
-**Memory Constraint Fallback Scope:**
-
-If memory constraint (16GB) cannot be met after parallelism reduction:
-
-| Priority | Components to Analyze | Rationale |
-|----------|----------------------|-----------|
-| 1 (Required) | `cmd/kube-apiserver/**` | Critical authentication/authorization |
-| 2 (Required) | `pkg/kubelet/**` | Node-level security critical |
-| 3 (Required) | `cmd/kubelet/**` | Kubelet entrypoint |
-| 4 (Required) | `pkg/controller/**` | Controller security |
-| 5 (If capacity) | `plugin/pkg/admission/**` | Admission plugins |
-| 6 (If capacity) | `staging/src/k8s.io/client-go/**` | Client library |
-| Skip | `staging/src/k8s.io/sample-*/**` | Lower priority samples |
-| Skip | `test/**` | Test infrastructure |
-
-**Time Constraint Fallback Scope:**
-
-If 4-hour deadline approached with incomplete coverage:
-
-| Priority | Action |
-|----------|--------|
-| 1 | Complete Critical/High severity analysis only |
-| 2 | Reduce SARIF report detail (omit code context) |
-| 3 | Generate abbreviated executive summary (top 20 findings) |
-| 4 | Document time constraint impact in limitations section |
-
-### 0.8.4 False Positive Classification Boundaries
-
-**Automatic Exclusion (High Confidence ≥95%):**
-
-| Pattern | Exclusion Rationale |
-|---------|-------------------|
-| `*/test/*` | Test code paths |
-| `*/testdata/*` | Test data directories |
-| `*_test.go` | Test files |
-| `*/examples/*` | Example code |
-| `*/hack/tools/*` | Development tooling |
-| `*/staging/src/k8s.io/code-generator/*` | Code generation tooling |
-
-**Manual Review Required (Medium Confidence 70-94%):**
-
-| Pattern | Review Reason |
-|---------|--------------|
-| `*/hack/*.sh` | Some scripts used in CI/CD pipelines |
-| Cryptographic findings in test fixtures | May indicate copy-paste risk to production |
-| Hardcoded credentials in example configs | May be templated by users |
-
-**NEVER Exclude Without Review:**
-
-| Category | Retention Requirement |
-|----------|----------------------|
-| Critical/High severity (CVSS ≥7.0) | All findings require manual validation |
-| Authentication/Authorization findings | Broken access control in any context |
-| Data Exposure findings | Sensitive data logging or insecure storage |
-| Code Execution findings | Command injection, RCE patterns |
-
-### 0.8.5 Scope Preservation Requirements
-
-**Read-Only Enforcement:**
-
-| Requirement | Verification |
-|-------------|-------------|
-| No repository modifications | git status shows clean working tree |
-| No .git directory changes | No commits, branches, tags created |
-| No code execution from repo | No `go build`, `go test`, binary execution |
-| Output isolation | All outputs in `/audit-results/` only |
-| Cleanup requirement | Repository clone deleted after audit |
-
-**Boundary Decisions Requiring Documentation:**
-
-| Decision Type | Documentation Location |
-|---------------|----------------------|
-| Files excluded from analysis | `/audit-results/metadata.json` |
-| Scope reductions due to constraints | Executive summary limitations section |
-| False positive classifications | `/audit-results/false-positives.csv` |
-| Coverage gaps | Remediation roadmap acknowledgments |
+- **Source code modifications**: No Go source files will be created, modified, or deleted. The task produces documentation only
+- **Test file modifications**: No test files will be created, modified, or deleted
+- **Linter configuration changes**: The `hack/golangci.yaml` and related files will not be modified — they are read-only evidence sources
+- **Feature additions or code refactoring**: No functional changes to the codebase
+- **Deployment configuration changes**: No changes to `build/`, `cluster/`, or release infrastructure
+- **Vendor directory changes**: No changes to `vendor/` or dependency management
+- **Generated code changes**: No changes to `zz_generated.*`, `*.pb.go`, or other generated files
+- **Staging module changes**: No changes to `staging/src/k8s.io/` modules
+- **Runtime benchmarking or profiling**: Per user requirements, efficiency analysis is limited to static inspection — no `go test -bench`, no profiling, no runtime measurements
+- **Security audit**: The `audit-results/` directory is referenced for scope metrics only; no security assessment or vulnerability analysis is performed
+- **External documentation**: The kubernetes.io website, community repo, or any external documentation is out of scope
+- **Existing root-level documentation**: `CONTRIBUTING.md`, `SUPPORT.md`, `code-of-conduct.md`, `CHANGELOG.md`, `LICENSE` — none of these files are modified
+- **Subdirectory READMEs**: `build/README.md`, `hack/README.md`, `cluster/README.md`, `staging/README.md` — none are modified
+- **GitHub templates**: `.github/` directory contents are not modified
+- **Performance analysis**: No runtime performance testing, benchmarking, or scaling analysis
 
 ## 0.9 Execution Parameters
 
-### 0.9.1 Environment Setup Commands
-
-**Repository Clone:**
-```bash
-# Clone Kubernetes repository (main branch, shallow clone)
-
-git clone --depth=1 https://github.com/kubernetes/kubernetes.git
-cd kubernetes
-```
-
-**Go Version Extraction and Installation:**
-```bash
-# Extract Go version from go.mod
-
-GO_VERSION=$(go mod edit -json | jq -r .Go)
-echo "Detected Go version: $GO_VERSION"
-
-#### Fallback if extraction fails: Go 1.25.0
-
-if [ -z "$GO_VERSION" ] || [ "$GO_VERSION" == "null" ]; then
-  GO_VERSION="1.25.0"
-  echo "Using fallback Go version: $GO_VERSION"
-fi
-
-#### Install exact Go version
-
-wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
-sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
-export PATH=$PATH:/usr/local/go/bin
-export GOPATH=$HOME/go
-export PATH=$PATH:$GOPATH/bin
-
-#### Validation
-
-go version
-go env GOVERSION
-```
-
-**Security Tool Installation:**
-```bash
-# Trivy v0.69.0
-
-curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-  | sh -s -- -b /usr/local/bin v0.69.0
-trivy --version  # Validate
-
-#### gosec v2.22.11
-
-go install github.com/securego/gosec/v2/cmd/gosec@v2.22.11
-gosec -version  # Validate
-
-#### Semgrep v1.150.0
-
-pip install semgrep==1.150.0
-semgrep --version  # Validate
-
-#### Update Trivy vulnerability database
-
-trivy image --download-db-only
-```
-
-### 0.9.2 Scan Execution Commands
-
-**Trivy Dependency Scan:**
-```bash
-# Create output directory
-
-mkdir -p /audit-results/sarif /audit-results/logs /audit-results/dependencies
-
-#### Filesystem scan with SARIF output
-
-trivy fs \
-  --severity CRITICAL,HIGH,MEDIUM,LOW \
-  --format sarif \
-  --output /audit-results/sarif/trivy-report.sarif \
-  . 2>&1 | tee /audit-results/logs/trivy-scan.log
-
-#### SBOM generation
-
-trivy fs \
-  --format cyclonedx \
-  --output /audit-results/dependencies/sbom-full.json \
-  .
-
-#### License compliance scan
-
-trivy fs \
-  --scanners license \
-  --format json \
-  --output /audit-results/dependencies/license-compliance.json \
-  .
-```
-
-**gosec Static Analysis:**
-```bash
-# Go security scan with SARIF output
-
-#### Exclude vendor and test files
-
-gosec \
-  -fmt sarif \
-  -out /audit-results/sarif/gosec-report.sarif \
-  -exclude-dir=vendor \
-  -exclude-dir=staging/src/k8s.io/code-generator \
-  -exclude=G104 \
-  ./cmd/... ./pkg/... ./plugin/... ./staging/src/k8s.io/client-go/... \
-  ./staging/src/k8s.io/apiserver/... ./staging/src/k8s.io/apimachinery/... \
-  2>&1 | tee /audit-results/logs/gosec-scan.log
-```
-
-**Semgrep Multi-Language Scan:**
-```bash
-# Security scan with auto-configuration
-
-semgrep \
-  --config=auto \
-  --sarif \
-  --output=/audit-results/sarif/semgrep-report.sarif \
-  --exclude='vendor' \
-  --exclude='*_test.go' \
-  --exclude='zz_generated.*' \
-  --exclude='*.pb.go' \
-  . 2>&1 | tee /audit-results/logs/semgrep-scan.log
-```
-
-### 0.9.3 Report Aggregation Commands
-
-**SARIF Aggregation:**
-```bash
-# Aggregate SARIF reports (using jq for JSON merging)
-
-#### Note: This is a simplified approach; production would use SARIF-specific tooling
-
-#### Create aggregated report structure
-
-cat > /audit-results/vulnerability-report.sarif << 'EOF'
-{
-  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-  "version": "2.1.0",
-  "runs": []
-}
-EOF
-
-#### Merge individual SARIF runs
-
-jq -s '.[0].runs = ([.[].runs] | add) | .[0]' \
-  /audit-results/sarif/trivy-report.sarif \
-  /audit-results/sarif/gosec-report.sarif \
-  /audit-results/sarif/semgrep-report.sarif \
-  > /audit-results/vulnerability-report.sarif
-```
-
-**CSV Export Generation:**
-```bash
-# Extract findings to CSV (using jq)
-
-echo "CVE_ID,CVSS_Score,Severity,Component,File_Path,Line_Number,Description,Tool_Source" \
-  > /audit-results/vulnerability-report.csv
-
-#### Parse SARIF and export to CSV
-
-jq -r '.runs[] | .tool.driver.name as $tool | 
-  .results[] | 
-  [.ruleId // "N/A", 
-   "N/A", 
-   .level // "warning", 
-   (.locations[0].physicalLocation.artifactLocation.uri // "N/A" | split("/")[0:2] | join("/")), 
-   .locations[0].physicalLocation.artifactLocation.uri // "N/A", 
-   .locations[0].physicalLocation.region.startLine // "N/A", 
-   .message.text // "N/A", 
-   $tool] | @csv' \
-  /audit-results/vulnerability-report.sarif \
-  >> /audit-results/vulnerability-report.csv
-```
-
-### 0.9.4 Metadata Generation
-
-**Audit Metadata JSON:**
-```bash
-cat > /audit-results/metadata.json << EOF
-{
-  "audit_timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "repository": "github.com/kubernetes/kubernetes",
-  "branch": "main",
-  "commit_sha": "$(git rev-parse HEAD)",
-  "go_version": "$(go version | awk '{print $3}' | sed 's/go//')",
-  "trivy_version": "$(trivy --version | head -1 | awk '{print $2}')",
-  "trivy_db_timestamp": "$(trivy image --download-db-only 2>&1 | grep -oP 'DB Updated: \K.*' || date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "gosec_version": "$(gosec -version 2>&1 | grep -oP 'Version: \K[0-9.]+' || echo '2.22.11')",
-  "semgrep_version": "$(semgrep --version)",
-  "scan_scope": {
-    "go_files_analyzed": $(find . -name "*.go" -not -path "./vendor/*" -not -name "*_test.go" | wc -l),
-    "shell_files_analyzed": $(find hack cluster build -name "*.sh" 2>/dev/null | wc -l),
-    "excluded_patterns": ["vendor/**", "*_test.go", "zz_generated.*", "*.pb.go"]
-  }
-}
-EOF
-```
-
-### 0.9.5 Memory and Time Monitoring Commands
-
-**Memory Monitoring:**
-```bash
-# Monitor memory usage during scans (run in background)
-
-while true; do
-  MEMORY_USAGE=$(ps aux | grep -E 'trivy|gosec|semgrep' | awk '{sum+=$6} END {printf "%.2f GB", sum/1024/1024}')
-  echo "[$(date +%H:%M:%S)] Memory usage: $MEMORY_USAGE" >> /audit-results/logs/memory-monitor.log
-  sleep 60
-done &
-MONITOR_PID=$!
-```
-
-**Progress Tracking:**
-```bash
-# Log progress checkpoints
-
-log_progress() {
-  local percentage=$1
-  local phase=$2
-  echo "[$(date +%H:%M)] Progress: ${percentage}% complete (${phase})" \
-    >> /audit-results/logs/progress.log
-}
-
-#### Example checkpoints
-
-log_progress 10 "Environment setup complete"
-log_progress 25 "Trivy dependency scan complete"
-log_progress 50 "gosec analysis complete"
-log_progress 75 "Semgrep analysis complete"
-log_progress 90 "Report aggregation complete"
-log_progress 100 "Audit complete"
-```
-
-### 0.9.6 Cleanup Commands
-
-**Post-Audit Cleanup:**
-```bash
-# Stop memory monitor
-
-kill $MONITOR_PID 2>/dev/null
-
-#### Preserve audit results
-
-echo "Audit results preserved in /audit-results/"
-ls -la /audit-results/
-
-#### Delete repository clone (per requirements)
-
-cd ..
-rm -rf kubernetes/
-
-#### Final validation
-
-echo "Audit deliverables:"
-find /audit-results -type f -exec ls -lh {} \;
-```
-
-### 0.9.7 Default Format and Validation Commands
-
-**Default Output Formats:**
-- SARIF: JSON following SARIF 2.1.0 schema
-- CSV: RFC 4180 compliant
-- HTML: HTML5 with embedded CSS
-- Markdown: CommonMark specification
-- JSON: Standard JSON for metadata/SBOM
-
-**Report Validation:**
-```bash
-# SARIF schema validation
-
-#### Requires ajv-cli: npm install -g ajv-cli
-
-ajv validate -s sarif-schema-2.1.0.json -d /audit-results/vulnerability-report.sarif
-
-#### JSON syntax validation
-
-jq . /audit-results/metadata.json > /dev/null && echo "metadata.json: valid"
-jq . /audit-results/dependencies/sbom-full.json > /dev/null && echo "sbom-full.json: valid"
-
-#### CSV validation (basic)
-
-head -1 /audit-results/vulnerability-report.csv | grep -q "CVE_ID" && echo "CSV header: valid"
-```
+### 0.9.1 Documentation-Specific Instructions
+
+- **Documentation build command**: Not applicable — the output is a plain Markdown file that requires no build step
+- **Documentation preview command**: Any Markdown renderer (e.g., `grip README.md` for GitHub-flavored preview, or view directly on GitHub)
+- **Diagram generation command**: Not applicable — no diagrams included per single-page constraint
+- **Documentation deployment command**: Standard git commit — `git add README.md && git commit`
+- **Default format**: GitHub-Flavored Markdown (GFM), compatible with the repository's existing `.md` file rendering
+- **Citation requirement**: Every observation must cite source files using inline code format (e.g., `pkg/kubelet/kubelet.go`) or explicitly mark conclusions as inferred
+- **Style guide**: The document follows the user-specified quality bar — no generic advice, no filler, no moralizing, every critique explains why it matters, favor clarity over exhaustiveness
+- **Documentation validation**: The document is validated against the user's explicit failure criteria:
+  - Observations without evidence or clear inference boundaries → FAIL
+  - Major issues without impact explanation → FAIL
+  - Recommendations without justification or prioritization → FAIL
+  - Tooling/process claims without visible evidence → FAIL
+  - Output exceeds one page → FAIL
+  - Contains generic guidance → FAIL
+
+### 0.9.2 Analysis Execution Strategy
+
+The code quality analysis follows a systematic approach across the seven evaluation dimensions:
+
+**Phase 1 — Tooling and Process Signal Collection:**
+- Read and catalog all linters, checks, and exclusions from `hack/golangci.yaml`
+- Enumerate all 50+ verification gates in `hack/verify-*.sh`
+- Map CI enforcement architecture from `Makefile` → `hack/make-rules/` → individual verify scripts
+- Document build system strictness signals (`set -o errexit -o nounset -o pipefail`, `--warn-undefined-variables`)
+
+**Phase 2 — Code Pattern Sampling:**
+- Sample representative files across `pkg/` (minimum 6 packages spanning small/medium/large modules)
+- Analyze `cmd/` entry points for pattern consistency across all 25 binaries
+- Review `hack/lib/` shared library for script quality patterns
+- Examine `test/` for testability patterns and framework usage
+
+**Phase 3 — Cross-Cutting Analysis:**
+- Identify consistency vs. inconsistency patterns by comparing older (2014-era) and newer modules
+- Map error handling strategies across controller, scheduler, and kubelet subsystems
+- Assess the contextual logging migration state across the logcheck configuration
+- Evaluate documentation comment coverage via the exported-symbol linter exemption patterns
+
+**Phase 4 — Synthesis and Writing:**
+- Synthesize findings into the five prescribed sections
+- Apply priority ordering (systemic issues before isolated observations)
+- Ensure every finding includes evidence citation and impact statement
+- Validate against one-page constraint and failure criteria
 
 ## 0.10 Rules for Documentation
 
-### 0.10.1 Critical Audit Preservation Rules
+The following rules are derived from the user's explicit quality bar, constraints, and validation criteria. These are non-negotiable directives that govern the README.md output.
 
-**Rule 1: Read-Only Repository Operations**
-- Repository cloning is PERMITTED (write to local disk required)
-- NO modifications to cloned repository files after initial clone
-- NO edits to source code, manifests, or configuration files
-- NO git commits, branches, tags, or changes to .git/ directory
-- NO push operations to remote repository
+### 0.10.1 Content Rules
 
-**Rule 2: No Code Execution from Repository**
-- Static analysis ONLY - do NOT run `go build`, `go test`, or any binaries from repo
-- Security scanning tools operate on source code text, not compiled artifacts
-- Build tooling analysis is read-only inspection of build scripts
+- **No generic advice**: Every observation, finding, and recommendation must be specific to the Kubernetes codebase. Generic statements like "consider using a linter" are prohibited when the repository already has 12 enabled linters
+- **No filler or verbosity**: The single-page constraint demands maximal information density. Every sentence must carry actionable or informational weight
+- **No moralizing or subjective judgments**: Findings are stated factually with evidence. Replace "the code should be better" with "exported symbols in 29 of 30 pkg/ packages are exempt from GoDoc enforcement (hack/golangci.yaml lines 62–69), creating a documentation gap that increases onboarding cost"
+- **Every critique must explain why it matters**: The format for findings is "[observation] — [evidence] — [impact]"
+- **Favor clarity over exhaustiveness**: When covering a dimension, select the highest-impact findings rather than attempting to list every instance
+- **Assume an audience of experienced engineers and reviewers**: No need to explain what a linter is, what race conditions are, or how Go modules work
 
-**Rule 3: Output Isolation**
-- ALL analysis outputs written to separate `/audit-results/` directory
-- `/audit-results/` MUST be outside repository root
-- NO credential storage in filesystem
-- Repository clone DELETED after audit completion, retaining only audit outputs
+### 0.10.2 Evidence and Inference Rules
 
-### 0.10.2 Vulnerability Classification Rules
+- **All observations must be grounded in direct inspection**: Every claim traces to a specific file, configuration value, or code pattern
+- **Inferred conclusions must be explicitly marked**: When tooling is not directly observed but implied by consistent formatting or patterns, state: "Inferred from [signal]" or "Indeterminate due to missing configuration context"
+- **Tooling/process claims require visible evidence**: Do not assert the presence of pre-commit hooks, CI pipelines, or quality gates without citing the specific configuration files or scripts that implement them
+- **Report inconsistencies only when recurrent or cross-cutting**: A single misnamed variable is not a finding; a systematic naming divergence between modules spanning multiple packages is a finding
 
-**Rule 4: CVSS Scoring Consistency**
-- All vulnerabilities MUST have CVSS v3.1 scores
-- CVSS vector strings MUST be included for all scored vulnerabilities
-- Cross-validate scores against official NVD/GHSA records
-- Flag uncertain classifications for manual review
+### 0.10.3 Format and Structure Rules
 
-**Rule 5: CVE Reference Verification**
-- All CVE references MUST exist in NVD database
-- CVE links MUST resolve correctly
-- Distinguish between confirmed vulnerabilities and potential security concerns
-- Never fabricate or guess CVE identifiers
+- **Exactly five sections in the prescribed order**: Overview → Key Findings → Representative Patterns Observed → Improvement Recommendations → Quality Risk Assessment
+- **Single-page constraint**: The document must not exceed the equivalent of one printed page. This means approximately 800–1000 words maximum
+- **Do not rewrite code**: Unless unavoidable for clarity, no code rewrites or refactored examples should appear in the document
+- **No exhaustive file listings**: Reference files or components where relevant to illustrate patterns, but do not produce comprehensive file inventories
+- **Key Findings must be bullet-pointed and grouped by category**: Use the seven analysis dimensions as grouping headers within the Key Findings section
 
-**Rule 6: Severity Classification Thresholds**
-- Critical: CVSS ≥9.0 (remote code execution, privilege escalation to cluster admin, authentication bypass)
-- High: CVSS 7.0-8.9 (authorization bypass, sensitive data exposure, low-complexity DoS)
-- Medium: CVSS 4.0-6.9 (information disclosure, resource exhaustion, insecure defaults)
-- Low: CVSS <4.0 (security misconfigurations, weak crypto in non-critical paths)
+### 0.10.4 Validation Rules
 
-### 0.10.3 False Positive Handling Rules
+The document automatically fails if any of the following conditions are true:
 
-**Rule 7: No Automatic Exclusion of Critical/High Findings**
-- ALL Critical/High severity findings (CVSS ≥7.0) require manual validation
-- NEVER automatically exclude authentication/authorization findings
-- NEVER automatically exclude data exposure findings
-- Document all exclusions with rationale in false-positives.csv
-
-**Rule 8: Test Code Classification Protocol**
-- Test code paths (`*/test/*`, `*_test.go`) MAY be excluded with documentation
-- Expected exclusion rate for test code: 25-35% of total findings
-- If exclusion rate exceeds 40%, flag for manual review
-- Include cryptographic findings in test fixtures (may indicate copy-paste risk)
-
-**Rule 9: Exclusion Documentation Requirements**
-- Log ALL exclusions to `/audit-results/false-positives.csv`
-- Include: finding_id, file_path, severity, exclusion_reason, confidence_score
-- Include exclusion summary in executive summary
-- Provide exclusion log as separate deliverable for audit transparency
-
-### 0.10.4 Reporting Accuracy Rules
-
-**Rule 10: Evidence-Based Findings Only**
-- Every finding MUST reference specific source file and line number
-- Include 10 lines of context around vulnerable code
-- Distinguish between partial and complete evidence
-- Note confidence levels based on tool agreement
-
-**Rule 11: Remediation Recommendation Requirements**
-- All Critical/High vulnerabilities MUST have remediation guidance
-- Remediation MUST reference specific file/line changes
-- Remediation MUST be actionable (not generic advice)
-- Reference official Kubernetes security documentation where applicable
-
-**Rule 12: Scope Limitation Acknowledgment**
-- Clearly document files excluded from analysis
-- Explain any scope reductions due to time/memory constraints
-- Acknowledge coverage gaps in remediation roadmap
-- Never claim comprehensive coverage without verification
-
-### 0.10.5 Tool Execution Rules
-
-**Rule 13: Tool Version Pinning**
-- Use EXACT tool versions specified: Trivy 0.69.0, gosec 2.22.11, Semgrep 1.150.0
-- Document all tool versions in metadata.json
-- Record vulnerability database timestamps
-- Ensure reproducibility through version documentation
-
-**Rule 14: Scan Completion Requirements**
-- All scanning tools MUST execute without fatal errors
-- Document any tool failures or partial executions
-- Cross-validation required for top 20 dependencies (2+ tools)
-- Compare findings against Kubernetes Security Advisory list
-
-**Rule 15: Performance Constraint Enforcement**
-- Total memory usage MUST stay <16GB
-- Individual tool processes MUST NOT exceed 12GB
-- Audit MUST complete within 4-hour wall-clock time
-- Log progress every 30 minutes
-
-### 0.10.6 Deliverable Format Rules
-
-**Rule 16: SARIF Compliance**
-- All SARIF reports MUST validate against SARIF 2.1.0 schema
-- SARIF reports MUST be compatible with GitHub Code Scanning
-- Include tool metadata, rule descriptions, and location information
-- Use proper severity levels (error, warning, note)
-
-**Rule 17: Executive Summary Requirements**
-- Include severity distribution visualizations (charts)
-- Highlight top 10 most critical findings
-- Provide OWASP Top 10 compliance scorecard
-- Include remediation effort estimates by severity class
-
-**Rule 18: Citation and Source Requirements**
-- Every section MUST cite source files examined
-- Include file path and line number references
-- Document search patterns and directories analyzed
-- Maintain audit trail for all conclusions
-
-### 0.10.7 OWASP Compliance Rules
-
-**Rule 19: OWASP Category Mapping**
-- Map ALL identified vulnerabilities to applicable OWASP Top 10 categories
-- Complete mapping for all 10 categories (even if no findings)
-- Document detection approach for each category
-- Provide compliance status (compliant/non-compliant/partial)
-
-**Rule 20: Supply Chain Documentation**
-- Generate complete SBOM for all dependencies
-- Document vulnerable dependencies with available patches
-- Include transitive dependency risk analysis
-- Provide license compliance summary
+- Observations are presented without evidence or clear inference boundaries
+- Major issues are identified without explaining their impact
+- Recommendations lack justification or prioritization
+- Tooling or process claims are made without visible evidence
+- Output exceeds one page or contains generic guidance
 
 ## 0.11 References
 
-### 0.11.1 Repository Files and Folders Searched
+### 0.11.1 Files and Folders Searched
 
-**Root Level Files Examined:**
+The following files and directories were directly retrieved and inspected during context gathering to derive the conclusions documented in this Agent Action Plan.
 
-| File Path | Purpose | Key Findings |
-|-----------|---------|--------------|
-| `go.mod` | Go module definition | Go version 1.25.0, dependency declarations |
-| `Makefile` | Build automation | Build targets and commands |
-| `.github/SECURITY.md` | Security policy | Links to kubernetes.io/security for vulnerability reporting |
+**Root-level files inspected:**
 
-**Directories Analyzed:**
+| File | Purpose in Analysis |
+|---|---|
+| `README.md` | Assessed existing documentation content (101 lines, project landing page) |
+| `CONTRIBUTING.md` | Reviewed contributor documentation structure (links to external repo) |
+| `SUPPORT.md` | Reviewed support channel documentation (30 lines) |
+| `Makefile` | Analyzed build system configuration, strict shell modes, target definitions |
+| `go.mod` (lines 1–50) | Confirmed Go 1.25.0, godebug directive, direct dependencies |
+| `.gitattributes` | Identified generated file patterns, LF enforcement, linguist markers |
+| `LICENSE` | Confirmed Apache 2.0 licensing |
+| `code-of-conduct.md` | Reviewed governance documentation |
 
-| Directory Path | Summary | Security Relevance |
-|----------------|---------|-------------------|
-| `cmd/` | Core component CLI entrypoints | Contains kube-apiserver, kubelet, kube-controller-manager, kube-scheduler, kube-proxy, kubectl, kubeadm |
-| `pkg/` | Core library implementations | Contains kubelet, controller, scheduler, volume, registry, auth packages |
-| `plugin/pkg/` | Admission and auth plugins | Mutating/validating admission controllers, authentication/authorization implementations |
-| `staging/` | External repository staging area | k8s.io/* modules including client-go, api, apimachinery, apiserver |
-| `hack/` | Build/test/verification scripts | Contains verify-govulncheck.sh and suite of verification scripts |
-| `build/` | Build system | common.sh, dependencies.yaml, release.sh |
-| `cluster/` | Cluster lifecycle scripts | kube-up/kube-down, common.sh, provider scripts |
-| `test/` | Test infrastructure | Integration, E2E, fuzz testing, conformance |
+**Configuration and tooling files inspected:**
 
-**Security-Specific Files Located:**
+| File | Purpose in Analysis |
+|---|---|
+| `hack/golangci.yaml` (full, 512 lines) | Primary evidence source — cataloged 12 enabled linters, exclusion rules, custom plugins, TODO debt, disabled staticcheck rules |
+| `hack/lib/init.sh` (lines 1–60) | Analyzed build environment bootstrap, shell library sourcing pattern |
+| `hack/boilerplate/boilerplate.py` (lines 1–50) | Confirmed license header verification tooling |
+| `build/dependencies.yaml` | Referenced for external dependency version pins |
+| `build/common.sh` | Referenced for container image version management |
+| `build/README.md` | Reviewed build documentation coverage |
 
-| File Path | Description |
-|-----------|-------------|
-| `.github/SECURITY.md` | Security policy with disclosure instructions |
-| `hack/verify-govulncheck.sh` | Existing vulnerability check script using govulncheck |
-| `staging/src/k8s.io/*/SECURITY_CONTACTS` | Per-module security contacts |
-| `staging/publishing/import-restrictions.yaml` | Import restriction policies |
-| `staging/publishing/rules.yaml` | Publishing rules with dependency pins |
+**Source code files inspected for quality patterns:**
 
-### 0.11.2 External Resources Referenced
+| File | Purpose in Analysis |
+|---|---|
+| `pkg/capabilities/capabilities.go` (full, 97 lines) | Exemplar of clean, focused package — singleton pattern, sync.Once, clear GoDoc |
+| `pkg/fieldpath/fieldpath.go` (full, 120 lines) | Exemplar of well-documented utility code — optimized string building, GoDoc examples |
+| `pkg/scheduler/schedule_one.go` (lines 1–80) | Assessed scheduling pipeline code quality — constant documentation, TODO markers, import patterns |
+| `pkg/controller/controller_utils.go` (lines 1–80) | Assessed controller shared primitives — complex imports, constant documentation, retry patterns |
+| `pkg/kubelet/kubelet.go` (lines 1–80) | Identified large file / import concerns — 80+ imports, complex initialization wiring |
 
-**Security Tool Documentation:**
+**Directories explored via folder contents retrieval:**
 
-| Resource | URL | Purpose |
-|----------|-----|---------|
-| Trivy Documentation | https://trivy.dev/docs/ | Vulnerability scanning configuration |
-| Trivy GitHub Releases | https://github.com/aquasecurity/trivy/releases | Version 0.69.0 release notes |
-| gosec GitHub | https://github.com/securego/gosec | Go security checker documentation |
-| gosec Releases | https://github.com/securego/gosec/releases | Version 2.22.11 release notes |
-| Semgrep Documentation | https://semgrep.dev/docs/ | Pattern-based scanning configuration |
-| Semgrep PyPI | https://pypi.org/project/semgrep/ | Version 1.150.0 package |
+| Directory | Depth | Key Findings |
+|---|---|---|
+| Root (`""`) | Level 0 | Identified 11 root files and 17 directories; confirmed Kubernetes monorepo structure |
+| `cmd/` | Level 1 | Enumerated 25 CLI entry point packages; confirmed consistent Cobra + component-base pattern |
+| `pkg/` | Level 1 | Enumerated 30 first-order packages; identified core analysis targets |
+| `hack/` | Level 1 | Enumerated 90+ scripts; identified verification gates and shared library |
+| `test/` | Level 1 | Enumerated 17 test category directories; confirmed test pyramid structure |
+| `build/` | Level 1 | Enumerated build infrastructure; identified dependency manifest and release scripts |
+| `staging/` | Level 1 | Confirmed 32 staged module structure; reviewed publishing automation |
+| `audit-results/` | Level 1 | Identified security audit artifacts; referenced metadata.json for scope metrics |
 
-**Vulnerability Databases:**
+### 0.11.2 Tech Spec Sections Referenced
 
-| Database | URL | Usage |
-|----------|-----|-------|
-| National Vulnerability Database (NVD) | https://nvd.nist.gov/ | CVE severity data and references |
-| GitHub Security Advisories | https://github.com/advisories | Go-specific vulnerability advisories |
-| Kubernetes Security Advisories | https://kubernetes.io/docs/reference/issues-security/ | Known Kubernetes CVEs |
-| Go Vulnerability Database | https://vuln.go.dev/ | Go module vulnerabilities |
+| Section | Information Extracted |
+|---|---|
+| 1.1 Executive Summary | Project overview, Go version (1.25.0/1.25.4), v1.35 release train, 9,441 Go files, 2,072,327 LOC |
+| 3.1 Programming Languages | Go as sole implementation language, cross-compilation targets, language selection criteria |
+| 3.6 Development & Deployment | Development tools (golangci-lint, staticcheck, mockery v3.5.4, gotestsum v1.12.0), build system, CI/CD infrastructure, 50+ verification gates, testing infrastructure (17 categories) |
+| 5.4 Cross-Cutting Concerns | Error handling patterns (controller/scheduler/kubelet), logging strategy (klog/v2, contextual logging migration), feature gate system, security scanning |
+| 6.6 Testing Strategy | Multi-layered test pyramid, unit/integration/E2E frameworks, test runner configuration, quality gates (race detector, cache mutation detector, goroutine leak detection) |
 
-**Standards and Specifications:**
+### 0.11.3 Attachments
 
-| Standard | Reference | Application |
-|----------|-----------|-------------|
-| CVSS v3.1 | https://www.first.org/cvss/v3.1/specification-document | Vulnerability severity scoring |
-| SARIF 2.1.0 | https://docs.oasis-open.org/sarif/sarif/v2.1.0/ | Report format specification |
-| OWASP Top 10 2021 | https://owasp.org/Top10/ | Vulnerability category mapping |
-| CWE | https://cwe.mitre.org/ | Common weakness enumeration |
-| CycloneDX | https://cyclonedx.org/ | SBOM format specification |
+No attachments were provided for this project. The analysis is based entirely on the repository codebase and tech spec document content.
 
-### 0.11.3 Web Search Research Citations
+### 0.11.4 External URLs
 
-**Tool Version Research (February 2026):**
-
-| Tool | Version Found | Source Citation |
-|------|--------------|-----------------|
-| Trivy | v0.69.0 | <cite index="31-1,31-3">GitHub releases show trivy_0.69.0 released on 2026-01-30</cite> |
-| gosec | v2.22.11 | <cite index="12-1,12-2,12-3">GitHub releases show gosec 2.22.11 released on December 11, 2025</cite> |
-| Semgrep | v1.150.0 | <cite index="22-1,22-3">PyPI shows semgrep-1.150.0 released on January 30, 2026</cite> |
-
-**Tool Capability Research:**
-
-| Capability | Source Citation |
-|------------|-----------------|
-| Trivy Go module scanning | <cite index="6-8,6-9,6-10,6-11">Trivy detects vulnerabilities in OS packages and application dependencies, supports most programming languages including Go</cite> |
-| gosec AST analysis | <cite index="15-15">gosec inspects source code for security problems by scanning the Go AST and SSA code representation</cite> |
-| Semgrep supply chain | <cite index="24-2,24-3">Semgrep Supply Chain now includes malicious dependency detection with 80,000 SCA rules</cite> |
-
-### 0.11.4 Kubernetes Repository References
-
-**Official Kubernetes Security Resources:**
-
-| Resource | URL | Relevance |
-|----------|-----|-----------|
-| Kubernetes Security Policy | https://kubernetes.io/docs/reference/issues-security/ | Official vulnerability disclosure process |
-| Kubernetes Version Skew Policy | https://kubernetes.io/releases/version-skew-policy/ | Version compatibility documentation |
-| Kubernetes Security Response Committee | https://github.com/kubernetes/committee-security-response | Security team processes |
-| Kubernetes CVE Feed | https://kubernetes.io/docs/reference/issues-security/official-cve-feed/ | Official CVE announcements |
-
-**Repository Structure Documentation:**
-
-| Document | Location | Content |
-|----------|----------|---------|
-| Staging README | `staging/README.md` | Staged module consumption and publishing rules |
-| Cluster README | `cluster/README.md` | Maintenance mode notice for cluster scripts |
-| Build Dependencies | `build/dependencies.yaml` | External tool version pinning |
-
-### 0.11.5 Attachments and External Inputs
-
-**User-Provided Attachments:**
-- None provided for this project
-
-**Figma Screens Provided:**
-- None provided for this project
-
-**User-Specified Configuration:**
-- No setup instructions provided
-- No environment variables specified
-- No secrets provided
-
-### 0.11.6 Audit Methodology References
-
-**Scanning Approach Documentation:**
-
-| Phase | Tools | Configuration Reference |
-|-------|-------|------------------------|
-| Dependency Scanning | Trivy | `trivy fs --severity CRITICAL,HIGH,MEDIUM,LOW --format sarif` |
-| Static Code Analysis | gosec | `gosec -fmt sarif -exclude-dir=vendor ./...` |
-| Pattern Matching | Semgrep | `semgrep --config=auto --sarif` |
-| SBOM Generation | Trivy | `trivy fs --format cyclonedx` |
-| Secret Detection | Trivy, Semgrep | Built-in secret scanning capabilities |
-
-**False Positive Classification Reference:**
-
-| Classification | Criteria | Documentation |
-|----------------|----------|--------------|
-| High Confidence (≥95%) | Test code paths, generated code | Automatic exclusion with logging |
-| Medium Confidence (70-94%) | Example code, CI scripts | Manual review required |
-| Manual Review Required | Critical/High severity | Never exclude without validation |
-
-### 0.11.7 Compliance Framework References
-
-**OWASP Top 10 2021 Categories:**
-
-| ID | Category | Kubernetes Relevance |
-|----|----------|---------------------|
-| A01:2021 | Broken Access Control | API server RBAC, admission control |
-| A02:2021 | Cryptographic Failures | TLS configuration, credential handling |
-| A03:2021 | Injection | Command injection in shell scripts |
-| A04:2021 | Insecure Design | Architecture security patterns |
-| A05:2021 | Security Misconfiguration | YAML manifests, default configurations |
-| A06:2021 | Vulnerable and Outdated Components | go.mod dependencies |
-| A07:2021 | Identification and Authentication Failures | Auth plugins, token handling |
-| A08:2021 | Software and Data Integrity Failures | Build process, artifact signing |
-| A09:2021 | Security Logging and Monitoring Failures | Audit logging configuration |
-| A10:2021 | Server-Side Request Forgery | Webhook configurations |
+No external URLs were provided by the user. No Figma screens or external design references are applicable to this documentation task.
 
