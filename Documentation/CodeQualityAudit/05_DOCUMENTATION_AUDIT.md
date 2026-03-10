@@ -46,7 +46,7 @@ The repository includes built-in documentation generators:
 
 | Dimension | Rating |
 |-----------|--------|
-| Documentation and Comments | **Medium–High** |
+| Documentation and Comments | **High** |
 
 ---
 
@@ -61,14 +61,14 @@ Comment quality across the Kubernetes codebase is **highly variable by module**.
 | Module | Source Files | doc.go Files | Sub-Packages w/o doc.go | TODO/FIXME Count | Quality Rating |
 |--------|-------------|-------------|------------------------|-----------------|---------------|
 | `pkg/kubelet/` | 424 | 25 | 20+ (container, metrics, nodeshutdown, pluginmanager, pod, prober, status, etc.) | 343 | Medium |
-| `pkg/controller/` | 340 | 71 | 15 (deployment, disruption, garbagecollector, nodelifecycle, statefulset, etc.) | 164 | Medium–High |
+| `pkg/controller/` | 340 | 71 | 15 (deployment, disruption, garbagecollector, nodelifecycle, statefulset, etc.) | 164 | High |
 | `pkg/apis/` | 374 | 89 | Few (most API groups have doc.go) | 110 | High |
 | `pkg/registry/` | 279 | 59 | Few | 96 | Medium |
 | `pkg/scheduler/` | 123 | 2 | 7 (backend, framework, metrics, profile, testing, util, apis) | 23 | Medium |
 | `pkg/proxy/` | 74 | 14 | 0 (all sub-packages have doc.go) | 28 | Medium |
 | `pkg/volume/` | 124 | 12 | 8 (csi, csimigration, downwardapi, flexvolume, image, projected, testing, validation) | 79 | Medium |
 | `cmd/` | 380 | N/A | N/A | 105 | Medium |
-| `plugin/pkg/admission/` | 62 | 11 | 18 (admit, alwayspullimages, certificates, deny, gc, limitranger, namespace, network, etc.) | 20 | Low–Medium |
+| `plugin/pkg/admission/` | 62 | 11 | 18 (admit, alwayspullimages, certificates, deny, gc, limitranger, namespace, network, etc.) | 20 | Medium |
 
 ### Per-Module Detailed Assessment
 
@@ -270,13 +270,13 @@ Documentation gaps are ranked by **defect introduction risk** — the probabilit
 
 | Priority | Gap Description | Affected Module | Defect Risk | Source Location |
 |----------|----------------|-----------------|-------------|-----------------|
-| Medium | 20+ kubelet sub-packages without doc.go | `pkg/kubelet/` | Low–Medium — onboarding friction for largest component | `pkg/kubelet/container/`, `pkg/kubelet/metrics/`, etc. |
+| Medium | 20+ kubelet sub-packages without doc.go | `pkg/kubelet/` | Medium — onboarding friction for largest component | `pkg/kubelet/container/`, `pkg/kubelet/metrics/`, etc. |
 | Medium | 7 scheduler sub-packages without doc.go | `pkg/scheduler/` | Medium — framework/ is extension point for scheduling plugins | `pkg/scheduler/framework/`, `pkg/scheduler/backend/`, etc. |
-| Medium | 18 admission controllers without doc.go | `plugin/pkg/admission/` | Low–Medium — security-critical components lack documentation | `plugin/pkg/admission/admit/`, etc. |
+| Medium | 18 admission controllers without doc.go | `plugin/pkg/admission/` | Medium — security-critical components lack documentation | `plugin/pkg/admission/admit/`, etc. |
 | Medium | 15 controller sub-packages without doc.go | `pkg/controller/` | Low — deployment controller has inline doc but no doc.go | `pkg/controller/deployment/`, etc. |
-| Medium | 8 volume sub-packages without doc.go | `pkg/volume/` | Low–Medium — CSI package specifically lacks documentation | `pkg/volume/csi/`, etc. |
+| Medium | 8 volume sub-packages without doc.go | `pkg/volume/` | Medium — CSI package specifically lacks documentation | `pkg/volume/csi/`, etc. |
 | Medium | Outdated Docker/dockershim references (57 instances) | `pkg/` (multiple packages) | Low — misleading but not directly defect-causing | Various files in kubelet, credentialprovider, scheduler |
-| Medium | 343 TODO markers in kubelet indicate deferred migration work | `pkg/kubelet/` | Low–Medium — context logging migration incomplete | Distributed across 424 source files |
+| Medium | 343 TODO markers in kubelet indicate deferred migration work | `pkg/kubelet/` | Medium — context logging migration incomplete | Distributed across 424 source files |
 
 ### Priority: Low — Cosmetic and Hygiene Documentation Gaps
 

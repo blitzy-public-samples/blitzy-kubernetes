@@ -73,11 +73,11 @@ The following functions are extreme size outliers that individually represent si
 |-------|-------|
 | Finding ID | MAINT-001 |
 | Category | Maintainability |
-| Title | `NewMainKubelet` is an 1101-line monolithic constructor |
-| Source Location | `pkg/kubelet/kubelet.go:422–1522` |
-| Description | The `NewMainKubelet` function spans 1101 lines and accepts 26 parameters. It performs initialization of all kubelet subsystems in a single function body: cgroup manager, container runtime, PLEG, volume manager, image manager, pod lifecycle, node status, metrics, OOM watcher, eviction manager, plugin manager, prober, and more. This is the single largest function in the Kubernetes codebase. |
+| Title | `NewMainKubelet` is a ~704-line monolithic constructor |
+| Source Location | `pkg/kubelet/kubelet.go:422–1125` |
+| Description | The `NewMainKubelet` function spans approximately 704 lines (from `func` declaration at line 422 to its closing brace at line 1125) and accepts 26 parameters. It performs initialization of all kubelet subsystems in a single function body: cgroup manager, container runtime, PLEG, volume manager, image manager, pod lifecycle, node status, metrics, OOM watcher, eviction manager, plugin manager, prober, and more. This is one of the largest functions in the Kubernetes codebase. |
 | Evidence | Function signature: `func NewMainKubelet(ctx context.Context, kubeCfg *kubeletconfiginternal.KubeletConfiguration, kubeDeps *Dependencies, crOptions *kubeletconfig.ContainerRuntimeOptions, hostname string, nodeName types.NodeName, nodeIPs []net.IP, providerID string, cloudProvider string, certDirectory string, rootDirectory string, podLogsDirectory string, imageCredentialProviderConfigPath string, imageCredentialProviderBinDir string, registerNode bool, registerWithTaints []v1.Taint, allowedUnsafeSysctls []string, experimentalMounterPath string, kernelMemcgNotification bool, experimentalNodeAllocatableIgnoreEvictionThreshold bool, minimumGCAge metav1.Duration, maxPerPodContainerCount int32, maxContainerCount int32, nodeLabels map[string]string, nodeStatusMaxImages int32, seccompDefault bool) (*Kubelet, error)` — 26 positional parameters in a single function call. |
-| Impact | Extremely difficult to understand, test, or modify in isolation. Any change to kubelet initialization requires reasoning about 1100+ lines of sequential setup. New contributors face a substantial onboarding barrier. Risk of subtle initialization-order bugs is high. |
+| Impact | Extremely difficult to understand, test, or modify in isolation. Any change to kubelet initialization requires reasoning about 700+ lines of sequential setup. New contributors face a substantial onboarding barrier. Risk of subtle initialization-order bugs is high. |
 | Inference Flag | CONFIRMED |
 | Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P0 — Kubelet Constructor Decomposition |
 
@@ -232,9 +232,9 @@ xychart-beta
 | 21–50 lines | ~48 | ~29% | `deleteDeployment`, `makePodSourceConfig`, `PreInitRuntimeService` |
 | 51–100 lines | ~31 | ~19% | `syncDeployment`, `PodValidateLimitFunc`, `findNodesThatFitPod` |
 | 101–200 lines | ~14 | ~9% | `schedulingCycle`, `NewContainerManager`, `NewRESTStorage` |
-| 200+ lines | ~8 | ~5% | `NewMainKubelet` (1101), `syncProxyRules` (806), `convertToAPIContainerStatuses` (419) |
+| 200+ lines | ~9 | ~5% | `NewMainKubelet` (~704), `syncProxyRules` (806), `convertToAPIContainerStatuses` (419) |
 
-**Observation:** While 67% of functions are 50 lines or fewer (healthy), the 5% of functions exceeding 200 lines represent disproportionate maintenance burden and defect risk. The top 8 outlier functions collectively span over 3,400 lines of critical-path code.
+**Observation:** While 67% of functions are 50 lines or fewer (healthy), the 5% of functions exceeding 200 lines represent disproportionate maintenance burden and defect risk. The top 9 outlier functions collectively span over 3,000 lines of critical-path code.
 
 ### 2.5 Type Size Outliers
 
@@ -738,7 +738,7 @@ The repository includes `hack/verify-deadcode-elimination.sh`, which verifies th
 | Category | Maintainability |
 | Title | `Bootstrap` interface defined for kubelet initialization with single implementation |
 | Source Location | `pkg/kubelet/kubelet.go:296–304` |
-| Description | The `Bootstrap` interface defines 6 methods for kubelet initialization (`GetConfiguration`, `BirthCry`, `StartGarbageCollection`, `ListenAndServe`, `ListenAndServeReadOnly`, `ListenAndServePodResources`, `Run`) targeting "the initialization protocol." Only the `Kubelet` struct implements this interface. |
+| Description | The `Bootstrap` interface defines 7 methods for kubelet initialization (`GetConfiguration`, `BirthCry`, `StartGarbageCollection`, `ListenAndServe`, `ListenAndServeReadOnly`, `ListenAndServePodResources`, `Run`) targeting "the initialization protocol." Only the `Kubelet` struct implements this interface. |
 | Evidence | `// Bootstrap is a bootstrapping interface for kubelet, targets the initialization protocol` at line 296. The interface is used upstream in `cmd/kubelet/` to abstract over the kubelet during startup. |
 | Impact | Similar to `SyncHandler`, this interface exists primarily for abstraction and testability with a single production implementation. The impact is minimal but the pattern adds navigational indirection. |
 | Inference Flag | CONFIRMED |
@@ -776,10 +776,10 @@ The repository includes `hack/verify-deadcode-elimination.sh`, which verifies th
 |-------|-------|
 | Finding ID | MAINT-045 |
 | Category | Maintainability |
-| Title | `NewMainKubelet` accepts 26 positional parameters instead of using a configuration struct |
+| Title | `NewMainKubelet` accepts 22 positional parameters instead of using a configuration struct |
 | Source Location | `pkg/kubelet/kubelet.go:422–448` |
-| Description | The `NewMainKubelet` function signature accepts 26 positional parameters in addition to the `kubeCfg`, `kubeDeps`, and `crOptions` struct parameters. Many of these positional parameters (e.g., `hostname`, `nodeName`, `nodeIPs`, `providerID`, `cloudProvider`, `certDirectory`, `rootDirectory`, `podLogsDirectory`, `imageCredentialProviderConfigPath`, `imageCredentialProviderBinDir`, `registerNode`, `registerWithTaints`, `allowedUnsafeSysctls`, `experimentalMounterPath`, `kernelMemcgNotification`, `experimentalNodeAllocatableIgnoreEvictionThreshold`, `minimumGCAge`, `maxPerPodContainerCount`, `maxContainerCount`, `nodeLabels`, `nodeStatusMaxImages`, `seccompDefault`) could be grouped into a configuration struct. |
-| Evidence | Function signature spans lines 422–448 with 26 explicit parameters plus `ctx`, `kubeCfg`, `kubeDeps`, and `crOptions` (30 total). Several parameters include the prefix "experimental" indicating they were added incrementally without restructuring. |
+| Description | The `NewMainKubelet` function signature accepts 22 positional parameters in addition to `ctx`, `kubeCfg`, `kubeDeps`, and `crOptions` (26 total parameters). Many of the positional parameters (e.g., `hostname`, `nodeName`, `nodeIPs`, `providerID`, `cloudProvider`, `certDirectory`, `rootDirectory`, `podLogsDirectory`, `imageCredentialProviderConfigPath`, `imageCredentialProviderBinDir`, `registerNode`, `registerWithTaints`, `allowedUnsafeSysctls`, `experimentalMounterPath`, `kernelMemcgNotification`, `experimentalNodeAllocatableIgnoreEvictionThreshold`, `minimumGCAge`, `maxPerPodContainerCount`, `maxContainerCount`, `nodeLabels`, `nodeStatusMaxImages`, `seccompDefault`) could be grouped into a configuration struct. |
+| Evidence | Function signature spans lines 422–448 with 22 positional parameters plus `ctx`, `kubeCfg`, `kubeDeps`, and `crOptions` (26 total). Several parameters include the prefix "experimental" indicating they were added incrementally without restructuring. |
 | Impact | The 26-parameter function signature is a strong indicator of organic growth without restructuring. It creates risk of parameter ordering bugs at call sites, makes the function difficult to extend (adding a new parameter requires changing all callers), and violates the Go community convention of using option structs for functions with more than ~5 parameters. |
 | Inference Flag | CONFIRMED |
 | Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P1 — Kubelet Constructor Parameter Consolidation |
@@ -797,7 +797,7 @@ The codebase generally follows Go naming conventions, but the kubelet package ex
 ### 7.2 Comment-to-Code Ratio Observations
 
 Files with the highest function size outliers tend to have lower comment density within function bodies:
-- `NewMainKubelet` (1101 lines) has inline comments primarily at section boundaries, with long stretches of uncommented initialization code
+- `NewMainKubelet` (~704 lines) has inline comments primarily at section boundaries, with long stretches of uncommented initialization code
 - `syncProxyRules` (806 lines) has inline comments for iptables chain purposes but lacks high-level flow documentation
 
 ### 7.3 Package Size Distribution
@@ -810,7 +810,7 @@ The extreme variance in package sizes (from 1 file in `pkg/windows/` to 675 file
 
 | Priority | Count | Key Areas |
 |----------|-------|-----------|
-| Function size outliers (>200 lines) | 8 | kubelet (4), proxy (1), job controller (1), kubelet_pods (3) |
+| Function size outliers (>200 lines) | 9 | kubelet (4), proxy (1), job controller (1), kubelet_pods (3) |
 | Large functions (100-200 lines) | 14 | Distributed across all major modules |
 | God-object structs (>60 fields) | 1 | `Kubelet` struct (108 fields) |
 | Large structs (>30 fields) | 1 | `Proxier` struct (39 fields) |

@@ -111,7 +111,7 @@ This section evaluates each major package for **unit testability** (can function
 |---|---|
 | **Category** | Testability |
 | **Title** | Kubelet core struct has 389 lines with massive dependency surface impeding unit testability |
-| **Source Location** | `pkg/kubelet/kubelet.go:242-630` (Kubelet struct definition and initialization) |
+| **Source Location** | `pkg/kubelet/kubelet.go:1132-1520` (Kubelet struct definition and initialization) |
 | **Description** | The `Kubelet` struct spans approximately 389 lines with 80+ import paths from both internal packages and staging modules. The `kubelet.go` file imports from 84 distinct packages, creating an extraordinarily wide dependency surface that makes isolated unit testing of the core Kubelet struct nearly impossible without extensive mocking. |
 | **Evidence** | Import block in `pkg/kubelet/kubelet.go:19-146` contains 84 import statements spanning internal kubelet sub-packages (`allocation`, `cadvisor`, `cm`, `config`, `container`, `eviction`, `images`, `kuberuntime`, `lifecycle`, `logs`, `metrics`, `pleg`, `pluginmanager`, `prober`, `secret`, `server`, `stats`, `status`, `volumemanager`, `watchdog`), staging modules (`k8s.io/client-go`, `k8s.io/cri-api`, `k8s.io/cri-client`), and external libraries (`cadvisor`, `opentelemetry`, `selinux`). |
 | **Impact** | Changes to the kubelet core require understanding a vast dependency graph. Testing any single behavior requires provisioning dozens of dependencies, increasing test setup fragility and reducing developer velocity for kubelet modifications. |
@@ -755,7 +755,7 @@ This section catalogs behavior that may vary between test executions, contributi
 |------------|-------|-----------------|----------------|
 | TEST-001 | Controller package has critically low test file ratio at 28% | `pkg/controller/` | CONFIRMED |
 | TEST-002 | Garbage collector has lowest test ratio among core controllers | `pkg/controller/garbagecollector/` | CONFIRMED |
-| TEST-003 | Kubelet core struct has 389 lines with massive dependency surface | `pkg/kubelet/kubelet.go:242-630` | CONFIRMED |
+| TEST-003 | Kubelet core struct has 389 lines with massive dependency surface | `pkg/kubelet/kubelet.go:1132-1520` | CONFIRMED |
 | TEST-004 | Kubelet eviction sub-package has low test ratio (27%) | `pkg/kubelet/eviction/` | CONFIRMED |
 | TEST-005 | Kubelet uses mutable package-level variables | `pkg/kubelet/kubelet.go:242-250` | CONFIRMED |
 | TEST-006 | API types package has lowest test file ratio (17%) | `pkg/apis/` | CONFIRMED |

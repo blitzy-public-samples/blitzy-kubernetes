@@ -23,7 +23,7 @@ This document inventories all observable tooling, CI/CD pipeline stages, verific
 | `hack/` | Verification scripts, update scripts, library scripts, build helpers | 50 verify scripts, 19 update scripts, make-rules, lib/ |
 | `build/` | Build scripts, dependency manifest, container image packaging | dependencies.yaml, common.sh, README.md, Dockerfiles |
 | `.github/` | Issue templates, PR template, security policy, OWNERS | 8 files total |
-| `Makefile` | Root build orchestration with 19 phony targets | 517 lines |
+| `Makefile` | Root build orchestration with 19 phony targets | 516 lines |
 | `go.mod` | Go module manifest with dependency declarations | 260 lines |
 | `.gitattributes` | Repository attribute configuration, linguist-generated markers | 14 lines |
 
@@ -343,7 +343,7 @@ pie title Verification Script Categories (50 scripts)
 
 ### 4.1 Makefile Build Orchestration
 
-The root `Makefile` (517 lines) provides 19 phony targets organized into distinct pipeline stages:
+The root `Makefile` (516 lines) provides 19 phony targets organized into distinct pipeline stages:
 
 ```mermaid
 flowchart TB
@@ -600,7 +600,7 @@ Source: `build/dependencies.yaml:1-110`
 | **Source Location** | `build/dependencies.yaml:1-274` |
 | **Description** | The `build/dependencies.yaml` file uses zeitgeist v0.5.4 format to declare expected versions of external dependencies and specify `refPaths` — exact file paths and regex patterns where those versions should appear. The `hack/verify-external-dependencies-version.sh` script validates that all referenced files contain the expected version strings. This is a mature, well-structured approach to dependency version consistency. |
 | **Evidence** | Each dependency entry includes `name`, `version`, and a list of `refPaths` with `path` and `match` regex. Example: `build/dependencies.yaml:66-80` for etcd pinning across 6 files. |
-| **Impact** | Positive — this mechanism prevents version drift across configuration files, test fixtures, and documentation. However, it only tracks a subset of all dependencies; Go module dependencies are managed separately via `go.mod`. |
+| **Impact** | Positive pattern to preserve — this mechanism prevents version drift across configuration files, test fixtures, and documentation. If this mechanism were removed or degraded, dependency versions could silently diverge across configuration files. However, it only tracks a subset of all dependencies; Go module dependencies are managed separately via `go.mod`. |
 | **Inference Flag** | CONFIRMED |
 | **Recommendation Ref** | `08_IMPROVEMENT_ROADMAP.md` § Dependency Management |
 
@@ -648,7 +648,7 @@ A key pattern in the Kubernetes tooling infrastructure is the verify/update symm
 | **Source Location** | `hack/verify-*.sh`, `hack/update-*.sh` |
 | **Description** | The repository maintains a systematic verify/update pattern where verify scripts check whether generated artifacts are up-to-date and corresponding update scripts regenerate them. Of the 50 verify scripts, approximately 16 have direct update script counterparts. The `make verify` target runs all verify scripts as a presubmission gate, and `make update` runs all update scripts to regenerate artifacts. |
 | **Evidence** | `hack/README.md:15-21` — "We should run `hack/verify-all.sh` before submitting a PR and if anything fails run `hack/update-all.sh`." Both `verify-all.sh` and `update-all.sh` are vestigial redirections to `make verify` and `make update` respectively. |
-| **Impact** | Positive — this pattern ensures generated code, documentation, and configurations remain fresh and consistent. The workflow is well-documented and understood by contributors. |
+| **Impact** | Positive pattern to preserve — this pattern ensures generated code, documentation, and configurations remain fresh and consistent. If this symmetry pattern were broken, generated artifacts would drift from their sources, introducing stale code and documentation. The workflow is well-documented and understood by contributors. |
 | **Inference Flag** | CONFIRMED |
 | **Recommendation Ref** | `08_IMPROVEMENT_ROADMAP.md` § Process Improvements |
 

@@ -615,16 +615,16 @@ Source: `pkg/controller/deployment/deployment_controller.go:102-191`, `pkg/contr
 | Job | ✓ | ✓ | ✓ | ✓ | ✓ |
 | ReplicaSet | ✓ | ✓ | ✓ | ✓ | ✓ |
 | DaemonSet | ✓ | ✓ | ✓ | ✓ | ✓ |
-| StatefulSet | ✓ | ✓ | ✓ | ✓ | Absent |
+| StatefulSet | ✓ | ✓ | ✓ | ✓ | Variant |
 
 | Finding ID | CONS-014 |
 |---|---|
 | Category | Consistency |
-| Title | StatefulSet controller omits `utilruntime.HandleCrash()` in `Run` method |
-| Source Location | `pkg/controller/statefulset/stateful_set.go:167` |
-| Description | All other inspected controllers call `defer utilruntime.HandleCrash()` at the start of their `Run` method (deployment:164, job:246, replicaset:232, daemon:302). The StatefulSet controller omits this call. |
-| Evidence | `pkg/controller/deployment/deployment_controller.go:164`: `defer utilruntime.HandleCrash()` present; `pkg/controller/statefulset/stateful_set.go:167`: Run method begins without HandleCrash. Count of `utilruntime.HandleCrash()` calls: deployment=1, job=1, replicaset=1, daemon=1, statefulset=0. |
-| Impact | If the StatefulSet controller panics during execution, the panic will not be caught by the standard Kubernetes crash handler, potentially leaving incomplete error telemetry and differing crash behavior from all other controllers. |
+| Title | StatefulSet controller uses `HandleCrashWithContext(ctx)` variant instead of bare `HandleCrash()` |
+| Source Location | `pkg/controller/statefulset/stateful_set.go:168` |
+| Description | All other inspected controllers call `defer utilruntime.HandleCrash()` at the start of their `Run` method (deployment:164, job:246, replicaset:232, daemon:302). The StatefulSet controller instead uses the context-aware variant `defer utilruntime.HandleCrashWithContext(ctx)` at line 168. This is not an omission — the crash handler is present — but it represents an inconsistency in which variant is used across controllers. The context-aware variant is arguably the more modern approach. |
+| Evidence | `pkg/controller/deployment/deployment_controller.go:164`: `defer utilruntime.HandleCrash()` (bare variant); `pkg/controller/statefulset/stateful_set.go:168`: `defer utilruntime.HandleCrashWithContext(ctx)` (context-aware variant). Both provide crash handling, but through different function signatures. |
+| Impact | Minor inconsistency. The StatefulSet controller's crash handling is functionally equivalent but uses a different API surface. This divergence means controllers do not follow a single uniform pattern for crash handling, creating confusion when auditing for the standard pattern. The context-aware variant is the preferred direction per the ongoing contextual logging migration. |
 | Inference Flag | CONFIRMED |
 | Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md § Controller Pattern Enforcement` |
 
@@ -821,7 +821,7 @@ graph LR
 | CONS-011 | Kubernetes conversion and default functions deliberately violate Go naming with underscores | Low | CONFIRMED |
 | CONS-012 | Exported symbol documentation enforcement is limited to `cmd/kubeadm` only | High | CONFIRMED |
 | CONS-013 | Logging API migration creates inconsistent logging patterns between migrated and non-migrated packages | High | CONFIRMED |
-| CONS-014 | StatefulSet controller omits `utilruntime.HandleCrash()` in `Run` method | Medium | CONFIRMED |
+| CONS-014 | StatefulSet controller uses `HandleCrashWithContext(ctx)` variant instead of bare `HandleCrash()` | Medium | CONFIRMED |
 | CONS-015 | Feature gate access pattern varies between `feature` and `utilfeature` aliases | Low | CONFIRMED |
 | CONS-016 | Scheduler uses functional options pattern while controllers use direct parameter passing | Low | CONFIRMED |
 

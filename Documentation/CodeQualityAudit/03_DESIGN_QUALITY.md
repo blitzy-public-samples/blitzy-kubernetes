@@ -478,44 +478,425 @@ pie title Anti-Pattern Distribution by Category
 
 ### Hardcoded Timeouts and Periods
 
-| Finding ID | Value | Location | Should Be Configurable? | Risk |
-|-----------|-------|----------|------------------------|------|
-| DESIGN-043 | `maxWaitForContainerRuntime = 30 * time.Second` | `pkg/kubelet/kubelet.go:150` | Yes — different container runtimes have different startup times | Medium — slow runtime startup can cause kubelet to fail unnecessarily |
-| DESIGN-044 | `nodeStatusUpdateRetry = 5` | `pkg/kubelet/kubelet.go:153` | Possibly — for high-latency API server connections | Low — 5 retries is reasonable for most deployments |
-| DESIGN-045 | `nodeReadyGracePeriod = 120 * time.Second` | `pkg/kubelet/kubelet.go:157` | Possibly — depends on cluster startup characteristics | Low — 120s grace period is generous |
-| DESIGN-046 | `housekeepingPeriod = time.Second * 2` | `pkg/kubelet/kubelet.go:180` | Yes — affects kubelet CPU usage vs. responsiveness tradeoff | Medium — operators with constrained nodes may want to increase this |
-| DESIGN-047 | `evictionMonitoringPeriod = time.Second * 10` | `pkg/kubelet/kubelet.go:194` | Yes — affects eviction response time | Medium — must be kept in sync with cadvisor housekeeping |
-| DESIGN-048 | `plegChannelCapacity = 1000` | `pkg/kubelet/kubelet.go:202` | Possibly — for nodes with many pods | Low — comment says "a bit arbitrary" |
-| DESIGN-049 | `genericPlegRelistPeriod = time.Second * 1` | `pkg/kubelet/kubelet.go:212` | Configurable via kubelet config | Positive — documented and intentional |
-| DESIGN-050 | `ContainerGCPeriod = time.Minute` | `pkg/kubelet/kubelet.go:228` | Possibly — exported constant suggests intended extensibility | Low |
-| DESIGN-051 | `ImageGCPeriod = 5 * time.Minute` | `pkg/kubelet/kubelet.go:230` | Possibly — exported constant | Low |
-| DESIGN-052 | `maxRetries = 15` | `pkg/controller/deployment/deployment_controller.go:59` | No — well-documented with timing analysis | Positive — the comment at lines 54-58 explains the retry curve |
-| DESIGN-053 | `BurstReplicas = 500` | `pkg/controller/replicaset/replica_set.go:72` | Possibly — affects controller throughput | Medium — "Realistic value based off performance requirements for kubernetes 1.0" suggests this should be revisited |
-| DESIGN-054 | `MaxUncountedPods = 500` | `pkg/controller/job/job_controller.go:76` | Partially — exported for tests, but not runtime-configurable | Low — documentation explains the 20 KB status size constraint |
-| DESIGN-055 | `MaxPodCreateDeletePerSync = 500` | `pkg/controller/job/job_controller.go:79` | Partially — exported for tests, but not runtime-configurable | Medium — affects job throughput in large-scale scenarios |
-| DESIGN-056 | `maxTimeout = 15 * time.Minute` | `pkg/scheduler/framework/runtime/framework.go:52` | No — maximum permit plugin timeout is a safety bound | Low — reasonable safety limit |
-| DESIGN-057 | `podCleanupTimeout = 30 * time.Second` | `pkg/kubelet/eviction/eviction_manager.go:49` | Possibly — affects eviction manager responsiveness | Low |
-| DESIGN-058 | `largeClusterEndpointsThreshold = 1000` | `pkg/proxy/iptables/proxier.go:87` | Yes — behavior switch point should be tunable | Medium — see DESIGN-028 |
+---
+
+#### DESIGN-043
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-043 |
+| Category | Design |
+| Title | Hardcoded `maxWaitForContainerRuntime = 30 * time.Second` not configurable |
+| Source Location | `pkg/kubelet/kubelet.go:150` |
+| Description | The maximum wait time for container runtime startup is hardcoded to 30 seconds. Different container runtimes (containerd, CRI-O) have different startup characteristics, and environments with slow storage or network may require longer waits. |
+| Evidence | `maxWaitForContainerRuntime = 30 * time.Second` — unexported constant with no runtime override mechanism. |
+| Impact | Medium — slow runtime startup in constrained environments can cause kubelet to fail unnecessarily during node boot, leading to node NotReady conditions. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-044
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-044 |
+| Category | Design |
+| Title | Hardcoded `nodeStatusUpdateRetry = 5` not tunable for high-latency environments |
+| Source Location | `pkg/kubelet/kubelet.go:153` |
+| Description | The number of retries for node status updates is hardcoded to 5. For high-latency API server connections, this value may be insufficient. |
+| Evidence | `nodeStatusUpdateRetry = 5` — unexported constant. |
+| Impact | Low — 5 retries is reasonable for most deployments; only high-latency edge cases are affected. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-045
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-045 |
+| Category | Design |
+| Title | Hardcoded `nodeReadyGracePeriod = 120 * time.Second` |
+| Source Location | `pkg/kubelet/kubelet.go:157` |
+| Description | The grace period for node readiness is hardcoded to 120 seconds. While generous for most clusters, edge environments or clusters with slow network initialization may benefit from tuning. |
+| Evidence | `nodeReadyGracePeriod = 120 * time.Second` — unexported constant. |
+| Impact | Low — 120s grace period is generous for typical deployments. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-046
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-046 |
+| Category | Design |
+| Title | Hardcoded `housekeepingPeriod = time.Second * 2` affects CPU vs. responsiveness tradeoff |
+| Source Location | `pkg/kubelet/kubelet.go:180` |
+| Description | The kubelet housekeeping period is hardcoded to 2 seconds. This period controls how frequently the kubelet performs maintenance tasks and directly affects CPU usage vs. responsiveness. |
+| Evidence | `housekeepingPeriod = time.Second * 2` — unexported constant with no runtime configuration option. |
+| Impact | Medium — operators with resource-constrained nodes may want to increase this period to reduce CPU overhead, while latency-sensitive workloads may benefit from a shorter period. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-047
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-047 |
+| Category | Design |
+| Title | Hardcoded `evictionMonitoringPeriod = time.Second * 10` affects eviction response time |
+| Source Location | `pkg/kubelet/kubelet.go:194` |
+| Description | The eviction monitoring period is hardcoded to 10 seconds. This controls how quickly the kubelet detects resource pressure conditions and must be kept in sync with cadvisor housekeeping intervals. |
+| Evidence | `evictionMonitoringPeriod = time.Second * 10` — unexported constant. |
+| Impact | Medium — misalignment with cadvisor housekeeping can lead to delayed eviction responses under memory pressure. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-048
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-048 |
+| Category | Design |
+| Title | Hardcoded `plegChannelCapacity = 1000` with self-described "arbitrary" sizing |
+| Source Location | `pkg/kubelet/kubelet.go:202` |
+| Description | The PLEG (Pod Lifecycle Event Generator) channel capacity is hardcoded to 1000. The inline comment acknowledges this value is "a bit arbitrary." For nodes with many pods, this buffer may be insufficient under burst conditions. |
+| Evidence | `plegChannelCapacity = 1000` — comment at line 200-202 describes the value as "a bit arbitrary." |
+| Impact | Low — the value is functional for typical deployments, but the self-acknowledged arbitrariness reduces confidence in its correctness under high-density node scenarios. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-049
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-049 |
+| Category | Design |
+| Title | `genericPlegRelistPeriod = time.Second * 1` is configurable via kubelet config (positive pattern) |
+| Source Location | `pkg/kubelet/kubelet.go:212` |
+| Description | The generic PLEG relist period is set to 1 second as a default but is overridable through kubelet configuration. This is a positive example of a hardcoded default that has been properly externalized for configurability. |
+| Evidence | `genericPlegRelistPeriod = time.Second * 1` — documented and intentional with runtime override via kubelet configuration. |
+| Impact | Positive — demonstrates the configuration externalization pattern that other hardcoded values should follow. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-050
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-050 |
+| Category | Design |
+| Title | Hardcoded `ContainerGCPeriod = time.Minute` as exported constant |
+| Source Location | `pkg/kubelet/kubelet.go:228` |
+| Description | The container garbage collection period is hardcoded to 1 minute. Being an exported constant, it suggests intended extensibility but lacks a runtime configuration mechanism. |
+| Evidence | `ContainerGCPeriod = time.Minute` — exported constant visible to downstream consumers. |
+| Impact | Low — 1 minute is a reasonable default; the exported nature suggests awareness of potential external usage. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-051
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-051 |
+| Category | Design |
+| Title | Hardcoded `ImageGCPeriod = 5 * time.Minute` as exported constant |
+| Source Location | `pkg/kubelet/kubelet.go:230` |
+| Description | The image garbage collection period is hardcoded to 5 minutes as an exported constant, similar to ContainerGCPeriod. |
+| Evidence | `ImageGCPeriod = 5 * time.Minute` — exported constant. |
+| Impact | Low — 5 minutes is a reasonable default for image GC frequency. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-052
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-052 |
+| Category | Design |
+| Title | `maxRetries = 15` is well-documented with timing analysis (positive pattern) |
+| Source Location | `pkg/controller/deployment/deployment_controller.go:59` |
+| Description | The deployment controller's maximum retry count is hardcoded to 15 but includes an extensive comment explaining the rate-limiter math and full retry timing series. This is a positive example where a hardcoded value is thoroughly documented. |
+| Evidence | Comment at lines 54-58: documents the rate-limiter formula `5ms*2^(maxRetries-1)` and the full retry timing series up to 82 seconds. |
+| Impact | Positive — well-documented rationale eliminates ambiguity about the chosen value. Other controllers that copy this value (see CORR-020) lack the same documentation. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Magic Number Centralization |
+
+---
+
+#### DESIGN-053
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-053 |
+| Category | Design |
+| Title | Hardcoded `BurstReplicas = 500` references outdated Kubernetes 1.0 performance requirements |
+| Source Location | `pkg/controller/replicaset/replica_set.go:72` |
+| Description | The burst replica count is hardcoded to 500 with a comment referencing "Realistic value based off performance requirements for kubernetes 1.0." The Kubernetes project is now well beyond version 1.0, suggesting this value should be revisited against current scale requirements. |
+| Evidence | `BurstReplicas = 500` — exported constant with stale justification. |
+| Impact | Medium — the value may be too low or too high for current cluster scale targets; the 1.0-era rationale is outdated. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Magic Number Centralization |
+
+---
+
+#### DESIGN-054
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-054 |
+| Category | Design |
+| Title | `MaxUncountedPods = 500` exported for tests but not runtime-configurable |
+| Source Location | `pkg/controller/job/job_controller.go:76` |
+| Description | The maximum uncounted pods threshold is exported (allowing test modification) but not runtime-configurable. Documentation explains the 20 KB status size constraint that motivates the value. |
+| Evidence | `MaxUncountedPods = 500` — exported constant. Comment explains the status size constraint. |
+| Impact | Low — documentation explains the constraint clearly; the value is well-justified. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-055
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-055 |
+| Category | Design |
+| Title | `MaxPodCreateDeletePerSync = 500` affects job throughput but is not runtime-configurable |
+| Source Location | `pkg/controller/job/job_controller.go:79` |
+| Description | The maximum number of pod creates/deletes per sync cycle is hardcoded to 500. While exported for test flexibility, it cannot be tuned at runtime. In large-scale scenarios with thousands of jobs, this limit can throttle job controller throughput. |
+| Evidence | `MaxPodCreateDeletePerSync = 500` — exported constant used as the batch size limit in `manageJob`. |
+| Impact | Medium — affects job throughput in large-scale scenarios where higher batch sizes could improve completion time. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-056
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-056 |
+| Category | Design |
+| Title | Hardcoded `maxTimeout = 15 * time.Minute` as scheduler permit plugin safety bound |
+| Source Location | `pkg/scheduler/framework/runtime/framework.go:52` |
+| Description | The maximum timeout for scheduler permit plugins is hardcoded to 15 minutes as a safety bound to prevent indefinite blocking. |
+| Evidence | `maxTimeout = 15 * time.Minute` — unexported constant used as an upper bound for permit plugin timeouts. |
+| Impact | Low — reasonable safety limit that prevents unbounded blocking in the scheduling pipeline. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-057
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-057 |
+| Category | Design |
+| Title | Hardcoded `podCleanupTimeout = 30 * time.Second` in eviction manager |
+| Source Location | `pkg/kubelet/eviction/eviction_manager.go:49` |
+| Description | The pod cleanup timeout during eviction is hardcoded to 30 seconds. This affects how long the eviction manager waits for pod termination before proceeding. |
+| Evidence | `podCleanupTimeout = 30 * time.Second` — unexported constant. |
+| Impact | Low — 30 seconds is a reasonable default for most eviction scenarios. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-058
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-058 |
+| Category | Design |
+| Title | Hardcoded `largeClusterEndpointsThreshold = 1000` as behavior switch point |
+| Source Location | `pkg/proxy/iptables/proxier.go:87` |
+| Description | The threshold for switching behavior between small and large cluster modes is hardcoded to 1000 endpoints. This affects how the iptables proxier optimizes rule generation and should be tunable for different cluster sizes. See also DESIGN-028 for related deep nesting in the rule generation path. |
+| Evidence | `largeClusterEndpointsThreshold = 1000` — unexported constant used as a branch condition in `syncProxyRules`. |
+| Impact | Medium — clusters with endpoint counts near this threshold may exhibit inconsistent behavior, and the optimal threshold varies by hardware capability. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
 
 ### Hardcoded File Paths and Identifiers
 
-| Finding ID | Value | Location | Should Be Configurable? | Risk |
-|-----------|-------|----------|------------------------|------|
-| DESIGN-059 | `DefaultContainerLogsDir = "/var/log/containers"` | `pkg/kubelet/kubelet.go:160` | Partially — overridable via `ContainerLogsDir` variable | Low — standard Linux convention |
-| DESIGN-060 | `linuxEtcHostsPath = "/etc/hosts"` | `pkg/kubelet/kubelet.go:197` | No — OS standard path | Low |
-| DESIGN-061 | `windowsEtcHostsPath = "C:\\Windows\\System32\\drivers\\etc\\hosts"` | `pkg/kubelet/kubelet.go:198` | No — OS standard path | Low |
-| DESIGN-062 | `instrumentationScope = "k8s.io/kubernetes/pkg/kubelet"` | `pkg/kubelet/kubelet.go:239` | No — standard OpenTelemetry scope naming | Low |
-| DESIGN-063 | `sysctlRouteLocalnet = "net/ipv4/conf/all/route_localnet"` | `pkg/proxy/iptables/proxier.go:90` | No — kernel sysctl path | Low |
-| DESIGN-064 | `limitRangerAnnotation = "kubernetes.io/limit-ranger"` | `plugin/pkg/admission/limitranger/admission.go:49` | No — Kubernetes annotation convention | Low |
+---
+
+#### DESIGN-059
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-059 |
+| Category | Design |
+| Title | `DefaultContainerLogsDir = "/var/log/containers"` partially overridable |
+| Source Location | `pkg/kubelet/kubelet.go:160` |
+| Description | The default container logs directory is set to the Linux standard path `/var/log/containers`. The value is partially overridable via the `ContainerLogsDir` variable, demonstrating a transitional configuration pattern. |
+| Evidence | `DefaultContainerLogsDir = "/var/log/containers"` — exported constant, with `ContainerLogsDir` variable allowing override. |
+| Impact | Low — standard Linux convention; the override mechanism provides flexibility for non-standard deployments. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-060
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-060 |
+| Category | Design |
+| Title | Hardcoded `linuxEtcHostsPath = "/etc/hosts"` — OS standard path |
+| Source Location | `pkg/kubelet/kubelet.go:197` |
+| Description | The Linux hosts file path is hardcoded to the OS standard location. This is an appropriate hardcoded value as the path is defined by POSIX convention. |
+| Evidence | `linuxEtcHostsPath = "/etc/hosts"` — unexported constant. |
+| Impact | Low — OS standard path that should not be configurable. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-061
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-061 |
+| Category | Design |
+| Title | Hardcoded `windowsEtcHostsPath` — OS standard path |
+| Source Location | `pkg/kubelet/kubelet.go:198` |
+| Description | The Windows hosts file path is hardcoded to the OS standard location. This is an appropriate hardcoded value as the path is defined by Windows convention. |
+| Evidence | `windowsEtcHostsPath = "C:\\Windows\\System32\\drivers\\etc\\hosts"` — unexported constant. |
+| Impact | Low — OS standard path that should not be configurable. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-062
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-062 |
+| Category | Design |
+| Title | Hardcoded `instrumentationScope` follows OpenTelemetry naming convention |
+| Source Location | `pkg/kubelet/kubelet.go:239` |
+| Description | The OpenTelemetry instrumentation scope is hardcoded to the standard Go module path convention. This follows established OpenTelemetry naming practices and should not be configurable. |
+| Evidence | `instrumentationScope = "k8s.io/kubernetes/pkg/kubelet"` — unexported constant following Go module path convention. |
+| Impact | Low — standard OpenTelemetry scope naming convention. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-063
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-063 |
+| Category | Design |
+| Title | Hardcoded `sysctlRouteLocalnet` kernel sysctl path |
+| Source Location | `pkg/proxy/iptables/proxier.go:90` |
+| Description | The kernel sysctl path for route_localnet is hardcoded. This is a Linux kernel ABI path that should not be configurable. |
+| Evidence | `sysctlRouteLocalnet = "net/ipv4/conf/all/route_localnet"` — unexported constant. |
+| Impact | Low — kernel sysctl paths are stable ABI and should not be configurable. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-064
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-064 |
+| Category | Design |
+| Title | Hardcoded `limitRangerAnnotation` follows Kubernetes annotation convention |
+| Source Location | `plugin/pkg/admission/limitranger/admission.go:49` |
+| Description | The limit ranger annotation key follows the Kubernetes `kubernetes.io/` annotation prefix convention. This is a well-known Kubernetes API convention and should not be configurable. |
+| Evidence | `limitRangerAnnotation = "kubernetes.io/limit-ranger"` — unexported constant. |
+| Impact | Low — Kubernetes annotation convention; changing this would break API compatibility. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
 
 ### Hardcoded Behavior Switches
 
-| Finding ID | Value | Location | Should Be Configurable? | Risk |
-|-----------|-------|----------|------------------------|------|
-| DESIGN-065 | `liveLookupCache = lru.New(10000)` | `plugin/pkg/admission/limitranger/admission.go:199` | Yes — cluster-size-dependent | Low — see DESIGN-016 |
-| DESIGN-066 | `liveTTL = time.Duration(30 * time.Second)` | `plugin/pkg/admission/limitranger/admission.go:209` | Yes — freshness vs. performance tradeoff | Low — 30s is reasonable default |
-| DESIGN-067 | `statusUpdateRetries = 1` | `pkg/controller/replicaset/replica_set.go:75` | Possibly — very conservative (single retry) | Medium — only 1 status update retry may be insufficient during API server pressure |
-| DESIGN-068 | `ResourceResyncTime = 0` | `pkg/controller/garbagecollector/garbagecollector.go:51` | No — 0 means rely on watch events only | Low — intentional design choice |
+---
+
+#### DESIGN-065
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-065 |
+| Category | Design |
+| Title | Hardcoded LRU cache size of 10,000 in limit ranger admission controller |
+| Source Location | `plugin/pkg/admission/limitranger/admission.go:199` |
+| Description | The limit ranger admission controller creates an LRU cache with a hardcoded capacity of 10,000 entries. This cache stores live lookups and its size should scale with cluster size. See also DESIGN-016 for related discussion. |
+| Evidence | `liveLookupCache = lru.New(10000)` — hardcoded capacity without configuration option. |
+| Impact | Low — 10,000 entries is sufficient for most clusters, but very large clusters may experience cache eviction pressure. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-066
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-066 |
+| Category | Design |
+| Title | Hardcoded `liveTTL = 30 * time.Second` in limit ranger admission controller |
+| Source Location | `plugin/pkg/admission/limitranger/admission.go:209` |
+| Description | The TTL for live lookup cache entries is hardcoded to 30 seconds. This represents a freshness vs. performance tradeoff that operators cannot tune. |
+| Evidence | `liveTTL = time.Duration(30 * time.Second)` — unexported constant. |
+| Impact | Low — 30 seconds is a reasonable default balancing freshness and API server load. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-067
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-067 |
+| Category | Design |
+| Title | `statusUpdateRetries = 1` — very conservative single retry for status updates |
+| Source Location | `pkg/controller/replicaset/replica_set.go:75` |
+| Description | The ReplicaSet controller allows only 1 retry for status updates. Under API server pressure, a single retry may be insufficient to successfully update ReplicaSet status, causing the controller to operate with stale status information. |
+| Evidence | `statusUpdateRetries = 1` — unexported constant used in `updateReplicaSetStatus`. |
+| Impact | Medium — only 1 status update retry may be insufficient during API server pressure, causing stale status conditions that affect rolling updates and scaling decisions. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
+
+---
+
+#### DESIGN-068
+
+| Field | Value |
+|-------|-------|
+| Finding ID | DESIGN-068 |
+| Category | Design |
+| Title | `ResourceResyncTime = 0` intentional design choice to rely on watch events |
+| Source Location | `pkg/controller/garbagecollector/garbagecollector.go:51` |
+| Description | The garbage collector sets its resource resync time to 0, meaning it relies entirely on watch events rather than periodic re-listing. This is an intentional design choice to reduce API server load. |
+| Evidence | `ResourceResyncTime = 0` — exported constant with intentional zero value. |
+| Impact | Low — intentional design choice; the garbage collector handles missed events through its own dependency graph reconciliation. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § Configuration Externalization |
 
 ---
 
