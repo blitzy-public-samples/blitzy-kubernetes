@@ -197,22 +197,231 @@ The following functions are extreme size outliers that individually represent si
 
 ### 2.3 Large Function Outliers (100–200 lines)
 
-| Finding ID | Function | File | Lines | Concern |
-|-----------|----------|------|-------|---------|
-| MAINT-009 | `manageJob` | `pkg/controller/job/job_controller.go:1653` | 197 | Job pod creation/deletion orchestration; mixes creation, deletion, and accounting logic |
-| MAINT-010 | `NewContainerManager` | `pkg/kubelet/cm/container_manager_linux.go:208` | 190 | Container manager constructor with extensive cgroup setup; similar pattern to NewMainKubelet |
-| MAINT-011 | `NewRESTStorage` | `pkg/registry/core/rest/storage_core.go:154` | 175 | Core API REST storage wiring; sequential resource registration |
-| MAINT-012 | `newServiceIPAllocators` | `pkg/registry/core/rest/storage_core.go:329` | 175 | Service IP allocator initialization; complex dual-stack logic |
-| MAINT-013 | `Run` (Kubelet) | `pkg/kubelet/kubelet.go:1774` | 167 | Kubelet main run loop; mixes module startup with runtime monitoring |
-| MAINT-014 | `generateAPIPodStatus` | `pkg/kubelet/kubelet_pods.go:1877` | 162 | API pod status generation; interleaves condition computation with status assembly |
-| MAINT-015 | `trackJobStatusAndRemoveFinalizers` | `pkg/controller/job/job_controller.go:1209` | 150 | Job finalizer tracking; complex state reconciliation |
-| MAINT-016 | `attemptToDeleteItem` | `pkg/controller/garbagecollector/garbagecollector.go:503` | 151 | GC deletion attempt with ownership validation; deeply nested conditionals |
-| MAINT-017 | `schedulingCycle` | `pkg/scheduler/schedule_one.go:141` | 128 | Scheduling cycle orchestration; tightly coupled to framework plugin lifecycle |
-| MAINT-018 | `syncLoopIteration` | `pkg/kubelet/kubelet.go:2574` | 125 | Kubelet sync loop iteration; multiplexes five different event channels |
-| MAINT-019 | `NewProxier` | `pkg/proxy/iptables/proxier.go:216` | 123 | Proxier constructor with sysctl configuration and health check setup |
-| MAINT-020 | `NewDualStackProxier` | `pkg/proxy/iptables/proxier.go:94` | 122 | Dual-stack proxier factory; duplicates IPv4/IPv6 initialization logic |
-| MAINT-021 | `prioritizeNodes` | `pkg/scheduler/schedule_one.go:791` | 117 | Node scoring with extender integration; mixes scoring, normalization, and aggregation |
-| MAINT-022 | `SyncTerminatingPod` | `pkg/kubelet/kubelet.go:2182` | 115 | Pod termination synchronization; sequential cleanup with multiple subsystems |
+The following functions fall in the 100–200 line range. While individually less extreme than the 200+ outliers in § 2.2, they represent a tier of functions that warrant review for extraction opportunities.
+
+---
+
+#### MAINT-009
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-009 |
+| Category | Maintainability |
+| Title | `manageJob` is a 197-line pod creation/deletion orchestration function |
+| Source Location | `pkg/controller/job/job_controller.go:1653–1849` |
+| Description | The `manageJob` function spans 197 lines and orchestrates pod creation and deletion for the Job controller. It handles parallelism calculation, active pod counting, pod creation with backoff, pod deletion, and accounting for indexed jobs — all within a single function body. The function mixes creation logic, deletion logic, and accounting/metrics logic without clear sub-function boundaries. |
+| Evidence | `func (jm *Controller) manageJob(ctx context.Context, job *batch.Job, jobCtx *syncJobCtx) (int32, string, error)` at line 1653. Internally manages `active`, `parallelism`, calls `jm.podControl.CreatePodsWithGenerateName` and `jm.podControl.DeletePod`, and tracks `metrics.JobSyncActionTracking`. |
+| Impact | Job pod creation and deletion is a high-frequency code path. Mixing creation, deletion, and accounting in a single function increases the risk of subtle bugs when modifying any one concern (e.g., adding new accounting for pod failure policies). |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Controller Sync Function Decomposition |
+
+---
+
+#### MAINT-010
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-010 |
+| Category | Maintainability |
+| Title | `NewContainerManager` is a 190-line constructor with extensive cgroup setup |
+| Source Location | `pkg/kubelet/cm/container_manager_linux.go:208–397` |
+| Description | The `NewContainerManager` constructor spans 190 lines and performs extensive Linux-specific initialization: cgroup subsystem detection, swap enforcement, cgroup root validation, system container configuration, QoS cgroup setup, CPU manager initialization, memory manager initialization, topology manager initialization, and device manager initialization. This follows the same monolithic constructor anti-pattern seen in `NewMainKubelet` (MAINT-001). |
+| Evidence | `func NewContainerManager(ctx context.Context, mountUtil mount.Interface, cadvisorInterface cadvisor.Interface, nodeConfig NodeConfig, failSwapOn bool, recorder record.EventRecorder, kubeClient clientset.Interface) (ContainerManager, error)` at line 208. The function accepts 7 parameters and sequentially initializes 8+ manager subsystems. |
+| Impact | The monolithic constructor makes it difficult to test individual subsystem initialization independently. Any change to cgroup setup or resource manager initialization requires reasoning about the entire 190-line function. New contributors face a steep learning curve for the container management subsystem. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Container Manager Decomposition |
+
+---
+
+#### MAINT-011
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-011 |
+| Category | Maintainability |
+| Title | `NewRESTStorage` is a 175-line sequential resource registration function |
+| Source Location | `pkg/registry/core/rest/storage_core.go:154–328` |
+| Description | The `NewRESTStorage` function spans 175 lines and sequentially registers 15+ core API resources (pods, services, namespaces, configmaps, secrets, endpoints, nodes, persistent volumes, persistent volume claims, resource quotas, limit ranges, pod templates, replication controllers, and more). Each resource registration follows an identical pattern: create storage, handle error, add to storage map. |
+| Evidence | `func (p *legacyProvider) NewRESTStorage(apiResourceConfigSource serverstorage.APIResourceConfigSource, restOptionsGetter generic.RESTOptionsGetter) (genericapiserver.APIGroupInfo, error)` at line 154. Internally calls `NewREST` for each resource type and adds to `apiGroupInfo.VersionedResourcesStorageMap`. |
+| Impact | Changes to any core API resource registration require editing this central function. The sequential registration pattern, while predictable, makes it difficult to add or remove resources without touching a single large function. Merge conflict risk is elevated for this file. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P3 — Core API Types File Organization |
+
+---
+
+#### MAINT-012
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-012 |
+| Category | Maintainability |
+| Title | `newServiceIPAllocators` is a 175-line function with complex dual-stack IP allocation logic |
+| Source Location | `pkg/registry/core/rest/storage_core.go:329–503` |
+| Description | The `newServiceIPAllocators` function spans 175 lines and initializes IP allocation infrastructure for Kubernetes services. It handles single-stack and dual-stack configurations, primary and secondary CIDR ranges, cluster IP allocators for both IP families, node port allocators, and repair controllers for leaked IP addresses. The function contains complex conditional logic for dual-stack IP family detection and allocator pairing. |
+| Evidence | `func (c *Config) newServiceIPAllocators() (registries rangeRegistries, primaryClusterIPAllocator ipallocator.Interface, clusterIPAllocators map[api.IPFamily]ipallocator.Interface, nodePortAllocator *portallocator.PortAllocator, err error)` at line 329. Returns 5 values and manages `serviceClusterIPRange`, `secondaryServiceClusterIPRange`, and IP family mapping. |
+| Impact | Service IP allocation correctness is critical for cluster networking. The complex dual-stack logic in a single function makes it difficult to verify that all IP family combinations are handled correctly. Regression risk is high when modifying allocation behavior. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P3 — Core API Types File Organization |
+
+---
+
+#### MAINT-013
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-013 |
+| Category | Maintainability |
+| Title | Kubelet `Run` method is a 167-line function mixing module startup with runtime monitoring |
+| Source Location | `pkg/kubelet/kubelet.go:1774–1940` |
+| Description | The Kubelet `Run` method spans 167 lines and is responsible for starting all kubelet subsystems in the correct order. It initializes the log server, starts the cloud resource sync manager, initializes volume manager, node lease controller, node status updater, runtime-dependent modules (cadvisor, container manager, eviction manager, container log manager, plugin manager), and the sync loop. The function mixes one-time initialization with ongoing runtime monitoring setup. |
+| Evidence | `func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate)` at line 1774. Internally calls `kl.initializeModules()`, `kl.volumeManager.Run()`, `kl.initializeRuntimeDependentModules()`, and enters `kl.syncLoop(ctx, updates, kl)`. |
+| Impact | The startup sequence is critical for kubelet correctness — incorrect ordering can cause subsystem failures or race conditions. Mixing startup with runtime monitoring in a single function makes it difficult to test initialization independently and increases the risk of initialization-order bugs. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P1 — Kubelet SyncPod Decomposition |
+
+---
+
+#### MAINT-014
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-014 |
+| Category | Maintainability |
+| Title | `generateAPIPodStatus` is a 162-line function interleaving condition computation with status assembly |
+| Source Location | `pkg/kubelet/kubelet_pods.go:1877–2038` |
+| Description | The `generateAPIPodStatus` function spans 162 lines and constructs the final API-facing pod status. It retrieves previous status, converts runtime status to API status, calculates pod phase, performs three-way status merging, computes pod conditions (Ready, ContainersReady, Initialized, PodScheduled), handles static pod status, and manages pod start time. The function interleaves condition computation logic with status assembly logic. |
+| Evidence | `func (kl *Kubelet) generateAPIPodStatus(pod *v1.Pod, podStatus *kubecontainer.PodStatus, podIsTerminal bool) v1.PodStatus` at line 1877. Internally calls `kl.convertStatusToAPIStatus`, `getPhase`, `kl.generateAPIPodConditions`, and performs status merging via `mergeStatusesForTerminalPods`. |
+| Impact | Pod status generation is critical for correct API reporting. The interleaved concerns make it difficult to test condition computation independently from status assembly. Bugs in status generation can cause incorrect pod reporting to the API server, affecting controllers that depend on pod status. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Kubelet Status Conversion Refactoring |
+
+---
+
+#### MAINT-015
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-015 |
+| Category | Maintainability |
+| Title | `trackJobStatusAndRemoveFinalizers` is a 150-line complex state reconciliation function |
+| Source Location | `pkg/controller/job/job_controller.go:1209–1358` |
+| Description | The `trackJobStatusAndRemoveFinalizers` function spans 150 lines and manages the complex reconciliation of Job status with pod finalizers. It handles indexed and non-indexed jobs, tracks succeeded and failed pod counts against uncounted terminated pod lists, removes batch/job-tracking finalizers from completed pods, and adds the Complete condition when satisfied. The function operates within a limited pod-count budget to prevent status size explosion. |
+| Evidence | `func (jm *Controller) trackJobStatusAndRemoveFinalizers(ctx context.Context, jobCtx *syncJobCtx, needsFlush bool) error` at line 1209. Manages `uncountedStatus`, `podsToRemoveFinalizer`, and `newSucceededIndexes` with complex conditional logic for indexed vs. non-indexed jobs. |
+| Impact | The Job finalizer tracking logic is critical for correct job completion reporting. The complexity of managing both indexed and non-indexed paths, pod failure policies, and finalizer removal in a single function creates risk of subtle accounting bugs, particularly in edge cases like partial failures. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Controller Sync Function Decomposition |
+
+---
+
+#### MAINT-016
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-016 |
+| Category | Maintainability |
+| Title | `attemptToDeleteItem` is a 151-line GC deletion function with deeply nested conditionals |
+| Source Location | `pkg/controller/garbagecollector/garbagecollector.go:503–653` |
+| Description | The `attemptToDeleteItem` function spans 151 lines and implements the garbage collector's item deletion logic. It handles virtual vs. observed nodes, dependent deletion (foreground and background), orphan management, owner reference validation, API get requests to verify item existence, and UID mismatch detection. The function contains deeply nested conditional logic with multiple early return paths. |
+| Evidence | `func (gc *GarbageCollector) attemptToDeleteItem(ctx context.Context, item *node) error` at line 503. Checks `item.isBeingDeleted()`, `item.isDeletingDependents()`, handles `errors.IsNotFound`, and dispatches to `gc.deleteObject` or `gc.processDeletionReference` based on ownership graph state. |
+| Impact | Garbage collection correctness is critical for cluster resource lifecycle management. The deeply nested conditionals with multiple early return paths make it difficult to verify that all deletion scenarios are handled correctly, particularly for edge cases involving virtual nodes and UID mismatches. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Controller Sync Function Decomposition |
+
+---
+
+#### MAINT-017
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-017 |
+| Category | Maintainability |
+| Title | `schedulingCycle` is a 128-line scheduling orchestration function tightly coupled to framework plugins |
+| Source Location | `pkg/scheduler/schedule_one.go:141–268` |
+| Description | The `schedulingCycle` function spans 128 lines and orchestrates a single pod scheduling attempt. It runs the scheduling framework's filter, pre-score, score, normalize, and reserve phases, handles extender calls, manages nominated node state, and handles scheduling failures. The function is tightly coupled to the `framework.Framework` interface lifecycle, calling multiple framework methods in sequence. |
+| Evidence | `func (sched *Scheduler) schedulingCycle(ctx context.Context, state fwk.CycleState, schedFramework framework.Framework, podInfo *framework.QueuedPodInfo, start time.Time, podsToActivate *framework.PodsToActivate) (ScheduleResult, *framework.QueuedPodInfo, *fwk.Status)` at line 141. Accepts 6 parameters and returns 3 values. |
+| Impact | Tight coupling to the framework plugin lifecycle limits independent testing of individual scheduling phases (filtering, scoring, reserving). While the framework pattern is deliberately extensible, the orchestration function itself is difficult to modify without understanding the complete scheduling pipeline. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Controller Sync Function Decomposition |
+
+---
+
+#### MAINT-018
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-018 |
+| Category | Maintainability |
+| Title | `syncLoopIteration` is a 125-line function multiplexing five different event channels |
+| Source Location | `pkg/kubelet/kubelet.go:2574–2698` |
+| Description | The `syncLoopIteration` function spans 125 lines and implements the kubelet's main event loop iteration. It uses a single `select` statement to multiplex five event channels: `configCh` (pod configuration updates), `plegCh` (pod lifecycle events), `syncCh` (periodic sync timer), `housekeepingCh` (cleanup timer), and health manager updates. Each channel case dispatches to the appropriate handler with logging and metrics. |
+| Evidence | `func (kl *Kubelet) syncLoopIteration(ctx context.Context, configCh <-chan kubetypes.PodUpdate, handler SyncHandler, syncCh <-chan time.Time, housekeepingCh <-chan time.Time, plegCh <-chan *pleg.PodLifecycleEvent) bool` at line 2574. The function accepts 6 parameters including 4 channel types. |
+| Impact | The 5-channel multiplexing is a clean design pattern, but the 125-line function body with per-channel dispatch logic creates cognitive load. Adding new event channels or modifying dispatch logic requires understanding all 5 existing channels and their interactions. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P1 — Kubelet SyncPod Decomposition |
+
+---
+
+#### MAINT-019
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-019 |
+| Category | Maintainability |
+| Title | `NewProxier` is a 123-line constructor with sysctl configuration and health check setup |
+| Source Location | `pkg/proxy/iptables/proxier.go:216–338` |
+| Description | The `NewProxier` constructor spans 123 lines and initializes a single-stack IPTables proxier. It configures Linux sysctl settings (`route_localnet`, `nf_conntrack_tcp_be_liberal`), sets up the health check server, initializes iptables interface handles, configures masquerading, and creates the proxier struct with 20+ fields. The constructor mixes kernel sysctl configuration with application-level proxier setup. |
+| Evidence | `func NewProxier(ctx context.Context, ipFamily v1.IPFamily, ipt utiliptables.Interface, sysctl utilsysctl.Interface, syncPeriod time.Duration, minSyncPeriod time.Duration, masqueradeAll bool, localhostNodePorts bool, masqueradeBit int, localDetector proxyutil.LocalTrafficDetector, ...)` at line 216. Accepts 10+ parameters. |
+| Impact | Mixing kernel sysctl configuration with application-level initialization makes unit testing difficult — sysctl operations require root or mocking. The constructor's length makes it hard to verify that all proxier fields are correctly initialized. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Proxier Struct Decomposition |
+
+---
+
+#### MAINT-020
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-020 |
+| Category | Maintainability |
+| Title | `NewDualStackProxier` is a 122-line factory duplicating IPv4/IPv6 initialization logic |
+| Source Location | `pkg/proxy/iptables/proxier.go:94–215` |
+| Description | The `NewDualStackProxier` factory function spans 122 lines and creates a `MetaProxier` wrapping IPv4 and IPv6 proxier instances. It duplicates the initialization logic for both IP families: creating iptables interfaces, configuring local traffic detection, calling `NewProxier` for each family, and wiring health check servers. The duplication between the IPv4 and IPv6 initialization paths creates divergence risk. |
+| Evidence | `func NewDualStackProxier(ctx context.Context, ipts map[v1.IPFamily]utiliptables.Interface, sysctl utilsysctl.Interface, syncPeriod time.Duration, minSyncPeriod time.Duration, masqueradeAll bool, ...)` at line 94. Creates two `NewProxier` calls (one per IP family) with mirrored parameter sets. |
+| Impact | Any change to single-stack proxier initialization must be duplicated for both IP families in the dual-stack factory. The parallel initialization paths have already diverged slightly in parameter handling, creating a risk that future changes may be applied to one family but not the other. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Proxier Struct Decomposition |
+
+---
+
+#### MAINT-021
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-021 |
+| Category | Maintainability |
+| Title | `prioritizeNodes` is a 117-line function mixing scoring, normalization, and aggregation |
+| Source Location | `pkg/scheduler/schedule_one.go:791–907` |
+| Description | The `prioritizeNodes` function spans 117 lines and computes final node scores for scheduling decisions. It runs all scoring plugins via the framework, normalizes scores per plugin, applies extender scoring, and aggregates weighted scores into a final ranking. The function mixes three distinct concerns: plugin score computation, score normalization, and weighted aggregation — all in a single function body. |
+| Evidence | `func prioritizeNodes(ctx context.Context, extenders []fwk.Extender, schedFramework framework.Framework, state fwk.CycleState, pod *v1.Pod, nodes []fwk.NodeInfo) ([]fwk.NodePluginScores, error)` at line 791. Accepts 6 parameters and manages `scoresMap`, `result`, and per-extender score merging. |
+| Impact | Scheduling scoring correctness is critical for cluster resource utilization. Mixing scoring, normalization, and aggregation makes it difficult to verify each phase independently. Changes to the scoring algorithm (e.g., new normalization strategies) require modifying a single function that handles all phases. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P2 — Controller Sync Function Decomposition |
+
+---
+
+#### MAINT-022
+
+| Field | Value |
+|-------|-------|
+| Finding ID | MAINT-022 |
+| Category | Maintainability |
+| Title | `SyncTerminatingPod` is a 115-line pod termination synchronization function |
+| Source Location | `pkg/kubelet/kubelet.go:2182–2296` |
+| Description | The `SyncTerminatingPod` function spans 115 lines and synchronizes the termination of a running pod. It handles grace period enforcement, container killing (both init and regular containers), volume teardown, and status reporting. The function performs sequential cleanup across multiple subsystems (container runtime, volume manager, tracing) in a single function body with context cancellation support. |
+| Evidence | `func (kl *Kubelet) SyncTerminatingPod(_ context.Context, pod *v1.Pod, podStatus *kubecontainer.PodStatus, gracePeriod *int64, podStatusFn func(*v1.PodStatus)) (err error)` at line 2182. Accepts 5 parameters including a status callback function. Internally manages `ctx` with `context.Background()` (with TODO comment noting test failures with incoming context). |
+| Impact | Pod termination is a critical path — incorrect termination can cause resource leaks, orphaned volumes, or data loss. The sequential cleanup across multiple subsystems in a single function body makes it difficult to test individual cleanup phases or add new termination steps without understanding the complete pipeline. |
+| Inference Flag | CONFIRMED |
+| Recommendation Ref | `08_IMPROVEMENT_ROADMAP.md` § P1 — Kubelet SyncPod Decomposition |
 
 ### 2.4 Function Size Distribution Summary
 
