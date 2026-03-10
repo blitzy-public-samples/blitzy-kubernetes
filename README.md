@@ -9,7 +9,7 @@ This assessment covers `pkg/`, `cmd/`, `hack/`, `test/`, `build/`, `staging/`, a
 ## Key Findings
 
 ### Code Consistency & Style
-- 9 of 25 `cmd/` packages follow an identical `main.go` → `app.NewXCommand()` → `component-base/cli.Run()` Cobra pattern (`cmd/kube-apiserver/apiserver.go`, `cmd/kubelet/kubelet.go`, `cmd/kube-scheduler/scheduler.go`); the remaining 16 are development tools.
+- 9 of 25 `cmd/` packages follow an identical `main.go` → `app.NewXCommand()` → `component-base/cli.Run()` Cobra pattern (`cmd/kube-apiserver/apiserver.go`, `cmd/kubelet/kubelet.go`, `cmd/kube-scheduler/scheduler.go`); the remaining 16 are primarily development tools and utilities.
 - `.gitattributes` enforces LF line endings globally and marks generated files (`zz_generated.*.go`, `generated.pb.go`) as `linguist-generated=true`.
 - `hack/golangci.yaml` (lines 94–110) intentionally permits underscores in `Convert_*_To_*` and `SetDefaults_*` generated functions — a documented deviation from standard Go naming.
 
