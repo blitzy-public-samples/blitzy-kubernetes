@@ -10,7 +10,7 @@
 | **Risk Rating** | **High** |
 | **Priority Scale** | P0 (Critical) / P1 (High) / P2 (Medium) / P3 (Low) |
 | **Risk Rating Scale** | Low / Medium / High / Critical |
-| **Last Updated** | 2025 |
+| **Last Updated** | 2026-03-11 |
 
 ---
 

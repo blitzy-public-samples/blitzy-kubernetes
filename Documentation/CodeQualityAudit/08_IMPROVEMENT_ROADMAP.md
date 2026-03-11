@@ -8,7 +8,7 @@
 | Category | Improvement Roadmap |
 | Risk Rating | **High** (reflects aggregate audit findings) |
 | Priority Scale | P0 (Critical) / P1 (High) / P2 (Medium) / P3 (Low) |
-| Last Updated | 2025 |
+| Last Updated | 2026-03-11 |
 
 ---
 
@@ -16,7 +16,7 @@
 
 This document synthesizes all findings from the Kubernetes Code Quality Audit (documents 01–07) into a **prioritized, actionable improvement plan**. Each recommendation references specific findings by Finding ID, states expected benefits, and is assigned a priority tier from P0 (Critical) to P3 (Low).
 
-The audit identified **262+ individual findings** across 7 quality dimensions spanning the entire `k8s.io/kubernetes` repository. These findings translate into **22 structured recommendations** organized into 4 priority tiers:
+The audit identified **246 individual findings** across 7 quality dimensions spanning the entire `k8s.io/kubernetes` repository. These findings translate into **22 structured recommendations** organized into 4 priority tiers:
 
 | Priority | Label | Criteria | Recommendation Count |
 |----------|-------|----------|---------------------|
@@ -509,6 +509,95 @@ Top-level hack scripts (`hack/build.sh`, `hack/test.sh`, etc.) are vestigial red
 - Evaluate enabling additional kube-api-linter checks (TOOL-016): start with `jsontags`, `optionalorrequired`, and `requiredfields` as these enforce API structural correctness
 - Clean up vestigial hack scripts (TOOL-010) by removing or updating them to reference the Makefile directly
 - For single-implementation interfaces (MAINT-042, MAINT-043), document the testability justification in the interface definition rather than removing them
+
+---
+
+## Thematic Recommendation Guidance
+
+This section provides focused recommendation guidance for cross-cutting themes referenced by findings in the analysis documents (01–07). Each theme maps to one or more primary recommendations defined in the priority tiers above.
+
+### Input Validation
+
+| Field | Value |
+|-------|-------|
+| **Theme** | Input Validation |
+| **Source Findings** | DESIGN-016 (03_DESIGN_QUALITY.md § Input Validation Coverage Map), DESIGN-017 (03_DESIGN_QUALITY.md § Input Validation Coverage Map) |
+| **Primary Recommendations** | REC-P1-03 (Decompose Kubelet God Object), REC-P2-04 (Externalize Hardcoded Configuration Values) |
+
+**Context:**
+The kubelet constructor `NewMainKubelet` validates some parameters upfront (`rootDirectory`, `podLogsDirectory`, `SyncFrequency`) but accepts others without bounds checking (`maxPerPodContainerCount`, `maxContainerCount`, `nodeStatusMaxImages`) — deferring validation to runtime (DESIGN-017). The LimitRanger admission controller uses hardcoded cache sizing (10,000 entries) and TTL (30 seconds) without input validation or configurability (DESIGN-016).
+
+**Guidance:**
+- As part of the kubelet decomposition (REC-P1-03), consolidate all constructor parameter validation into an explicit validation phase at the start of `NewMainKubelet` — or within the replacement `KubeletConfig` struct's validation method — so that misconfiguration is detected at startup rather than during runtime operation
+- For admission controller operational parameters (DESIGN-016), evaluate which values should be configurable via admission webhook configuration rather than hardcoded, and add bounds validation for any newly externalized parameters (aligned with REC-P2-04)
+- Establish a validation pattern standard: all constructor/initialization parameters with operational significance should be validated at construction time with clear error messages identifying the invalid parameter and acceptable range
+
+### API Evolution
+
+| Field | Value |
+|-------|-------|
+| **Theme** | API Evolution |
+| **Source Findings** | DESIGN-034 (03_DESIGN_QUALITY.md § Shotgun Surgery) |
+| **Primary Recommendations** | REC-P1-02 (Standardize Controller Implementation Patterns), REC-P2-01 (Decompose Oversized Functions) |
+
+**Context:**
+Adding a new field to a core API type (e.g., `PodSpec`) requires coordinated changes across 6+ files: `types.go` (internal), `v1/types.go` (external/staging), `validation/validation.go`, `defaults.go`, `zz_generated.deepcopy.go`, `zz_generated.conversion.go`, and potentially swagger documentation and test files (DESIGN-034). The `pkg/apis/core/types.go` file is 7,171 lines. This is the highest-impact shotgun surgery pattern in the codebase.
+
+**Guidance:**
+- Code generation (`hack/update-codegen.sh`) already mitigates some of the cross-file burden for deepcopy and conversion; ensure that all generated files are clearly marked and excluded from manual review checklists
+- Document the canonical "add a new API field" workflow as a contributor guide, listing every required file change, code generation step, and validation test update — this reduces the risk of incomplete changes (DESIGN-034)
+- Evaluate whether validation and defaulting logic can be co-located with type definitions (e.g., via struct tags or adjacent validation methods) to reduce the number of files requiring manual changes per API field addition
+- The existing `hack/verify-codegen.sh` and `hack/verify-api-groups.sh` scripts partially enforce consistency; document their role in the API evolution workflow
+
+### Cross-Module Consistency
+
+| Field | Value |
+|-------|-------|
+| **Theme** | Cross-Module Consistency |
+| **Source Findings** | CONS-007 (01_CONSISTENCY_AND_STYLE.md § Proxy Layer), CONS-016 (01_CONSISTENCY_AND_STYLE.md § Cross-Module Findings) |
+| **Primary Recommendations** | REC-P1-02 (Standardize Controller Implementation Patterns), REC-P2-05 (Harmonize Naming Conventions and Import Aliases) |
+
+**Context:**
+Cross-module pattern divergence manifests in two significant ways. First, the proxy backends use fundamentally different constant naming philosophies: iptables/ipvs use `"KUBE-"` prefixed uppercase chain names while nftables uses lowercase unprefixed names within a `"kube-proxy"` table (CONS-007). Second, the scheduler uses the functional options pattern (`Option`, `WithProfiles()`, `WithParallelism()`) while all 30+ controllers use direct parameter passing in constructors (CONS-016). These represent intentional design divergences driven by different requirements, but they create cognitive overhead when working across modules.
+
+**Guidance:**
+- For proxy constant naming (CONS-007): the nftables naming convention is intentional and well-documented — no change is recommended. However, document the naming philosophy for each backend in a `doc.go` or `DESIGN.md` within each proxy sub-package to reduce confusion for cross-backend contributors (aligned with REC-P2-06)
+- For constructor patterns (CONS-016): the scheduler's functional options pattern is appropriate given its higher configuration complexity. Document this as an acceptable pattern variation in a contributor style guide, noting when functional options are preferred over direct parameter passing (generally when the number of optional configuration parameters exceeds 5–7)
+- When introducing new major components, explicitly choose and document which constructor pattern to follow based on configuration complexity
+
+### Proxy Architecture
+
+| Field | Value |
+|-------|-------|
+| **Theme** | Proxy Architecture |
+| **Source Findings** | DESIGN-009 (03_DESIGN_QUALITY.md § Abstraction Quality) |
+| **Primary Recommendations** | REC-P0-03 (Address Goroutine Lifecycle and Concurrency Safety Gaps), REC-P2-01 (Decompose Oversized Functions) |
+
+**Context:**
+The iptables `Proxier` struct mixes mutable synchronized state (service/endpoint maps, sync counters) with effectively-const configuration (iptables interface handles, masquerade settings, node name) in a single 77-field struct protected by a single `sync.Mutex` (DESIGN-009). A comment at `pkg/proxy/iptables/proxier.go:161` acknowledges this: "These are effectively const and do not need the mutex to be held."
+
+**Guidance:**
+- Separate the `Proxier` struct into distinct configuration (immutable after construction) and state (mutable, mutex-protected) types — this directly reduces the cognitive load of understanding which fields require synchronization (aligned with REC-P0-03 guidance on separating mutable/immutable fields)
+- The configuration struct should be populated during construction and passed as a pointer to the state struct, enabling the mutex to protect only the truly mutable fields
+- Apply the same separation to the ipvs and nftables `Proxier` structs for cross-backend consistency
+- Decompose the 806-line `syncProxyRules` method (MAINT-002, addressed in REC-P2-01) as part of this architectural improvement, extracting rule-generation phases into testable sub-functions that operate on the immutable configuration
+
+### Registry Architecture
+
+| Field | Value |
+|-------|-------|
+| **Theme** | Registry Architecture |
+| **Source Findings** | DESIGN-008 (03_DESIGN_QUALITY.md § Abstraction Quality), DESIGN-019 (03_DESIGN_QUALITY.md § God Objects) |
+| **Primary Recommendations** | REC-P2-01 (Decompose Oversized Functions) |
+
+**Context:**
+The core API REST storage wiring is concentrated in a single 410-line `NewRESTStorage` method in `pkg/registry/core/rest/storage_core.go` (DESIGN-008, DESIGN-019). This function creates and wires 15+ resource storage instances (pods, nodes, services, endpoints, persistent volumes, persistent volume claims, limit ranges, pod templates, service accounts, controllers, etc.) and maps them into a single storage map. It serves as the monolithic registration point for the entire core API group.
+
+**Guidance:**
+- Decompose `NewRESTStorage` into per-resource-group factory functions (e.g., `createPodStorage`, `createServiceStorage`, `createNodeStorage`), each responsible for creating and configuring a single resource's storage chain — aligned with the function decomposition strategy in REC-P2-01
+- Document each factory function's dependencies and initialization requirements, as the core API storage wiring has implicit ordering dependencies (e.g., the IP allocator must be initialized before service storage)
+- Apply the same decomposition pattern to other API group `NewRESTStorage` implementations if they exhibit similar monolithic wiring
+- The 4 undocumented exported functions in `storage_core.go` (DOC-025) should be documented as part of this decomposition effort (aligned with REC-P1-04)
 
 ---
 
