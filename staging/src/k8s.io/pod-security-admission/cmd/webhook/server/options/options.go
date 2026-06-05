@@ -24,7 +24,6 @@ import (
 
 const (
 	DefaultPort           = 8443
-	DefaultInsecurePort   = 8080
 	DefaultClientQPSLimit = 20
 	DefaultClientQPSBurst = 50
 )
