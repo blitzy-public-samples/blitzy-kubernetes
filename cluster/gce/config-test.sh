@@ -413,7 +413,9 @@ fi
 CUSTOM_INGRESS_YAML=${CUSTOM_INGRESS_YAML:-}
 
 if [[ -z "${KUBE_ADMISSION_CONTROL:-}" ]]; then
-  ADMISSION_CONTROL='NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,Priority,StorageObjectInUseProtection,PersistentVolumeClaimResize,RuntimeClass'
+  # NodeRestriction (AAP V7) + PodSecurity (AAP V2) must both be active on every
+  # profile — mirrors config-default.sh. See tech-spec §6.4.4.1 / §6.4.4.3.
+  ADMISSION_CONTROL='NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,Priority,StorageObjectInUseProtection,PersistentVolumeClaimResize,RuntimeClass,PodSecurity'
   # ResourceQuota must come last, or a creation is recorded, but the pod may be forbidden.
   ADMISSION_CONTROL="${ADMISSION_CONTROL},MutatingAdmissionWebhook,ValidatingAdmissionWebhook,ResourceQuota"
 else
@@ -466,9 +468,18 @@ ENABLE_VOLUME_SNAPSHOTS=${ENABLE_VOLUME_SNAPSHOTS:-true}
 # Upgrade test jobs that go from a version < 1.6 to a version >= 1.6 should override this to be true.
 ENABLE_LEGACY_ABAC=${ENABLE_LEGACY_ABAC:-false} # true, false
 
-# Enable a simple "AdvancedAuditing" setup for testing.
+# Enable a simple "AdvancedAuditing" setup for testing. Required so the hardened
+# audit policy (Secrets/ServiceAccount-token raised to Request in
+# configure-helper.sh:create-master-audit-policy) is generated. Tech-spec §6.4.6.
 ENABLE_APISERVER_ADVANCED_AUDIT=${ENABLE_APISERVER_ADVANCED_AUDIT:-true} # true, false
 ADVANCED_AUDIT_LOG_MODE=${ADVANCED_AUDIT_LOG_MODE:-batch} # batch, blocking
+
+# Encryption at rest for Secrets (AAP V3, tech-spec §6.4.5): set
+# ENCRYPTION_PROVIDER_CONFIG to the base64-encoded contents of an
+# EncryptionConfiguration (see cluster/gce/manifests/encryption-provider-config.yml).
+# configure-kubeapiserver.sh then wires --encryption-provider-config. Provide real
+# key material out-of-band; NEVER commit it (AAP §0.11). Storage migration per §6.2.3.3.
+# ENCRYPTION_PROVIDER_CONFIG=${ENCRYPTION_PROVIDER_CONFIG:-}
 
 ENABLE_BIG_CLUSTER_SUBNETS=${ENABLE_BIG_CLUSTER_SUBNETS:-false}
 

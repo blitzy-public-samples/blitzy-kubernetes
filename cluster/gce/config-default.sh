@@ -368,7 +368,10 @@ fi
 CUSTOM_INGRESS_YAML="${CUSTOM_INGRESS_YAML:-}"
 
 # Admission Controllers to invoke prior to persisting objects in cluster
-ADMISSION_CONTROL=NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,PersistentVolumeClaimResize,DefaultTolerationSeconds,NodeRestriction,Priority,StorageObjectInUseProtection,RuntimeClass
+# NodeRestriction confines each kubelet to its own node's objects (AAP V7); PodSecurity
+# enforces Pod Security Standards cluster-wide. Both MUST be active on every profile.
+# See tech-spec §6.4.4.1 (admission controller catalog) and §6.4.4.3 (Pod Security modes).
+ADMISSION_CONTROL=NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,PersistentVolumeClaimResize,DefaultTolerationSeconds,NodeRestriction,Priority,StorageObjectInUseProtection,RuntimeClass,PodSecurity
 
 # MutatingAdmissionWebhook should be the last controller that modifies the
 # request object, otherwise users will be confused if the mutating webhooks'
@@ -411,6 +414,24 @@ ENABLE_VOLUME_SNAPSHOTS="${ENABLE_VOLUME_SNAPSHOTS:-true}"
 
 # Optional: Enable legacy ABAC policy that makes all service accounts superusers.
 ENABLE_LEGACY_ABAC="${ENABLE_LEGACY_ABAC:-false}" # true, false
+
+# Enable advanced (policy-based) API-server audit logging so the hardened audit
+# policy is generated and wired (--audit-policy-file). Raising Secrets and
+# ServiceAccount-token operations to the Request audit level (in
+# cluster/gce/gci/configure-helper.sh:create-master-audit-policy) requires this
+# to be enabled. See tech-spec §6.4.6 (audit levels).
+ENABLE_APISERVER_ADVANCED_AUDIT=${ENABLE_APISERVER_ADVANCED_AUDIT:-true} # true, false
+ADVANCED_AUDIT_LOG_MODE=${ADVANCED_AUDIT_LOG_MODE:-batch} # batch, blocking
+
+# Encryption at rest for Secrets (AAP V3, tech-spec §6.4.5): to enable, set
+# ENCRYPTION_PROVIDER_CONFIG to the base64-encoded contents of an
+# EncryptionConfiguration manifest (see cluster/gce/manifests/encryption-provider-config.yml).
+# When set, configure-kubeapiserver.sh decodes it to
+# /etc/srv/kubernetes/encryption-provider-config.yml and wires
+# --encryption-provider-config. Provide real KMS/AES-GCM key material out-of-band;
+# NEVER commit key material to the repository (AAP §0.11). Storage migration to
+# re-encrypt existing Secrets follows enablement (tech-spec §6.2.3.3).
+# ENCRYPTION_PROVIDER_CONFIG=${ENCRYPTION_PROVIDER_CONFIG:-}
 
 # Indicates if the values (i.e. KUBE_USER and KUBE_PASSWORD for basic
 # authentication) in metadata should be treated as canonical, and therefore disk

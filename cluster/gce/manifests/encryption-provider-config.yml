@@ -1,0 +1,64 @@
+# EncryptionConfiguration — encryption at rest for Kubernetes Secrets (AAP V3).
+#
+# PURPOSE / TEMPLATE USAGE:
+#   This file is a REFERENCE TEMPLATE for enabling Secrets encryption at rest on the
+#   GCE reference deployment. It is NOT consumed verbatim from this repository path.
+#   Operators base64-encode this file's contents into the ENCRYPTION_PROVIDER_CONFIG
+#   environment variable (documented in cluster/gce/config-default.sh and
+#   cluster/gce/config-test.sh). At boot, cluster/gce/gci/configure-kubeapiserver.sh
+#   (setup-etcd-encryption) decodes it to
+#   /etc/srv/kubernetes/encryption-provider-config.yml and wires the kube-apiserver
+#   flag --encryption-provider-config=<that path>.
+#
+# SECURITY RATIONALE (tech-spec §6.4.5 — encryption at rest):
+#   Without a provider config the API server stores Secrets via the `identity`
+#   (plaintext) path, so anyone with an etcd snapshot can read them. Enabling a strong
+#   provider (KMS v2 preferred; AES-GCM acceptable) encrypts Secrets before they are
+#   written to etcd, defeating snapshot/insider disclosure.
+#
+# PROVIDER ORDERING (tech-spec §6.4.5):
+#   The FIRST provider in each resource's `providers` list encrypts new writes; ALL
+#   listed providers are tried in order for decryption. The strong provider MUST be
+#   listed FIRST and `identity` (plaintext) MUST be LAST.
+#
+# STORAGE MIGRATION (tech-spec §6.2.3.3 — key rotation / storage migration):
+#   After enabling encryption, re-encrypt already-stored (plaintext) Secrets via a
+#   storage migration (e.g. `kubectl get secrets -A -o yaml | kubectl replace -f -`,
+#   or the storage-version-migrator). Keep `identity` in the decrypt list ONLY until
+#   that migration completes, then REMOVE it so plaintext is no longer accepted. The
+#   same re-encryption procedure applies when rotating keys.
+#
+# CREDENTIALS (AAP §0.11 — never commit key material):
+#   All key material and endpoints below are PLACEHOLDERS. Provide the real KMS plugin
+#   socket (KMS v2) or a real 32-byte AES-GCM key OUT-OF-BAND (e.g. via the base64
+#   ENCRYPTION_PROVIDER_CONFIG env var). NEVER commit real key material to the repo.
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+    # Encrypt the sensitive resources stored in etcd. `secrets` also covers legacy
+    # ServiceAccount-token Secrets (type kubernetes.io/service-account-token).
+    - secrets
+    - configmaps
+    providers:
+    # 1) STRONG PROVIDER FIRST — encrypts all new writes (tech-spec §6.4.5).
+    #    KMS v2 is preferred: unlimited Secrets and enhanced key management (AAP §0.2.4).
+    - kms:
+        apiVersion: v2
+        name: k8s-kms                     # PLACEHOLDER provider name — operator-defined
+        endpoint: unix:///tmp/kms.socket  # PLACEHOLDER — operator provisions the real KMS plugin socket
+        timeout: 3s                       # bounded gRPC calls to the KMS plugin (default 3s)
+        # NOTE: `cachesize` is a KMS v1-only tunable and is rejected by the API server
+        #       for v2 ("cachesize is not supported in v2"); set it only if you switch
+        #       this block to `apiVersion: v1` (e.g. `cachesize: 1000`).
+    # Alternative static-key provider (use INSTEAD of `kms` when no external KMS is
+    # available; acceptable per AAP §0.2.4). If used it MUST remain FIRST (it encrypts).
+    # - aesgcm:
+    #     keys:
+    #       - name: key1
+    #         secret: <BASE64_32_BYTE_KEY>   # PLACEHOLDER — operator supplies real key material out-of-band; NEVER commit
+    # 2) identity LAST — decrypt-only plaintext fallback, present ONLY during the
+    #    storage migration so already-plaintext Secrets remain readable. REMOVE this
+    #    entry once the migration completes (tech-spec §6.2.3.3) so plaintext writes
+    #    are no longer accepted.
+    - identity: {}
