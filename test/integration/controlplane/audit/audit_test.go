@@ -749,9 +749,11 @@ func secretOperations(t *testing.T, kubeclient clientset.Interface, namespace st
 	expectNoError(t, err, "failed to delete audit-secret")
 }
 
-// rbacOperations is a set of known operations performed on a namespaced RBAC
-// Role which correspond to the expected V6 audit events (create, update,
-// delete). It exercises the rbac.authorization.k8s.io API group.
+// rbacOperations is a set of known operations performed on namespaced RBAC
+// objects which correspond to the expected V6 audit events (create, update,
+// delete). It exercises the rbac.authorization.k8s.io API group on both a Role
+// and a RoleBinding so the RequestResponse audit level is validated at runtime
+// for every RBAC resource named in the audit policy (roles and rolebindings).
 func rbacOperations(t *testing.T, kubeclient clientset.Interface, namespace string) {
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: "audit-role", Namespace: namespace},
@@ -763,12 +765,45 @@ func rbacOperations(t *testing.T, kubeclient clientset.Interface, namespace stri
 	expectNoError(t, err, "failed to update audit-role")
 	err = kubeclient.RbacV1().Roles(namespace).Delete(context.TODO(), role.Name, metav1.DeleteOptions{})
 	expectNoError(t, err, "failed to delete audit-role")
+
+	// RoleBinding create/update/delete completes the RBAC runtime coverage: the
+	// audit policy raises both "roles" and "rolebindings" to RequestResponse, so
+	// both resources must be exercised (AAP §0.8.1 / §6.6.10 (V6)). RoleRef is
+	// immutable, so the update below re-sends the identical object (an
+	// unconditional, no-op update that still emits an "update" audit event); the
+	// RoleRef may reference the already-deleted audit-role because RoleBindings
+	// permit dangling references (resolution happens at authorization time).
+	roleBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "audit-rolebinding", Namespace: namespace},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     "audit-role",
+		},
+		Subjects: []rbacv1.Subject{{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "User",
+			Name:     "audit-user",
+		}},
+	}
+	_, err = kubeclient.RbacV1().RoleBindings(namespace).Create(context.TODO(), roleBinding, metav1.CreateOptions{})
+	expectNoError(t, err, "failed to create audit-rolebinding")
+	_, err = kubeclient.RbacV1().RoleBindings(namespace).Update(context.TODO(), roleBinding, metav1.UpdateOptions{})
+	expectNoError(t, err, "failed to update audit-rolebinding")
+	err = kubeclient.RbacV1().RoleBindings(namespace).Delete(context.TODO(), roleBinding.Name, metav1.DeleteOptions{})
+	expectNoError(t, err, "failed to delete audit-rolebinding")
 }
 
 // secretAuditRequestEvents returns the expected audit events for Secret
-// create/update/delete at level Request (Secrets are audited at >= Request per
-// AAP §0.2.4; Request avoids writing secret payloads into audit logs, so
-// ResponseObject is false).
+// create/update/delete at level Request (Secrets are audited at Request per
+// AAP §0.2.4 / §0.1.1 — the balanced default). At LevelRequest the API server
+// records the request object, so a create/update request body IS captured in
+// the audit log; it does NOT record the response object, so ResponseObject is
+// false. Choosing Request over RequestResponse is the explicitly accepted
+// trade-off: it omits the response body (which would otherwise duplicate the
+// Secret payload plus server-populated fields), reducing payload exposure.
+// runSensitiveResourceTestWithVersion adds a targeted guard asserting that no
+// Secret audit event ever carries a response object.
 func secretAuditRequestEvents(namespace string) []utils.AuditEvent {
 	return []utils.AuditEvent{
 		{
@@ -811,10 +846,11 @@ func secretAuditRequestEvents(namespace string) []utils.AuditEvent {
 	}
 }
 
-// rbacAuditResponseEvents returns the expected audit events for RBAC Role
-// create/update/delete at level RequestResponse (RBAC objects mirror the
-// deployment config's known_apis RequestResponse behavior; ResponseObject is
-// true).
+// rbacAuditResponseEvents returns the expected audit events for RBAC Role and
+// RoleBinding create/update/delete at level RequestResponse (RBAC objects mirror
+// the deployment config's known_apis RequestResponse behavior; ResponseObject is
+// true). Both resources are covered because the audit policy raises "roles" and
+// "rolebindings" to RequestResponse (AAP §0.8.1 / §6.6.10 (V6)).
 func rbacAuditResponseEvents(namespace string) []utils.AuditEvent {
 	return []utils.AuditEvent{
 		{
@@ -849,6 +885,42 @@ func rbacAuditResponseEvents(namespace string) []utils.AuditEvent {
 			Code:              200,
 			User:              auditTestUser,
 			Resource:          "roles",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    true,
+			AuthorizeDecision: "allow",
+		}, {
+			Level:             auditinternal.LevelRequestResponse,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings", namespace),
+			Verb:              "create",
+			Code:              201,
+			User:              auditTestUser,
+			Resource:          "rolebindings",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    true,
+			AuthorizeDecision: "allow",
+		}, {
+			Level:             auditinternal.LevelRequestResponse,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings/audit-rolebinding", namespace),
+			Verb:              "update",
+			Code:              200,
+			User:              auditTestUser,
+			Resource:          "rolebindings",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    true,
+			AuthorizeDecision: "allow",
+		}, {
+			Level:             auditinternal.LevelRequestResponse,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/rolebindings/audit-rolebinding", namespace),
+			Verb:              "delete",
+			Code:              200,
+			User:              auditTestUser,
+			Resource:          "rolebindings",
 			Namespace:         namespace,
 			RequestObject:     true,
 			ResponseObject:    true,
@@ -925,6 +997,7 @@ func runSensitiveResourceTestWithVersion(t *testing.T, version string) {
 	for _, tc := range sensitiveTestCases {
 		t.Run(fmt.Sprintf("%s.%s", version, tc.name), func(t *testing.T) {
 			var lastMissingReport string
+			var observedEvents []utils.AuditEvent
 			createNamespace(t, kubeclient, tc.namespace)
 			if err := wait.Poll(500*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
 				tc.ops(t, kubeclient, tc.namespace)
@@ -942,9 +1015,28 @@ func runSensitiveResourceTestWithVersion(t *testing.T, version string) {
 					lastMissingReport = missingReport.String()
 					return false, nil
 				}
+				// Capture every audit event observed on the successful iteration so
+				// the confidentiality guard below can inspect all logged Secret
+				// events, not only the ones enumerated in expEvents.
+				observedEvents = missingReport.AllEvents
 				return true, nil
 			}); err != nil {
 				t.Fatalf("failed to get expected events -- missingReport: %s, error: %v", lastMissingReport, err)
+			}
+
+			// Confidentiality guard (AAP §0.2.4 / §0.1.1): Secrets are audited at
+			// LevelRequest, never RequestResponse, precisely so the API server's
+			// response body — which would duplicate the Secret payload plus
+			// server-populated fields — is never written to the audit log. Assert
+			// that invariant directly: no Secret audit event may carry a response
+			// object. This scans every logged Secret event (a superset of expEvents)
+			// so a future regression to RequestResponse is caught even if the
+			// expected-events table were changed to match. Note that RequestObject
+			// remaining true is the explicitly accepted trade-off, not a defect.
+			for _, e := range observedEvents {
+				if e.Resource == "secrets" && e.ResponseObject {
+					t.Errorf("secret audit event must not record a response object (would leak the secret payload at RequestResponse): %#v", e)
+				}
 			}
 		})
 	}
