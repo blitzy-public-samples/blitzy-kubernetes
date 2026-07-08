@@ -39,6 +39,13 @@ func init() {
 	auditinstall.Install(auditpkg.Scheme)
 }
 
+// TestCreateMasterAuditPolicy verifies the audit policy emitted by
+// create-master-audit-policy assigns the intended audit level per (user, verb,
+// resource) — most importantly the V6 sensitive-resource levels.
+// AAP §6.6.10 / §0.8.1 (V6) + §6.4.6 / §0.6.3: Secrets and ServiceAccount-token
+// operations are raised to Request (forensic coverage without logging response
+// payloads, the Request-over-RequestResponse trade-off), configmaps and
+// tokenreviews stay at Metadata, and RBAC objects stay at RequestResponse.
 func TestCreateMasterAuditPolicy(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "configure-helper-test") // cleaned up by c.tearDown()
 	require.NoError(t, err, "Failed to create temp directory")
