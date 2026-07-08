@@ -128,9 +128,11 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	at.testResources(metadata, ingress, "get", configmaps)
 
 	at.testResources(none, kubelet, node, "get", nodes, nodeStatus)
-	// secrets raised Metadata->Request by create-master-audit-policy (tech-spec §6.4.6, AAP V6); sysConfigmaps stays Metadata.
+	// secrets are pinned to Metadata by create-master-audit-policy so that no secret
+	// payload is ever written to the audit log (tech-spec §6.4.6, AAP V6 / §0.6.3);
+	// sysConfigmaps also stays Metadata.
 	at.testResources(metadata, kubelet, node, "get", sysConfigmaps)
-	at.testResources(request, kubelet, node, "get", secrets)
+	at.testResources(metadata, kubelet, node, "get", secrets)
 	at.testResources(response, kubelet, node, "create", deployments, pods)
 
 	at.testResources(none, controller, scheduler, endpointController, "get", "update", sysEndpoints)
@@ -138,9 +140,10 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	at.testResources(response, controller, scheduler, endpointController, "update", endpoints)
 
 	at.testResources(none, apiserver, "get", namespaces, namespaceStatus, namespaceFinal)
-	// secrets now audited at Request (§6.4.6, AAP V6); sysConfigmaps stays Metadata.
+	// secrets audited at Metadata so create/update request bodies (.data/.stringData) and
+	// get responses are never logged (§6.4.6, AAP V6 / §0.6.3); sysConfigmaps also stays Metadata.
 	at.testResources(metadata, apiserver, "get", "create", "update", sysConfigmaps)
-	at.testResources(request, apiserver, "get", "create", "update", secrets)
+	at.testResources(metadata, apiserver, "get", "create", "update", secrets)
 
 	at.testResources(none, autoscaler, "get", "update", sysConfigmaps, sysEndpoints)
 	at.testResources(metadata, autoscaler, "get", "update", configmaps)
@@ -157,9 +160,10 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 
 	at.testResources(request, namespaceController, "deletecollection", pods, namespaces)
 
-	// secrets -> Request (§6.4.6, AAP V6); configmaps, sysConfigmaps, tokenReviews stay Metadata.
+	// secrets, configmaps, sysConfigmaps and tokenReviews are all pinned to Metadata so no
+	// secret payload is ever logged (§6.4.6, AAP V6 / §0.6.3).
 	at.testResources(metadata, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", configmaps, sysConfigmaps, tokenReviews)
-	at.testResources(request, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", secrets)
+	at.testResources(metadata, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", secrets)
 	at.testResources(request, defaultSA, anonymous, npd, namespaceController, "get", "list", "watch", sysEndpoints, podMetrics, pods, clusterRoles, deployments)
 	at.testResources(response, defaultSA, anonymous, npd, namespaceController, "create", "update", "patch", "delete", sysEndpoints, podMetrics, pods, clusterRoles, deployments)
 

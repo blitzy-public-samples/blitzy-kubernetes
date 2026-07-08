@@ -481,6 +481,16 @@ ADVANCED_AUDIT_LOG_MODE=${ADVANCED_AUDIT_LOG_MODE:-batch} # batch, blocking
 # key material out-of-band; NEVER commit it (AAP §0.11). Storage migration per §6.2.3.3.
 # ENCRYPTION_PROVIDER_CONFIG=${ENCRYPTION_PROVIDER_CONFIG:-}
 
+# etcd transport hardening (AAP V8, tech-spec §6.2.4.6): mirror the hardened
+# default from config-default.sh for the test/CI profile so parity is preserved.
+# Fail CLOSED when etcd client credentials are absent rather than falling back to
+# plaintext http://127.0.0.1:2379; GCE test clusters provision etcd apiserver
+# certificates, so the mTLS branch in
+# configure-kubeapiserver.sh:configure-etcd-params is taken in practice. Local/dev
+# bootstraps that intentionally use plaintext loopback etcd must opt back in via
+# ETCD_APISERVER_ALLOW_INSECURE=true.
+ETCD_APISERVER_ALLOW_INSECURE=${ETCD_APISERVER_ALLOW_INSECURE:-false} # true, false
+
 ENABLE_BIG_CLUSTER_SUBNETS=${ENABLE_BIG_CLUSTER_SUBNETS:-false}
 
 # Optional: Enable log rotation for k8s services

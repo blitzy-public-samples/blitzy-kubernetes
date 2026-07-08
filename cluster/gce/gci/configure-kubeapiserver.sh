@@ -25,14 +25,19 @@ function configure-etcd-params {
       params_ref+=" --etcd-keyfile=${ETCD_APISERVER_CLIENT_KEY_PATH}"
   elif [[ -z "${ETCD_APISERVER_CA_KEY:-}" && -z "${ETCD_APISERVER_CA_CERT:-}" && -z "${ETCD_APISERVER_SERVER_KEY:-}" && -z "${ETCD_APISERVER_SERVER_CERT:-}" && -z "${ETCD_APISERVER_CLIENT_KEY:-}" && -z "${ETCD_APISERVER_CLIENT_CERT:-}" ]]; then
       # etcd access controls hardening (tech-spec §6.2.4.6, AAP V8): all etcd mTLS
-      # credentials are absent. Fail closed for hardened/production profiles, but keep
-      # the historical plaintext local/dev fallback available via an explicit opt-in
-      # (ETCD_APISERVER_ALLOW_INSECURE). NOTE: the default is intentionally permissive
-      # (:-true) to preserve backward compatibility for existing local/dev bootstraps
-      # AND the in-tree unit tests (apiserver_etcd_test.go / apiserver_kms_test.go),
-      # which invoke start-kube-apiserver without supplying etcd certs. Hardened
-      # deployments MUST set ETCD_APISERVER_ALLOW_INSECURE=false to enforce mTLS-only
-      # and reject this plaintext fallback.
+      # credentials are absent, so the API-server-to-etcd transport cannot be
+      # mutually authenticated. Hardened profiles FAIL CLOSED here: the GCE reference
+      # profiles set ETCD_APISERVER_ALLOW_INSECURE=false (cluster/gce/config-default.sh
+      # and config-test.sh) and propagate it through kube-env (cluster/gce/util.sh),
+      # so a real deployment missing etcd certs takes the else-branch below and
+      # aborts rather than talking plaintext to etcd. The plaintext loopback fallback
+      # is therefore DISABLED by default in every profile-driven deployment and is
+      # reachable ONLY when ETCD_APISERVER_ALLOW_INSECURE is explicitly "true".
+      # The function-local ":-true" default is NOT the intended production posture; it
+      # is a backward-compatibility shim for direct-invocation contexts that never load
+      # the GCE profiles — specifically the in-tree unit tests
+      # (apiserver_etcd_test.go / apiserver_kms_test.go), which call this function
+      # without supplying etcd certs or the hardened profile variables.
       if [[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]; then
           params_ref+=" --etcd-servers=${ETCD_SERVERS:-http://127.0.0.1:2379}"
           echo "WARNING: ALL of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, mTLS between etcd server and kube-apiserver is not enabled."

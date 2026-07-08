@@ -433,6 +433,18 @@ ADVANCED_AUDIT_LOG_MODE=${ADVANCED_AUDIT_LOG_MODE:-batch} # batch, blocking
 # re-encrypt existing Secrets follows enablement (tech-spec §6.2.3.3).
 # ENCRYPTION_PROVIDER_CONFIG=${ENCRYPTION_PROVIDER_CONFIG:-}
 
+# etcd transport hardening (AAP V8, tech-spec §6.2.4.6): the API-server-to-etcd
+# channel MUST be mutually authenticated over TLS. On this hardened reference
+# profile we fail CLOSED when etcd client credentials are absent — the API server
+# must NOT silently fall back to plaintext http://127.0.0.1:2379. GCE deployments
+# always provision etcd apiserver certificates (build-kube-master-certs in
+# cluster/gce/util.sh), so the mTLS branch in
+# configure-kubeapiserver.sh:configure-etcd-params is taken in practice and this
+# flag acts as a fail-closed safety net. Local/dev bootstraps that intentionally
+# run etcd over plaintext loopback must opt back in by exporting
+# ETCD_APISERVER_ALLOW_INSECURE=true before invoking the profile.
+ETCD_APISERVER_ALLOW_INSECURE=${ETCD_APISERVER_ALLOW_INSECURE:-false} # true, false
+
 # Indicates if the values (i.e. KUBE_USER and KUBE_PASSWORD for basic
 # authentication) in metadata should be treated as canonical, and therefore disk
 # copies ought to be recreated/clobbered.
