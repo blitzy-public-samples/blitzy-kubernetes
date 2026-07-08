@@ -100,6 +100,7 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 		pods            = resource("pods", "default")
 		podStatus       = resource("pods", "default", "", "status")
 		secrets         = resource("secrets", "default")
+		saTokens        = resource("serviceaccounts", "default", "", "token")
 		tokenReviews    = resource("tokenreviews", "", "authentication.k8s.io")
 		deployments     = resource("deployments", "default", "apps")
 		clusterRoles    = resource("clusterroles", "", "rbac.authorization.k8s.io")
@@ -128,11 +129,11 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	at.testResources(metadata, ingress, "get", configmaps)
 
 	at.testResources(none, kubelet, node, "get", nodes, nodeStatus)
-	// secrets are pinned to Metadata by create-master-audit-policy so that no secret
-	// payload is ever written to the audit log (tech-spec §6.4.6, AAP V6 / §0.6.3);
-	// sysConfigmaps also stays Metadata.
+	// secrets are raised from Metadata to Request by create-master-audit-policy per the V6
+	// mandate (tech-spec §6.4.6, AAP §0.6.3 / §0.5.1); a get carries no payload in the
+	// (omitted) response object, so read paths log no secret data. sysConfigmaps stays Metadata.
 	at.testResources(metadata, kubelet, node, "get", sysConfigmaps)
-	at.testResources(metadata, kubelet, node, "get", secrets)
+	at.testResources(request, kubelet, node, "get", secrets)
 	at.testResources(response, kubelet, node, "create", deployments, pods)
 
 	at.testResources(none, controller, scheduler, endpointController, "get", "update", sysEndpoints)
@@ -140,10 +141,12 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	at.testResources(response, controller, scheduler, endpointController, "update", endpoints)
 
 	at.testResources(none, apiserver, "get", namespaces, namespaceStatus, namespaceFinal)
-	// secrets audited at Metadata so create/update request bodies (.data/.stringData) and
-	// get responses are never logged (§6.4.6, AAP V6 / §0.6.3); sysConfigmaps also stays Metadata.
+	// secrets audited at Request per the V6 mandate (§6.4.6, AAP §0.6.3 / §0.5.1): Request
+	// records the request object but omits the response object, so get/list never log secret
+	// data; create/update log the request body (the accepted trade-off, AAP §0.2.4).
+	// sysConfigmaps stays Metadata.
 	at.testResources(metadata, apiserver, "get", "create", "update", sysConfigmaps)
-	at.testResources(metadata, apiserver, "get", "create", "update", secrets)
+	at.testResources(request, apiserver, "get", "create", "update", secrets)
 
 	at.testResources(none, autoscaler, "get", "update", sysConfigmaps, sysEndpoints)
 	at.testResources(metadata, autoscaler, "get", "update", configmaps)
@@ -160,10 +163,13 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 
 	at.testResources(request, namespaceController, "deletecollection", pods, namespaces)
 
-	// secrets, configmaps, sysConfigmaps and tokenReviews are all pinned to Metadata so no
-	// secret payload is ever logged (§6.4.6, AAP V6 / §0.6.3).
+	// configmaps, sysConfigmaps and tokenReviews remain Metadata (§6.4.6, AAP §0.6.3), while
+	// secrets and serviceaccounts/token are raised to Request per the V6 mandate (AAP §0.6.3 /
+	// §0.5.1). Request omits the response object, so a token's issued credential (response-only)
+	// and secret read payloads (response-only) are never written to the audit log.
 	at.testResources(metadata, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", configmaps, sysConfigmaps, tokenReviews)
-	at.testResources(metadata, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", secrets)
+	at.testResources(request, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", secrets)
+	at.testResources(request, defaultSA, apiserver, "create", saTokens)
 	at.testResources(request, defaultSA, anonymous, npd, namespaceController, "get", "list", "watch", sysEndpoints, podMetrics, pods, clusterRoles, deployments)
 	at.testResources(response, defaultSA, anonymous, npd, namespaceController, "create", "update", "patch", "delete", sysEndpoints, podMetrics, pods, clusterRoles, deployments)
 

@@ -100,13 +100,14 @@ rules:
     resources:
       - group: "apps"
         resources: ["deployments/scale"]
-  # AAP §6.6.10 / §0.8.1 (V6) + §6.4.6 / §0.6.3: Secrets are pinned to Metadata so that no
-  # secret payload (.data/.stringData in request bodies, decoded values in responses) is ever
-  # written to the audit log; Metadata is the highest level that records the operation without
-  # the payload. RBAC objects (roles/rolebindings) carry no secret material, so they stay at
-  # RequestResponse for full forensic detail.
-  - level: Metadata
-    namespaces: ["secret-audit-metadata"]
+  # AAP §6.6.10 / §0.8.1 (V6) + §6.4.6 / §0.6.3: Secrets are raised to Request so that Secret
+  # writes produce >= Request audit entries, restoring forensic detail on who mutated them.
+  # Request records the request object but omits the response object, so secret read responses
+  # are never logged; create/update request bodies carry .data (the explicitly accepted
+  # trade-off of Request over RequestResponse, AAP §0.2.4). RBAC objects (roles/rolebindings)
+  # carry no secret material, so they stay at RequestResponse for full forensic detail.
+  - level: Request
+    namespaces: ["secret-audit-request"]
     resources:
       - group: "" # core
         resources: ["secrets"]
@@ -798,21 +799,20 @@ func rbacOperations(t *testing.T, kubeclient clientset.Interface, namespace stri
 	expectNoError(t, err, "failed to delete audit-rolebinding")
 }
 
-// secretAuditMetadataEvents returns the expected audit events for Secret
-// create/update/delete at level Metadata. Secrets are pinned to Metadata (AAP
-// §0.6.3 / §0.2.4 / §0.1.1, V6) precisely so that NO secret payload is ever
-// written to the audit log: at LevelMetadata the API server records the request
-// metadata (who/what/when + object reference) but neither the request object nor
-// the response object, so both RequestObject and ResponseObject are false. A
-// create/update request body carries .data/.stringData and a get/list response
-// carries the decoded values, so any level above Metadata would leak the payload;
-// Metadata is the highest level that avoids it. runSensitiveResourceTestWithVersion
-// adds a targeted guard asserting that no Secret audit event ever carries a request
-// OR response object.
-func secretAuditMetadataEvents(namespace string) []utils.AuditEvent {
+// secretAuditRequestEvents returns the expected audit events for Secret
+// create/update/delete at level Request. Secrets are audited at Request per the V6
+// mandate (AAP §0.6.3 / §0.5.1 / §0.2.4): at LevelRequest the API server records the
+// request object but never the response object, so ResponseObject is always false. A
+// create/update/delete carries a request body, so RequestObject is true — logging that
+// request object on writes is the explicitly accepted trade-off of Request over
+// RequestResponse (which would additionally log the response body, doubling the exposure).
+// Read paths (get/list/watch) carry the payload only in the response, which Request omits,
+// so reads never log secret data. runSensitiveResourceTestWithVersion adds a targeted guard
+// asserting that no Secret audit event ever carries a response object.
+func secretAuditRequestEvents(namespace string) []utils.AuditEvent {
 	return []utils.AuditEvent{
 		{
-			Level:             auditinternal.LevelMetadata,
+			Level:             auditinternal.LevelRequest,
 			Stage:             auditinternal.StageResponseComplete,
 			RequestURI:        fmt.Sprintf("/api/v1/namespaces/%s/secrets", namespace),
 			Verb:              "create",
@@ -820,11 +820,11 @@ func secretAuditMetadataEvents(namespace string) []utils.AuditEvent {
 			User:              auditTestUser,
 			Resource:          "secrets",
 			Namespace:         namespace,
-			RequestObject:     false,
+			RequestObject:     true,
 			ResponseObject:    false,
 			AuthorizeDecision: "allow",
 		}, {
-			Level:             auditinternal.LevelMetadata,
+			Level:             auditinternal.LevelRequest,
 			Stage:             auditinternal.StageResponseComplete,
 			RequestURI:        fmt.Sprintf("/api/v1/namespaces/%s/secrets/audit-secret", namespace),
 			Verb:              "update",
@@ -832,11 +832,11 @@ func secretAuditMetadataEvents(namespace string) []utils.AuditEvent {
 			User:              auditTestUser,
 			Resource:          "secrets",
 			Namespace:         namespace,
-			RequestObject:     false,
+			RequestObject:     true,
 			ResponseObject:    false,
 			AuthorizeDecision: "allow",
 		}, {
-			Level:             auditinternal.LevelMetadata,
+			Level:             auditinternal.LevelRequest,
 			Stage:             auditinternal.StageResponseComplete,
 			RequestURI:        fmt.Sprintf("/api/v1/namespaces/%s/secrets/audit-secret", namespace),
 			Verb:              "delete",
@@ -844,7 +844,7 @@ func secretAuditMetadataEvents(namespace string) []utils.AuditEvent {
 			User:              auditTestUser,
 			Resource:          "secrets",
 			Namespace:         namespace,
-			RequestObject:     false,
+			RequestObject:     true,
 			ResponseObject:    false,
 			AuthorizeDecision: "allow",
 		},
@@ -935,8 +935,9 @@ func rbacAuditResponseEvents(namespace string) []utils.AuditEvent {
 }
 
 // TestAuditSensitiveResourceLevels verifies V6 audit fidelity on sensitive resources.
-// AAP §6.6.10 / §0.8.1 (V6) + §6.4.6 / §0.6.3: Secrets are pinned to Metadata so no secret
-// payload is logged, while RBAC objects stay at RequestResponse for full forensic detail.
+// AAP §6.6.10 / §0.8.1 (V6) + §6.4.6 / §0.6.3: Secrets are raised to Request (Secret writes
+// produce >= Request audit entries) while RBAC objects stay at RequestResponse for full
+// forensic detail.
 func TestAuditSensitiveResourceLevels(t *testing.T) {
 	for version := range versions {
 		runSensitiveResourceTestWithVersion(t, version)
@@ -987,10 +988,10 @@ func runSensitiveResourceTestWithVersion(t *testing.T, version string) {
 		expEvents []utils.AuditEvent
 	}{
 		{
-			name:      "secrets-metadata",
-			namespace: "secret-audit-metadata",
+			name:      "secrets-request",
+			namespace: "secret-audit-request",
 			ops:       secretOperations,
-			expEvents: secretAuditMetadataEvents("secret-audit-metadata"),
+			expEvents: secretAuditRequestEvents("secret-audit-request"),
 		},
 		{
 			name:      "rbac-response",
@@ -1030,18 +1031,18 @@ func runSensitiveResourceTestWithVersion(t *testing.T, version string) {
 				t.Fatalf("failed to get expected events -- missingReport: %s, error: %v", lastMissingReport, err)
 			}
 
-			// Confidentiality guard (AAP §0.6.3 / §0.2.4 / §0.1.1, V6): Secrets are
-			// audited at LevelMetadata, never Request or RequestResponse, precisely so
-			// that NO secret payload is ever written to the audit log — neither the
-			// request object (which carries .data/.stringData on create/update) nor the
-			// response object (which duplicates the Secret payload plus server-populated
-			// fields). Assert that invariant directly: no Secret audit event may carry a
-			// request OR a response object. This scans every logged Secret event (a
-			// superset of expEvents) so a future regression to Request or RequestResponse
-			// is caught even if the expected-events table were changed to match.
+			// Confidentiality guard (AAP §0.6.3 / §0.2.4 / §0.8.3, V6): Secrets are audited
+			// at LevelRequest, never RequestResponse, precisely so the API server's response
+			// body — which would duplicate the Secret payload plus server-populated fields —
+			// is never written to the audit log. Assert that invariant directly: no Secret
+			// audit event may carry a response object. This scans every logged Secret event
+			// (a superset of expEvents) so a future regression to RequestResponse is caught
+			// even if the expected-events table were changed to match. RequestObject remaining
+			// true on create/update is the explicitly accepted Request-over-RequestResponse
+			// trade-off (AAP §0.2.4), not a defect.
 			for _, e := range observedEvents {
-				if e.Resource == "secrets" && (e.RequestObject || e.ResponseObject) {
-					t.Errorf("secret audit event must not record a request or response object (would leak the secret payload above Metadata): %#v", e)
+				if e.Resource == "secrets" && e.ResponseObject {
+					t.Errorf("secret audit event must not record a response object (would leak the secret payload at RequestResponse): %#v", e)
 				}
 			}
 		})

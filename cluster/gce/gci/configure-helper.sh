@@ -1287,31 +1287,35 @@ rules:
     omitStages:
       - "RequestReceived"
 
-  # ServiceAccount token requests (serviceaccounts/token subresource) are raised to
-  # Request so the audit trail records who requested a token and the TokenRequest spec
-  # (audiences, expirationSeconds, boundObjectRef). This is safe and does NOT leak a
-  # credential: the issued bearer token is returned only in the RESPONSE object, and the
-  # Request level logs the request object but never the response object, so no token is
-  # written to the audit log (tech-spec §6.4.6 / AAP §0.2.4, V6).
+  # Secrets and ServiceAccount token requests (serviceaccounts/token subresource) are
+  # raised from Metadata to Request per AAP §0.6.3 / §0.5.1 / §0.1.3 / §0.2.4 (V6), which
+  # mandates raising the audit level on these sensitive resources to restore forensic
+  # detail on who accessed or mutated them.
+  #
+  # Request (NOT RequestResponse) is the balanced level the AAP selects: it records the
+  # request object but never the response object, which yields these properties:
+  #   - serviceaccounts/token: fully credential-safe — the issued bearer token is returned
+  #     only in the RESPONSE, which Request omits, so no token is ever written to the log.
+  #   - secrets: read paths (get/list/watch) carry the payload only in the RESPONSE, which
+  #     Request omits, so reads never log secret data. create/update REQUEST bodies do
+  #     carry .data/.stringData; logging that request object is the explicitly accepted
+  #     trade-off of Request over RequestResponse (RequestResponse would additionally log
+  #     the response body, doubling the exposure). See AAP §0.2.4 / §0.8.3 (V6).
+  # (tech-spec §6.4.6 / AAP §0.6.3, V6)
   - level: Request
     resources:
       - group: "" # core
-        resources: ["serviceaccounts/token"]
+        resources: ["secrets", "serviceaccounts/token"]
     omitStages:
       - "RequestReceived"
-  # Secrets, ConfigMaps and TokenReviews carry sensitive payloads and are pinned to
-  # Metadata. For Secrets specifically, create/update request bodies contain
-  # .data/.stringData and get/list responses contain the (base64-decoded) values, so any
-  # level above Metadata would write the secret payload into the audit log. Metadata is
-  # the HIGHEST audit level that still records the operation (who/what/when + object
-  # reference) WITHOUT logging any secret payload — the confidentiality-preserving choice
-  # mandated by AAP §0.6.3 ("restore forensic detail WITHOUT logging full secret
-  # payloads"). Request/RequestResponse are deliberately NOT used for these resources
-  # (tech-spec §6.4.6 / AAP §0.2.4, V6).
+  # ConfigMaps and TokenReviews can carry sensitive/binary data but are NOT part of the V6
+  # Secrets/ServiceAccount-token audit raise, so they remain pinned to Metadata — the
+  # highest level that records the operation without logging any payload
+  # (tech-spec §6.4.6 / AAP §0.6.3, V6).
   - level: Metadata
     resources:
       - group: "" # core
-        resources: ["secrets", "configmaps"]
+        resources: ["configmaps"]
       - group: authentication.k8s.io
         resources: ["tokenreviews"]
     omitStages:
