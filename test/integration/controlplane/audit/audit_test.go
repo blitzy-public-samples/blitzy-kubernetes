@@ -32,6 +32,7 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	apiv1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -99,6 +100,17 @@ rules:
     resources:
       - group: "apps"
         resources: ["deployments/scale"]
+  # AAP §6.6.10 / §0.8.1 (V6) + §6.4.6: raise Secrets/SA-token audit to >= Request; RBAC stays RequestResponse.
+  - level: Request
+    namespaces: ["secret-audit-request"]
+    resources:
+      - group: "" # core
+        resources: ["secrets"]
+  - level: RequestResponse
+    namespaces: ["rbac-audit-response"]
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["roles", "rolebindings"]
 
 `
 	nonAdmissionWebhookNamespace       = "no-webhook-namespace"
@@ -716,4 +728,224 @@ func createDeployment(t *testing.T, cs clientset.Interface, namespace string) *a
 	_, err := cs.AppsV1().Deployments(deploy.Namespace).Create(context.TODO(), deploy, metav1.CreateOptions{})
 	expectNoError(t, err, fmt.Sprintf("failed to create deployment %v", deploy))
 	return deploy
+}
+
+// secretOperations is a set of known operations performed on the secret type
+// which correspond to the expected V6 audit events. It performs create, get,
+// update and delete; the get is intentionally not asserted (CheckAuditLines
+// ignores unmatched log lines).
+func secretOperations(t *testing.T, kubeclient clientset.Interface, namespace string) {
+	secret := &apiv1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "audit-secret", Namespace: namespace},
+		Data:       map[string][]byte{"key": []byte("val")},
+	}
+	_, err := kubeclient.CoreV1().Secrets(namespace).Create(context.TODO(), secret, metav1.CreateOptions{})
+	expectNoError(t, err, "failed to create audit-secret")
+	_, err = kubeclient.CoreV1().Secrets(namespace).Get(context.TODO(), secret.Name, metav1.GetOptions{})
+	expectNoError(t, err, "failed to get audit-secret")
+	_, err = kubeclient.CoreV1().Secrets(namespace).Update(context.TODO(), secret, metav1.UpdateOptions{})
+	expectNoError(t, err, "failed to update audit-secret")
+	err = kubeclient.CoreV1().Secrets(namespace).Delete(context.TODO(), secret.Name, metav1.DeleteOptions{})
+	expectNoError(t, err, "failed to delete audit-secret")
+}
+
+// rbacOperations is a set of known operations performed on a namespaced RBAC
+// Role which correspond to the expected V6 audit events (create, update,
+// delete). It exercises the rbac.authorization.k8s.io API group.
+func rbacOperations(t *testing.T, kubeclient clientset.Interface, namespace string) {
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: "audit-role", Namespace: namespace},
+		Rules:      []rbacv1.PolicyRule{{Verbs: []string{"get"}, APIGroups: []string{""}, Resources: []string{"pods"}}},
+	}
+	_, err := kubeclient.RbacV1().Roles(namespace).Create(context.TODO(), role, metav1.CreateOptions{})
+	expectNoError(t, err, "failed to create audit-role")
+	_, err = kubeclient.RbacV1().Roles(namespace).Update(context.TODO(), role, metav1.UpdateOptions{})
+	expectNoError(t, err, "failed to update audit-role")
+	err = kubeclient.RbacV1().Roles(namespace).Delete(context.TODO(), role.Name, metav1.DeleteOptions{})
+	expectNoError(t, err, "failed to delete audit-role")
+}
+
+// secretAuditRequestEvents returns the expected audit events for Secret
+// create/update/delete at level Request (Secrets are audited at >= Request per
+// AAP §0.2.4; Request avoids writing secret payloads into audit logs, so
+// ResponseObject is false).
+func secretAuditRequestEvents(namespace string) []utils.AuditEvent {
+	return []utils.AuditEvent{
+		{
+			Level:             auditinternal.LevelRequest,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/api/v1/namespaces/%s/secrets", namespace),
+			Verb:              "create",
+			Code:              201,
+			User:              auditTestUser,
+			Resource:          "secrets",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    false,
+			AuthorizeDecision: "allow",
+		}, {
+			Level:             auditinternal.LevelRequest,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/api/v1/namespaces/%s/secrets/audit-secret", namespace),
+			Verb:              "update",
+			Code:              200,
+			User:              auditTestUser,
+			Resource:          "secrets",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    false,
+			AuthorizeDecision: "allow",
+		}, {
+			Level:             auditinternal.LevelRequest,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/api/v1/namespaces/%s/secrets/audit-secret", namespace),
+			Verb:              "delete",
+			Code:              200,
+			User:              auditTestUser,
+			Resource:          "secrets",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    false,
+			AuthorizeDecision: "allow",
+		},
+	}
+}
+
+// rbacAuditResponseEvents returns the expected audit events for RBAC Role
+// create/update/delete at level RequestResponse (RBAC objects mirror the
+// deployment config's known_apis RequestResponse behavior; ResponseObject is
+// true).
+func rbacAuditResponseEvents(namespace string) []utils.AuditEvent {
+	return []utils.AuditEvent{
+		{
+			Level:             auditinternal.LevelRequestResponse,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/roles", namespace),
+			Verb:              "create",
+			Code:              201,
+			User:              auditTestUser,
+			Resource:          "roles",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    true,
+			AuthorizeDecision: "allow",
+		}, {
+			Level:             auditinternal.LevelRequestResponse,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/roles/audit-role", namespace),
+			Verb:              "update",
+			Code:              200,
+			User:              auditTestUser,
+			Resource:          "roles",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    true,
+			AuthorizeDecision: "allow",
+		}, {
+			Level:             auditinternal.LevelRequestResponse,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/apis/rbac.authorization.k8s.io/v1/namespaces/%s/roles/audit-role", namespace),
+			Verb:              "delete",
+			Code:              200,
+			User:              auditTestUser,
+			Resource:          "roles",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    true,
+			AuthorizeDecision: "allow",
+		},
+	}
+}
+
+// TestAuditSensitiveResourceLevels verifies V6 audit fidelity on sensitive resources.
+// AAP §6.6.10 / §0.8.1 (V6) + §6.4.6: raise Secrets/SA-token audit to >= Request; RBAC stays RequestResponse.
+func TestAuditSensitiveResourceLevels(t *testing.T) {
+	for version := range versions {
+		runSensitiveResourceTestWithVersion(t, version)
+	}
+}
+
+func runSensitiveResourceTestWithVersion(t *testing.T, version string) {
+	// prepare audit policy file (reuses the extended auditPolicyPattern)
+	auditPolicy := strings.Replace(auditPolicyPattern, "{version}", version, 1)
+	policyFile, err := os.CreateTemp("", "audit-policy.yaml")
+	if err != nil {
+		t.Fatalf("Failed to create audit policy file: %v", err)
+	}
+	defer os.Remove(policyFile.Name())
+	if _, err := policyFile.Write([]byte(auditPolicy)); err != nil {
+		t.Fatalf("Failed to write audit policy file: %v", err)
+	}
+	if err := policyFile.Close(); err != nil {
+		t.Fatalf("Failed to close audit policy file: %v", err)
+	}
+
+	// prepare audit log file
+	logFile, err := os.CreateTemp("", "audit.log")
+	if err != nil {
+		t.Fatalf("Failed to create audit log file: %v", err)
+	}
+	defer utiltesting.CloseAndRemove(t, logFile)
+
+	// start api server (no mutating webhook needed for these plain namespaces)
+	result := kubeapiservertesting.StartTestServerOrDie(t, nil,
+		[]string{
+			"--audit-policy-file", policyFile.Name(),
+			"--audit-log-version", version,
+			"--audit-log-mode", "blocking",
+			"--audit-log-path", logFile.Name()},
+		framework.SharedEtcd())
+	defer result.TearDownFn()
+
+	kubeclient, err := clientset.NewForConfig(result.ClientConfig)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	sensitiveTestCases := []struct {
+		name      string
+		namespace string
+		ops       func(t *testing.T, kubeclient clientset.Interface, namespace string)
+		expEvents []utils.AuditEvent
+	}{
+		{
+			name:      "secrets-request",
+			namespace: "secret-audit-request",
+			ops:       secretOperations,
+			expEvents: secretAuditRequestEvents("secret-audit-request"),
+		},
+		{
+			name:      "rbac-response",
+			namespace: "rbac-audit-response",
+			ops:       rbacOperations,
+			expEvents: rbacAuditResponseEvents("rbac-audit-response"),
+		},
+	}
+
+	for _, tc := range sensitiveTestCases {
+		t.Run(fmt.Sprintf("%s.%s", version, tc.name), func(t *testing.T) {
+			var lastMissingReport string
+			createNamespace(t, kubeclient, tc.namespace)
+			if err := wait.Poll(500*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
+				tc.ops(t, kubeclient, tc.namespace)
+
+				stream, err := os.Open(logFile.Name())
+				if err != nil {
+					return false, fmt.Errorf("unexpected error: %v", err)
+				}
+				defer stream.Close()
+				missingReport, err := utils.CheckAuditLines(stream, tc.expEvents, versions[version])
+				if err != nil {
+					return false, fmt.Errorf("unexpected error: %v", err)
+				}
+				if len(missingReport.MissingEvents) > 0 {
+					lastMissingReport = missingReport.String()
+					return false, nil
+				}
+				return true, nil
+			}); err != nil {
+				t.Fatalf("failed to get expected events -- missingReport: %s, error: %v", lastMissingReport, err)
+			}
+		})
+	}
 }
