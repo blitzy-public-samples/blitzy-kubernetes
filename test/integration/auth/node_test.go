@@ -1581,3 +1581,107 @@ func deleteRBACRoleBinding(t *testing.T, rolebinding *rbacv1.RoleBinding, client
 
 	checkNilError(t, client.RbacV1().RoleBindings(rolebinding.Namespace).Delete(context.TODO(), rolebinding.Name, metav1.DeleteOptions{}))
 }
+
+// TestNodeRestrictionCrossNodeDenied verifies that with the NodeRestriction
+// admission plugin enabled and Node authorization active, a node identity
+// (system:node:node1) cannot modify another node's Node object nor read a Secret
+// unrelated to its own pods, while it retains access to its own Node object.
+// AAP §6.6.10 / §0.8.1 (V7): NodeRestriction confines each kubelet to its own
+// node's objects; a compromised node cannot touch node2's objects.
+func TestNodeRestrictionCrossNodeDenied(t *testing.T) {
+	const (
+		// Define credentials. Fake values for testing.
+		tokenMaster = "master-token"
+		tokenNode1  = "node1-token"
+		tokenNode2  = "node2-token"
+	)
+
+	tokenFile, err := os.CreateTemp("", "kubeconfig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenFile.WriteString(strings.Join([]string{
+		fmt.Sprintf(`%s,admin,uid1,"system:masters"`, tokenMaster),
+		fmt.Sprintf(`%s,system:node:node1,uid3,"system:nodes"`, tokenNode1),
+		fmt.Sprintf(`%s,system:node:node2,uid4,"system:nodes"`, tokenNode2),
+	}, "\n"))
+	tokenFile.Close()
+
+	// AAP §0.8.1 (V7): enable the NodeRestriction admission plugin together with
+	// Node authorization. The behavioral Forbidden results asserted below only hold
+	// while NodeRestriction admission is enforcing, which is the proof required by
+	// the V7 folder requirement (no need to introspect the server's plugin list).
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, []string{
+		"--authorization-mode", "Node,RBAC",
+		"--token-auth-file", tokenFile.Name(),
+		"--enable-admission-plugins", "NodeRestriction",
+		// The "default" SA is not installed, causing the ServiceAccount plugin to retry for ~1s per
+		// API request.
+		"--disable-admission-plugins", "ServiceAccount,TaintNodesByCondition",
+	}, framework.SharedEtcd())
+	defer server.TearDownFn()
+
+	// Build client config and clientsets. Only the superuser and node1 identities
+	// are referenced; node2's identity is defined in the token file above but a
+	// node2 clientset is intentionally not declared to avoid an unused local
+	// variable and keep the file gofmt/goimports clean.
+	clientConfig := server.ClientConfig
+	superuserClient, _ := clientsetForToken(tokenMaster, clientConfig)
+	node1Client, _ := clientsetForToken(tokenNode1, clientConfig)
+
+	// Seed objects as superuser. ORDER MATTERS: node2 MUST be created before
+	// asserting that node1 cannot modify it, otherwise the cross-node UpdateStatus
+	// returns NotFound instead of the deterministic Forbidden result the V7
+	// assertion requires (see TestNodeAuthorizer: NotFound at l508 before node2
+	// exists vs Forbidden at l538 after node2 exists).
+	if _, err := superuserClient.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := superuserClient.CoreV1().Nodes().Create(context.TODO(), &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := superuserClient.CoreV1().Nodes().Create(context.TODO(), &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node2"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := superuserClient.CoreV1().Secrets("ns").Create(context.TODO(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "unrelatedsecret"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// AAP §0.8.1 (V7): node1 must NOT modify node2's Node object. NodeRestriction
+	// confines create/update/patch of a Node to the node's own object, so node1's
+	// UpdateStatus on node2 is denied (Forbidden) now that node2 exists.
+	expectForbidden(t, func() error {
+		_, err := node1Client.CoreV1().Nodes().UpdateStatus(context.TODO(), &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node2"},
+			Status:     corev1.NodeStatus{},
+		}, metav1.UpdateOptions{})
+		return err
+	})
+
+	// AAP §0.8.1 (V7): node1 must NOT read a Secret unrelated to its own pods. The
+	// Node authorizer returns NoOpinion for a Secret not referenced by any of
+	// node1's pods and no RBAC grant exists for system:nodes, so the read is
+	// Forbidden.
+	expectForbidden(t, func() error {
+		_, err := node1Client.CoreV1().Secrets("ns").Get(context.TODO(), "unrelatedsecret", metav1.GetOptions{})
+		return err
+	})
+
+	// AAP §0.8.1 (V7): positive control — node1 MAY read its own Node object. This
+	// proves the denials above are targeted node-scoping enforced by NodeRestriction,
+	// not blanket failures.
+	expectAllowed(t, func() error {
+		_, err := node1Client.CoreV1().Nodes().Get(context.TODO(), "node1", metav1.GetOptions{})
+		return err
+	})
+
+	// AAP §0.8.1 (V7): positive control — node1 MAY update its OWN Node status;
+	// NodeRestriction permits a node to act on its own Node object.
+	expectAllowed(t, func() error {
+		_, err := node1Client.CoreV1().Nodes().UpdateStatus(context.TODO(), &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+			Status:     corev1.NodeStatus{},
+		}, metav1.UpdateOptions{})
+		return err
+	})
+}

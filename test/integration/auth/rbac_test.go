@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacapi "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1147,5 +1148,152 @@ func TestMonitoringURLs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// AAP §6.6.10 (V1): a rule is a full wildcard only when verbs, API groups, AND
+// resources are all "*", exactly matching ruleAllowAll (policy.go l314). This
+// deliberately excludes read-only broad grants like system:kube-controller-manager
+// (list/watch on */*), which are least-privilege and expected.
+func policyRuleIsFullWildcard(r rbacapi.PolicyRule) bool {
+	hasStar := func(s []string) bool {
+		for _, v := range s {
+			if v == "*" {
+				return true
+			}
+		}
+		return false
+	}
+	return hasStar(r.Verbs) && hasStar(r.APIGroups) && hasStar(r.Resources)
+}
+
+// TestRBACNoWildcardOutsideSystemMasters verifies that no identity outside the
+// system:masters group can resolve full wildcard authority (*/*/* — all verbs,
+// all API groups, all resources) against the bootstrapped RBAC policy.
+// AAP §6.6.10 / §0.8.1 (V1): least-privilege RBAC — no identity outside
+// system:masters resolves */*/* (all verbs/groups/resources).
+func TestRBACNoWildcardOutsideSystemMasters(t *testing.T) {
+	tCtx := ktesting.Init(t)
+	clientset, _, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
+		ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
+			opts.Authorization.Modes = []string{"RBAC"}
+		},
+	})
+	defer tearDownFn()
+
+	// Wait for the RBAC bootstrap policy to populate before asserting on it. This
+	// mirrors the Watch pattern in TestBootstrapping: block until the first
+	// ClusterRole Added event, then List and confirm cluster-admin is present.
+	watcher, err := clientset.RbacV1().ClusterRoles().Watch(tCtx, metav1.ListOptions{ResourceVersion: "0"})
+	if err != nil {
+		t.Fatalf("unexpected error establishing ClusterRoles watch: %v", err)
+	}
+	if _, err = watchtools.UntilWithoutRetry(tCtx, watcher, func(event watch.Event) (bool, error) {
+		if event.Type != watch.Added {
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("unexpected error waiting for ClusterRoles to populate: %v", err)
+	}
+
+	clusterRoles, err := clientset.RbacV1().ClusterRoles().List(tCtx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error listing ClusterRoles: %v", err)
+	}
+	if len(clusterRoles.Items) == 0 {
+		t.Fatalf("missing cluster roles; RBAC bootstrap did not populate")
+	}
+	foundClusterAdmin := false
+	for _, role := range clusterRoles.Items {
+		if role.Name == "cluster-admin" {
+			foundClusterAdmin = true
+			break
+		}
+	}
+	if !foundClusterAdmin {
+		t.Fatalf("missing cluster-admin ClusterRole; RBAC bootstrap incomplete: %v", clusterRoles)
+	}
+
+	// Strategy (a) — SubjectAccessReview: the authoritative runtime authorization
+	// check. Uses the superuser (loopback) clientset to evaluate what a given
+	// identity would be permitted, without granting that identity anything.
+	//
+	// AAP §0.8.1 (V1): a non-master identity must NOT resolve */*/*.
+	denied := &authorizationv1.SubjectAccessReview{
+		Spec: authorizationv1.SubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationv1.ResourceAttributes{Verb: "*", Group: "*", Resource: "*"},
+			User:               "system:serviceaccount:default:default",
+			Groups:             []string{"system:authenticated", "system:serviceaccounts", "system:serviceaccounts:default"},
+		},
+	}
+	deniedResp, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(tCtx, denied, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error creating negative SubjectAccessReview: %v", err)
+	}
+	if deniedResp.Status.Allowed {
+		t.Errorf("privilege-escalation finding (AAP §0.8.1 V1): non-master identity %q resolved full wildcard */*/* (Allowed=true); least-privilege RBAC requires denial", denied.Spec.User)
+	}
+
+	// Positive control: system:masters MUST be allowed */*/*, proving both that
+	// the SAR machinery works and that the cluster-admin→system:masters grant is
+	// intact. If this fails, the test setup is broken (not a security finding).
+	allowed := &authorizationv1.SubjectAccessReview{
+		Spec: authorizationv1.SubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationv1.ResourceAttributes{Verb: "*", Group: "*", Resource: "*"},
+			User:               "admin",
+			Groups:             []string{"system:masters", "system:authenticated"},
+		},
+	}
+	allowedResp, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(tCtx, allowed, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error creating positive-control SubjectAccessReview: %v", err)
+	}
+	if !allowedResp.Status.Allowed {
+		t.Fatalf("test setup broken: system:masters identity was denied full wildcard */*/* (Allowed=false); the cluster-admin→system:masters grant is missing")
+	}
+
+	// Strategy (b) — Bootstrap-binding enumeration: corroborates the AAP §0.3.2
+	// evidence that bootstrappolicy/policy.go declares a full */*/* rule
+	// (NewRule("*").Groups("*").Resources("*"), l314) only in the cluster-admin
+	// ClusterRole (l312), and binds it (l681) solely to the system:masters group
+	// (user.SystemPrivilegedGroup). Any deviation is the V1 vulnerability.
+	fullWildcardRoles := map[string]bool{}
+	for _, role := range clusterRoles.Items {
+		for _, rule := range role.Rules {
+			if policyRuleIsFullWildcard(rule) {
+				fullWildcardRoles[role.Name] = true
+				break
+			}
+		}
+	}
+	// The only ClusterRole permitted to carry a full */*/* rule is cluster-admin.
+	if !fullWildcardRoles["cluster-admin"] {
+		t.Errorf("expected the cluster-admin ClusterRole to carry a full */*/* rule; full-wildcard roles found: %v", fullWildcardRoles)
+	}
+	for name := range fullWildcardRoles {
+		if name != "cluster-admin" {
+			t.Errorf("V1 finding (AAP §0.8.1): ClusterRole %q carries a full */*/* wildcard rule outside cluster-admin; least-privilege RBAC requires none", name)
+		}
+	}
+
+	// Every ClusterRoleBinding that references a full-wildcard role must bind it
+	// ONLY to the system:masters group; any other subject is a V1 finding.
+	clusterRoleBindings, err := clientset.RbacV1().ClusterRoleBindings().List(tCtx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error listing ClusterRoleBindings: %v", err)
+	}
+	for _, binding := range clusterRoleBindings.Items {
+		if !fullWildcardRoles[binding.RoleRef.Name] {
+			continue
+		}
+		if binding.RoleRef.Name != "cluster-admin" {
+			t.Errorf("V1 finding (AAP §0.8.1): ClusterRoleBinding %q binds full-wildcard role %q (only cluster-admin may carry */*/*)", binding.Name, binding.RoleRef.Name)
+		}
+		for _, subject := range binding.Subjects {
+			if subject.Kind != rbacapi.GroupKind || subject.Name != user.SystemPrivilegedGroup {
+				t.Errorf("V1 finding (AAP §0.8.1): ClusterRoleBinding %q grants full-wildcard role %q to subject %s/%q outside %q; least-privilege RBAC requires binding full wildcard only to the system:masters group", binding.Name, binding.RoleRef.Name, subject.Kind, subject.Name, user.SystemPrivilegedGroup)
+			}
+		}
 	}
 }

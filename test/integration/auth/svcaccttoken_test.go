@@ -1423,3 +1423,80 @@ func (r *recordingWarningHandler) assertEqual(t *testing.T, expected []string) {
 		t.Errorf("expected\n\t%v\ngot\n\t%v", expected, r.warnings)
 	}
 }
+
+// TestServiceAccountTokenBoundAndAudienced verifies (read-only) that projected
+// ServiceAccount tokens issued via the TokenRequest API are audience-bound and
+// time-bound, and that the kubernetes.io claim shape is unchanged. This asserts
+// existing hygiene — it does NOT modify token/claim generation.
+// AAP §6.6.10 / §0.8.1 (V4): token hygiene — verify projected tokens are
+// audience-bound + time-bound; claim shape UNCHANGED. VERIFY ONLY.
+func TestServiceAccountTokenBoundAndAudienced(t *testing.T) {
+	const iss = "https://foo.bar.example.com"
+	aud := authenticator.Audiences{"api"}
+
+	tCtx := ktesting.Init(t)
+	kubeClient, _, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
+		ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
+			// Disable ServiceAccount admission plugin (no serviceaccount controller runs in tests).
+			opts.Admission.GenericAdmission.DisablePlugins = []string{"ServiceAccount"}
+			opts.Authorization.Modes = []string{"AlwaysAllow"}
+			opts.Authentication.ServiceAccounts.JWKSURI = "https:///openid/v1/jwks"
+			opts.Authentication.ServiceAccounts.Issuers = []string{iss}
+			opts.Authentication.APIAudiences = aud
+		},
+		ModifyServerConfig: func(config *controlplane.Config) {
+			// Allow the requested 3600s expiration (must be <= max). ExtendExpiration left false
+			// so the token exp reflects the requested TTL directly (verify-only determinism).
+			config.ControlPlane.Extra.ServiceAccountMaxExpiration = 2 * time.Hour
+		},
+	})
+	defer tearDownFn()
+
+	ns := framework.CreateNamespaceOrDie(kubeClient, "myns-v4", t)
+	defer framework.DeleteNamespaceOrDie(kubeClient, ns, t)
+
+	sa := &v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-svcacct", Namespace: ns.Name},
+	}
+	sa, delSvcAcct := createDeleteSvcAcct(t, kubeClient, sa)
+	defer delSvcAcct()
+
+	// AAP §0.8.1 (V4): request an audience-bound, time-bound token (TTL 3600s < 2h max).
+	treq := &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{
+			Audiences:         []string{"api"},
+			ExpirationSeconds: ptr.To(int64(3600)),
+		},
+	}
+	treq, err := kubeClient.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create token: %v", err)
+	}
+	token := treq.Status.Token
+	if token == "" {
+		t.Fatalf("expected a non-empty projected token")
+	}
+
+	// (1) Audience-bound: aud claim == ["api"].
+	checkPayload(t, token, `["api"]`, "aud")
+
+	// (2) Time-bound: exp claim present and strictly in the future (robust to any extension policy).
+	exp, err := strconv.ParseInt(getSubObject(t, getPayload(t, token), "exp"), 10, 64)
+	if err != nil {
+		t.Fatalf("error parsing exp claim: %v", err)
+	}
+	if exp <= time.Now().Unix() {
+		t.Errorf("expected exp claim in the future, got exp=%d now=%d", exp, time.Now().Unix())
+	}
+	// The returned request spec echoes the requested TTL.
+	checkExpiration(t, treq, 3600)
+
+	// (3) Claim shape UNCHANGED — assert the canonical sub + kubernetes.io claims exactly as
+	// TestServiceAccountTokenCreate does (l281-286). Build expected values from ns/sa names.
+	checkPayload(t, token, fmt.Sprintf("%q", "system:serviceaccount:"+ns.Name+":"+sa.Name), "sub")
+	checkPayload(t, token, fmt.Sprintf("%q", ns.Name), "kubernetes.io", "namespace")
+	checkPayload(t, token, fmt.Sprintf("%q", sa.Name), "kubernetes.io", "serviceaccount", "name")
+	// Not pod/secret-bound in this request → those sub-claims are null (same as l283-284).
+	checkPayload(t, token, "null", "kubernetes.io", "pod")
+	checkPayload(t, token, "null", "kubernetes.io", "secret")
+}

@@ -48,6 +48,7 @@ import (
 	podsecurityconfigloader "k8s.io/pod-security-admission/admission/api/load"
 	podsecurityserver "k8s.io/pod-security-admission/cmd/webhook/server"
 	podsecuritytest "k8s.io/pod-security-admission/test"
+	"k8s.io/utils/ptr"
 )
 
 func TestPodSecurity(t *testing.T) {
@@ -350,5 +351,107 @@ func validateMetrics(t *testing.T, rawMetrics []byte) {
 	if err := testutil.ValidateMetrics(metrics, "pod_security_exemptions_total",
 		"request_operation", "resource", "subresource"); err != nil {
 		t.Errorf("Metric validation failed: %v", err)
+	}
+}
+
+// TestPodSecurityEnforceBaselineRejectsPrivileged verifies runtime Pod Security
+// enforcement: a namespace labeled enforce=baseline rejects privileged/hostPID
+// pods at admission, while a namespace labeled warn=restricted (enforce left at
+// the cluster default) admits a restricted-violating pod but surfaces a warning.
+// AAP §6.6.10 / §0.8.1 (V2) + §6.4.4.3: Pod Security enforcement — enforce=baseline
+// rejects privileged/hostPID pods; warn=restricted admits but warns.
+func TestPodSecurityEnforceBaselineRejectsPrivileged(t *testing.T) {
+	server := startPodSecurityServer(t)
+	client := kubernetes.NewForConfigOrDie(server.ClientConfig)
+
+	// makeNS creates a labeled namespace and its "default" ServiceAccount using the
+	// superuser client. kubeapiservertesting starts only the API server (no
+	// controllers), so the "default" ServiceAccount is not auto-created; the
+	// ServiceAccount admission plugin is enabled in startPodSecurityServer, so pod
+	// creation would otherwise fail with a non-Forbidden error before ever reaching
+	// the PodSecurity plugin. Creating the SA up front (mirroring
+	// staging/src/k8s.io/pod-security-admission/test/run.go l229-234) ensures any
+	// rejection below is genuinely a PodSecurity Forbidden, not a ServiceAccount error.
+	makeNS := func(name string, labels map[string]string) {
+		t.Helper()
+		if _, err := client.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("failed creating namespace %s: %v", name, err)
+		}
+		if _, err := client.CoreV1().ServiceAccounts(name).Create(context.TODO(), &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("failed creating default serviceaccount in %s: %v", name, err)
+		}
+	}
+
+	// AAP §0.8.1 (V2): enforce=baseline must reject privileged and hostPID pods.
+	// The enforce=baseline label matches the cluster config default emitted by
+	// configure-helper.sh. DryRun creates run the full admission chain (PodSecurity
+	// enforce rejection) but persist nothing, keeping framework.SharedEtcd() clean.
+	const enforceNS = "psa-enforce-baseline"
+	makeNS(enforceNS, map[string]string{"pod-security.kubernetes.io/enforce": "baseline"})
+
+	privilegedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "privileged-pod"},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: "default",
+			Containers: []corev1.Container{{
+				Name:            "c",
+				Image:           "busybox",
+				SecurityContext: &corev1.SecurityContext{Privileged: ptr.To(true)},
+			}},
+		},
+	}
+	if _, err := client.CoreV1().Pods(enforceNS).Create(context.TODO(), privilegedPod, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}); !apierrors.IsForbidden(err) {
+		t.Errorf("expected privileged pod to be rejected by enforce=baseline with Forbidden, got err=%v", err)
+	}
+
+	hostPIDPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "hostpid-pod"},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: "default",
+			HostPID:            true,
+			Containers:         []corev1.Container{{Name: "c", Image: "busybox"}},
+		},
+	}
+	if _, err := client.CoreV1().Pods(enforceNS).Create(context.TODO(), hostPIDPod, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}); !apierrors.IsForbidden(err) {
+		t.Errorf("expected hostPID pod to be rejected by enforce=baseline with Forbidden, got err=%v", err)
+	}
+
+	// AAP §0.8.1 (V2): warn=restricted admits a restricted-violating (but baseline-compliant)
+	// pod because enforce is left at the cluster default (privileged) — startPodSecurityServer
+	// passes no --admission-control-config-file, and unset PSA levels default to privileged per
+	// staging/src/k8s.io/pod-security-admission/admission/api/v1/defaults.go — yet it surfaces a warning.
+	const warnNS = "psa-warn-restricted"
+	makeNS(warnNS, map[string]string{"pod-security.kubernetes.io/warn": "restricted"})
+
+	// Build a warning-capturing client by reusing the package-local recordingWarningHandler
+	// (defined in svcaccttoken_test.go); it implements rest.WarningHandler.
+	warnHandler := &recordingWarningHandler{}
+	warnCfg := rest.CopyConfig(server.ClientConfig)
+	warnCfg.WarningHandler = warnHandler
+	warnClient := kubernetes.NewForConfigOrDie(warnCfg)
+
+	// A plain pod (no securityContext) violates the restricted profile (missing runAsNonRoot,
+	// seccompProfile, drop-ALL caps, allowPrivilegeEscalation=false) but complies with baseline.
+	warnPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "warn-pod"},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: "default",
+			Containers:         []corev1.Container{{Name: "c", Image: "busybox"}},
+		},
+	}
+	warnHandler.clear()
+	if _, err := warnClient.CoreV1().Pods(warnNS).Create(context.TODO(), warnPod, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}); err != nil {
+		t.Errorf("expected restricted-violating pod to be admitted under warn=restricted (enforce=privileged default), got err=%v", err)
+	}
+	// Read the captured warnings under the embedded mutex (satisfies -race).
+	warnHandler.Lock()
+	gotWarnings := len(warnHandler.warnings)
+	warnHandler.Unlock()
+	if gotWarnings == 0 {
+		t.Errorf("expected at least one Pod Security warning under warn=restricted, got none")
 	}
 }
