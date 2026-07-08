@@ -1,0 +1,79 @@
+# Copyright The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# =============================================================================
+# Pod Security Standards (PSS) namespace labels — V2 remediation
+# Technical Specification: 6.4.4.3 (Pod Security modes / zero-downtime rollout)
+# =============================================================================
+#
+# WHAT: Declarative Pod Security Admission (PSA) labels that pin the per-namespace
+#   enforcement posture for workload namespaces. This manifest COMPLEMENTS the
+#   cluster-level `PodSecurity` admission defaults added to the generated
+#   admission_controller_config.yaml (see cluster/gce/gci/configure-helper.sh),
+#   which sets cluster defaults enforce=baseline, warn=restricted, audit=restricted
+#   and exempts namespaces: ["kube-system"]. The label keys/values below match the
+#   constants in staging/src/k8s.io/pod-security-admission/api/constants.go
+#   (prefix pod-security.kubernetes.io/; levels privileged|baseline|restricted).
+#
+# WHY: Kubernetes namespaces default to the `privileged` PSS profile, accepting
+#   privileged / breakout-prone pods. Labeling workload namespaces with a
+#   non-privileged posture rejects such pods at the API boundary. (Ref 6.4.4.3)
+#
+# ROLLOUT (ZERO-DOWNTIME — Ref 6.4.4.3): Roll out `warn` and `audit` BEFORE
+#   `enforce`. First apply this manifest with the `enforce` label commented out
+#   (or set to `privileged`) while `warn=restricted`/`audit=restricted` are active;
+#   review emitted warnings and audit annotations for violations; fix any
+#   non-compliant workloads; THEN enable `enforce: baseline` (shown below).
+#   Introducing `enforce` only after a warn/audit soak avoids rejecting running
+#   workloads.
+#
+# VERSION PINNING (Ref 6.4.4.3): Pin `enforce-version` to your cluster's exact
+#   minor (e.g. "v1.34") in production to prevent silent policy drift when the
+#   control plane is upgraded. "latest" is used here for portability.
+#
+# IDEMPOTENT: `kubectl apply -f cluster/manifests/namespace-pss-labels.yaml` is
+#   safe to re-run; it only sets labels on already-existing namespaces.
+# =============================================================================
+---
+# Primary built-in workload namespace.
+# Apply this SAME label block to EVERY additional workload namespace you create
+# (copy this object and change metadata.name), e.g. your application namespaces.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+  labels:
+    # enforce (blocking): enable ONLY after a warn/audit soak (Ref 6.4.4.3).
+    pod-security.kubernetes.io/enforce: baseline
+    # Pin to the cluster minor (e.g. "v1.34") in production to prevent policy
+    # drift on upgrade; "latest" shown for portability. (Ref 6.4.4.3)
+    pod-security.kubernetes.io/enforce-version: latest
+    # warn (advisory to the API caller):
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    # audit (records violations in the audit log):
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+# DOCUMENTED EXEMPTION (Ref 6.4.4.3): kube-system is kept at the `privileged`
+# posture because control-plane components require elevated access. This mirrors
+# the exemptions.namespaces: ["kube-system"] entry in the cluster-level
+# PodSecurityConfiguration. Do NOT tighten kube-system to baseline/restricted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest

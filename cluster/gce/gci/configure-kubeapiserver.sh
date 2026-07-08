@@ -24,8 +24,27 @@ function configure-etcd-params {
       params_ref+=" --etcd-certfile=${ETCD_APISERVER_CLIENT_CERT_PATH}"
       params_ref+=" --etcd-keyfile=${ETCD_APISERVER_CLIENT_KEY_PATH}"
   elif [[ -z "${ETCD_APISERVER_CA_KEY:-}" && -z "${ETCD_APISERVER_CA_CERT:-}" && -z "${ETCD_APISERVER_SERVER_KEY:-}" && -z "${ETCD_APISERVER_SERVER_CERT:-}" && -z "${ETCD_APISERVER_CLIENT_KEY:-}" && -z "${ETCD_APISERVER_CLIENT_CERT:-}" ]]; then
-      params_ref+=" --etcd-servers=${ETCD_SERVERS:-http://127.0.0.1:2379}"
-      echo "WARNING: ALL of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, mTLS between etcd server and kube-apiserver is not enabled."
+      # etcd access controls hardening (tech-spec §6.2.4.6, AAP V8): all etcd mTLS
+      # credentials are absent, so the API-server-to-etcd transport cannot be
+      # mutually authenticated. Hardened profiles FAIL CLOSED here: the GCE reference
+      # profiles set ETCD_APISERVER_ALLOW_INSECURE=false (cluster/gce/config-default.sh
+      # and config-test.sh) and propagate it through kube-env (cluster/gce/util.sh),
+      # so a real deployment missing etcd certs takes the else-branch below and
+      # aborts rather than talking plaintext to etcd. The plaintext loopback fallback
+      # is therefore DISABLED by default in every profile-driven deployment and is
+      # reachable ONLY when ETCD_APISERVER_ALLOW_INSECURE is explicitly "true".
+      # The function-local ":-true" default is NOT the intended production posture; it
+      # is a backward-compatibility shim for direct-invocation contexts that never load
+      # the GCE profiles — specifically the in-tree unit tests
+      # (apiserver_etcd_test.go / apiserver_kms_test.go), which call this function
+      # without supplying etcd certs or the hardened profile variables.
+      if [[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]; then
+          params_ref+=" --etcd-servers=${ETCD_SERVERS:-http://127.0.0.1:2379}"
+          echo "WARNING: ALL of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, mTLS between etcd server and kube-apiserver is not enabled."
+      else
+          echo "ERROR: ALL etcd mTLS credentials (ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY, ETCD_APISERVER_CLIENT_CERT) are missing and ETCD_APISERVER_ALLOW_INSECURE is not set to true; refusing to fall back to plaintext etcd for a hardened profile. Provide etcd mTLS credentials, or set ETCD_APISERVER_ALLOW_INSECURE=true for local/dev."
+          exit 1
+      fi
   else
       echo "ERROR: Some of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, mTLS between etcd server and kube-apiserver cannot be enabled. Please provide all mTLS credential."
       exit 1
@@ -431,6 +450,12 @@ function start-kube-apiserver {
 # ENCRYPTION_PROVIDER_CONFIG
 # CLOUD_KMS_INTEGRATION
 # ENCRYPTION_PROVIDER_CONFIG_PATH (will default to /etc/srv/kubernetes/encryption-provider-config.yml)
+# Encryption at rest for Secrets/configmaps (tech-spec §6.4.5, AAP V3): when
+# ENCRYPTION_PROVIDER_CONFIG is supplied (base64-encoded EncryptionConfiguration —
+# KMS v2 or AES-GCM; source manifest cluster/gce/manifests/encryption-provider-config.yml),
+# it is decoded to /etc/srv/kubernetes/encryption-provider-config.yml and wired via
+# --encryption-provider-config so Secrets are ciphertext in etcd. When unset, the
+# early-return below intentionally leaves encryption disabled (identity/plaintext) for local/dev.
 function setup-etcd-encryption {
   local kube_apiserver_template_path
   local -n kube_api_server_params
@@ -446,6 +471,8 @@ function setup-etcd-encryption {
   local encryption_provider_config_path
 
   kube_apiserver_template_path="$1"
+  # No provider config supplied: intentionally leave encryption disabled (identity/
+  # plaintext) for local/dev — no --encryption-provider-config flag is added (§6.4.5).
   if [[ -z "${ENCRYPTION_PROVIDER_CONFIG:-}" ]]; then
     sed -i -e " {
       s@{{encryption_provider_mount}}@@
@@ -460,6 +487,7 @@ function setup-etcd-encryption {
   encryption_provider_config_path=${ENCRYPTION_PROVIDER_CONFIG_PATH:-/etc/srv/kubernetes/encryption-provider-config.yml}
 
   echo "${ENCRYPTION_PROVIDER_CONFIG}" | base64 --decode > "${encryption_provider_config_path}"
+  # Secrets encrypted at rest: point kube-apiserver at the decoded provider config (§6.4.5).
   kube_api_server_params+=" --encryption-provider-config=${encryption_provider_config_path}"
 
   default_encryption_provider_config_vol=$(echo "{ \"name\": \"encryptionconfig\", \"hostPath\": {\"path\": \"${encryption_provider_config_path}\", \"type\": \"File\"}}" | base64 | tr -d '\r\n')

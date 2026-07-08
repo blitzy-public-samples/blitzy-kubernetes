@@ -39,6 +39,13 @@ func init() {
 	auditinstall.Install(auditpkg.Scheme)
 }
 
+// TestCreateMasterAuditPolicy verifies the audit policy emitted by
+// create-master-audit-policy assigns the intended audit level per (user, verb,
+// resource) — most importantly the V6 sensitive-resource levels.
+// AAP §6.6.10 / §0.8.1 (V6) + §6.4.6 / §0.6.3: Secrets and ServiceAccount-token
+// operations are raised to Request (forensic coverage without logging response
+// payloads, the Request-over-RequestResponse trade-off), configmaps and
+// tokenreviews stay at Metadata, and RBAC objects stay at RequestResponse.
 func TestCreateMasterAuditPolicy(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "configure-helper-test") // cleaned up by c.tearDown()
 	require.NoError(t, err, "Failed to create temp directory")
@@ -100,6 +107,7 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 		pods            = resource("pods", "default")
 		podStatus       = resource("pods", "default", "", "status")
 		secrets         = resource("secrets", "default")
+		saTokens        = resource("serviceaccounts", "default", "", "token")
 		tokenReviews    = resource("tokenreviews", "", "authentication.k8s.io")
 		deployments     = resource("deployments", "default", "apps")
 		clusterRoles    = resource("clusterroles", "", "rbac.authorization.k8s.io")
@@ -128,7 +136,11 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	at.testResources(metadata, ingress, "get", configmaps)
 
 	at.testResources(none, kubelet, node, "get", nodes, nodeStatus)
-	at.testResources(metadata, kubelet, node, "get", sysConfigmaps, secrets)
+	// secrets are raised from Metadata to Request by create-master-audit-policy per the V6
+	// mandate (tech-spec §6.4.6, AAP §0.6.3 / §0.5.1); a get carries no payload in the
+	// (omitted) response object, so read paths log no secret data. sysConfigmaps stays Metadata.
+	at.testResources(metadata, kubelet, node, "get", sysConfigmaps)
+	at.testResources(request, kubelet, node, "get", secrets)
 	at.testResources(response, kubelet, node, "create", deployments, pods)
 
 	at.testResources(none, controller, scheduler, endpointController, "get", "update", sysEndpoints)
@@ -136,7 +148,12 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	at.testResources(response, controller, scheduler, endpointController, "update", endpoints)
 
 	at.testResources(none, apiserver, "get", namespaces, namespaceStatus, namespaceFinal)
-	at.testResources(metadata, apiserver, "get", "create", "update", sysConfigmaps, secrets)
+	// secrets audited at Request per the V6 mandate (§6.4.6, AAP §0.6.3 / §0.5.1): Request
+	// records the request object but omits the response object, so get/list never log secret
+	// data; create/update log the request body (the accepted trade-off, AAP §0.2.4).
+	// sysConfigmaps stays Metadata.
+	at.testResources(metadata, apiserver, "get", "create", "update", sysConfigmaps)
+	at.testResources(request, apiserver, "get", "create", "update", secrets)
 
 	at.testResources(none, autoscaler, "get", "update", sysConfigmaps, sysEndpoints)
 	at.testResources(metadata, autoscaler, "get", "update", configmaps)
@@ -153,7 +170,13 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 
 	at.testResources(request, namespaceController, "deletecollection", pods, namespaces)
 
-	at.testResources(metadata, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", secrets, configmaps, sysConfigmaps, tokenReviews)
+	// configmaps, sysConfigmaps and tokenReviews remain Metadata (§6.4.6, AAP §0.6.3), while
+	// secrets and serviceaccounts/token are raised to Request per the V6 mandate (AAP §0.6.3 /
+	// §0.5.1). Request omits the response object, so a token's issued credential (response-only)
+	// and secret read payloads (response-only) are never written to the audit log.
+	at.testResources(metadata, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", configmaps, sysConfigmaps, tokenReviews)
+	at.testResources(request, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", secrets)
+	at.testResources(request, defaultSA, apiserver, "create", saTokens)
 	at.testResources(request, defaultSA, anonymous, npd, namespaceController, "get", "list", "watch", sysEndpoints, podMetrics, pods, clusterRoles, deployments)
 	at.testResources(response, defaultSA, anonymous, npd, namespaceController, "create", "update", "patch", "delete", sysEndpoints, podMetrics, pods, clusterRoles, deployments)
 

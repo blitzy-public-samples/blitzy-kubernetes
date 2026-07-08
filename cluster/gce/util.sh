@@ -1159,6 +1159,13 @@ KUBE_PROXY_MODE: $(yaml-quote "${KUBE_PROXY_MODE:-iptables}")
 DETECT_LOCAL_MODE: $(yaml-quote "${DETECT_LOCAL_MODE:-}")
 NODE_PROBLEM_DETECTOR_TOKEN: $(yaml-quote "${NODE_PROBLEM_DETECTOR_TOKEN:-}")
 ADMISSION_CONTROL: $(yaml-quote "${ADMISSION_CONTROL:-}")
+# etcd transport hardening (AAP V8, tech-spec §6.2.4.6): forward the fail-closed etcd
+# insecure toggle to the node through kube-env; consumed by
+# configure-kubeapiserver.sh:configure-etcd-params. Fail CLOSED (=false) so the API
+# server never silently falls back to plaintext http://127.0.0.1:2379 when etcd
+# client certificates are absent (§6.2.4.6). This YAML comment is ignored by the
+# node-side kube-env parser (configure.sh: yaml.load, BaseLoader).
+ETCD_APISERVER_ALLOW_INSECURE: $(yaml-quote "${ETCD_APISERVER_ALLOW_INSECURE:-}")
 MASTER_IP_RANGE: $(yaml-quote "${MASTER_IP_RANGE}")
 RUNTIME_CONFIG: $(yaml-quote "${RUNTIME_CONFIG}")
 CA_CERT: $(yaml-quote "${CA_CERT_BASE64:-}")

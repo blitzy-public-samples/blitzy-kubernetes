@@ -1063,9 +1063,11 @@ EOF
   fi
 
   if [[ -n "${ADMISSION_CONTROL:-}" ]]; then
-    # Emit a basic admission control configuration file, with no plugins specified.
+    # Emit the admission control configuration file using the stable
+    # apiserver.config.k8s.io/v1 AdmissionConfiguration envelope, which is required to
+    # host the PodSecurity plugin block appended below (tech-spec §6.4.4.3 / AAP §0.4.1, V2).
     cat <<EOF >/etc/srv/kubernetes/admission_controller_config.yaml
-apiVersion: apiserver.k8s.io/v1alpha1
+apiVersion: apiserver.config.k8s.io/v1
 kind: AdmissionConfiguration
 plugins:
 EOF
@@ -1082,6 +1084,29 @@ EOF
       - scopeName: PriorityClass
         operator: In
         values: ["system-node-critical", "system-cluster-critical"]
+EOF
+
+    # Pod Security admission (tech-spec §6.4.4.3, AAP V2): enforce a non-privileged Pod
+    # Security Standard cluster-wide. PodSecurityConfiguration defaults every mode to
+    # "privileged" when unset (staging/src/k8s.io/pod-security-admission/admission/api/v1/defaults.go),
+    # so this block is explicit. Roll out warn/audit=restricted before enforce=baseline to
+    # avoid rejecting running workloads; kube-system keeps the documented privileged exemption.
+    cat <<EOF >>/etc/srv/kubernetes/admission_controller_config.yaml
+- name: "PodSecurity"
+  configuration:
+    apiVersion: pod-security.admission.config.k8s.io/v1
+    kind: PodSecurityConfiguration
+    defaults:
+      enforce: "baseline"
+      enforce-version: "latest"
+      warn: "restricted"
+      warn-version: "latest"
+      audit: "restricted"
+      audit-version: "latest"
+    exemptions:
+      usernames: []
+      runtimeClasses: []
+      namespaces: ["kube-system"]
 EOF
 
     if [[ "${ADMISSION_CONTROL:-}" == *"ImagePolicyWebhook"* ]]; then
@@ -1262,12 +1287,35 @@ rules:
     omitStages:
       - "RequestReceived"
 
-  # Secrets, ConfigMaps, TokenRequest and TokenReviews can contain sensitive & binary data,
-  # so only log at the Metadata level.
+  # Secrets and ServiceAccount token requests (serviceaccounts/token subresource) are
+  # raised from Metadata to Request per AAP §0.6.3 / §0.5.1 / §0.1.3 / §0.2.4 (V6), which
+  # mandates raising the audit level on these sensitive resources to restore forensic
+  # detail on who accessed or mutated them.
+  #
+  # Request (NOT RequestResponse) is the balanced level the AAP selects: it records the
+  # request object but never the response object, which yields these properties:
+  #   - serviceaccounts/token: fully credential-safe — the issued bearer token is returned
+  #     only in the RESPONSE, which Request omits, so no token is ever written to the log.
+  #   - secrets: read paths (get/list/watch) carry the payload only in the RESPONSE, which
+  #     Request omits, so reads never log secret data. create/update REQUEST bodies do
+  #     carry .data/.stringData; logging that request object is the explicitly accepted
+  #     trade-off of Request over RequestResponse (RequestResponse would additionally log
+  #     the response body, doubling the exposure). See AAP §0.2.4 / §0.8.3 (V6).
+  # (tech-spec §6.4.6 / AAP §0.6.3, V6)
+  - level: Request
+    resources:
+      - group: "" # core
+        resources: ["secrets", "serviceaccounts/token"]
+    omitStages:
+      - "RequestReceived"
+  # ConfigMaps and TokenReviews can carry sensitive/binary data but are NOT part of the V6
+  # Secrets/ServiceAccount-token audit raise, so they remain pinned to Metadata — the
+  # highest level that records the operation without logging any payload
+  # (tech-spec §6.4.6 / AAP §0.6.3, V6).
   - level: Metadata
     resources:
       - group: "" # core
-        resources: ["secrets", "configmaps", "serviceaccounts/token"]
+        resources: ["configmaps"]
       - group: authentication.k8s.io
         resources: ["tokenreviews"]
     omitStages:

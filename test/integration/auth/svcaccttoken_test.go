@@ -1423,3 +1423,104 @@ func (r *recordingWarningHandler) assertEqual(t *testing.T, expected []string) {
 		t.Errorf("expected\n\t%v\ngot\n\t%v", expected, r.warnings)
 	}
 }
+
+// TestServiceAccountTokenBoundAndAudienced verifies (read-only) that projected
+// ServiceAccount tokens issued via the TokenRequest API are audience-bound and
+// time-bound, and that the kubernetes.io claim shape is unchanged. This asserts
+// existing hygiene — it does NOT modify token/claim generation.
+// AAP §6.6.10 / §0.8.1 (V4): token hygiene — verify projected tokens are
+// audience-bound + time-bound; claim shape UNCHANGED. VERIFY ONLY.
+func TestServiceAccountTokenBoundAndAudienced(t *testing.T) {
+	const iss = "https://foo.bar.example.com"
+	aud := authenticator.Audiences{"api"}
+
+	tCtx := ktesting.Init(t)
+	kubeClient, _, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
+		ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
+			// Disable ServiceAccount admission plugin (no serviceaccount controller runs in tests).
+			opts.Admission.GenericAdmission.DisablePlugins = []string{"ServiceAccount"}
+			opts.Authorization.Modes = []string{"AlwaysAllow"}
+			opts.Authentication.ServiceAccounts.JWKSURI = "https:///openid/v1/jwks"
+			opts.Authentication.ServiceAccounts.Issuers = []string{iss}
+			opts.Authentication.APIAudiences = aud
+		},
+		ModifyServerConfig: func(config *controlplane.Config) {
+			// Allow the requested 3600s TTL to be honored (must be <= max) so it is not clamped.
+			// Note: the requested token below is NOT pod-bound and its TTL (3600s) is not equal to
+			// WarnOnlyBoundTokenExpirationSeconds (3607s), so the server-side projected-token
+			// expiration extension never applies (see pkg/registry/core/serviceaccount/storage/
+			// token.go). The emitted JWT exp and Status.ExpirationTimestamp therefore reflect the
+			// requested TTL directly, which lets us bound the actual token lifetime deterministically.
+			// AAP §0.8.1 (V4): projected tokens must be time-bound (short-lived).
+			config.ControlPlane.Extra.ServiceAccountMaxExpiration = 2 * time.Hour
+		},
+	})
+	defer tearDownFn()
+
+	ns := framework.CreateNamespaceOrDie(kubeClient, "myns-v4", t)
+	defer framework.DeleteNamespaceOrDie(kubeClient, ns, t)
+
+	sa := &v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-svcacct", Namespace: ns.Name},
+	}
+	sa, delSvcAcct := createDeleteSvcAcct(t, kubeClient, sa)
+	defer delSvcAcct()
+
+	// AAP §0.8.1 (V4): request an audience-bound, time-bound token (TTL 3600s < 2h max).
+	treq := &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{
+			Audiences:         []string{"api"},
+			ExpirationSeconds: ptr.To(int64(3600)),
+		},
+	}
+	// Capture a reference timestamp immediately before issuance so the token's ACTUAL lifetime
+	// can be bounded against requestTime+TTL (not merely "in the future"). AAP §0.8.1 (V4).
+	requestTime := time.Now()
+	treq, err := kubeClient.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create token: %v", err)
+	}
+	token := treq.Status.Token
+	if token == "" {
+		t.Fatalf("expected a non-empty projected token")
+	}
+
+	// (1) Audience-bound: aud claim == ["api"].
+	checkPayload(t, token, `["api"]`, "aud")
+
+	// (2) Time-bound: the token's ACTUAL lifetime must be ~3600s, not merely "in the future".
+	// A regression issuing a long-lived (e.g. ~1y) projected token would still satisfy exp>now,
+	// so we bound both the JWT exp claim and the returned Status.ExpirationTimestamp against
+	// requestTime+TTL with a small leeway. This mirrors the upstream bounded-expiry assertions
+	// above (l818-842). Because the token is not pod-bound and TTL != WarnOnlyBoundToken-
+	// ExpirationSeconds, no server-side extension applies, so exp reflects the requested TTL.
+	// AAP §6.6.10 / §0.8.1 (V4): projected tokens must be time-bound (short-lived).
+	const requestedTTLSeconds = int64(3600)
+	// Leeway (seconds) absorbs API round-trip / CI scheduling jitter while remaining tiny relative
+	// to the 3600s TTL, so a long-lived-token regression (off by ~1 year) is still caught.
+	const leeway = int64(60)
+	assumedExpiry := int64(*jwt.NewNumericDate(requestTime.Add(time.Duration(requestedTTLSeconds) * time.Second)))
+	exp, err := strconv.ParseInt(getSubObject(t, getPayload(t, token), "exp"), 10, 64)
+	if err != nil {
+		t.Fatalf("error parsing exp claim: %v", err)
+	}
+	if exp < assumedExpiry-leeway || exp > assumedExpiry+leeway {
+		t.Errorf("token exp not bound to requested TTL: got exp=%d, want ~%d (requestTime+%ds) within +-%ds", exp, assumedExpiry, requestedTTLSeconds, leeway)
+	}
+	// The TokenRequest status expiration must likewise reflect the requested TTL, not a long-lived value.
+	expStatus := treq.Status.ExpirationTimestamp.Time.Unix()
+	if expStatus < assumedExpiry-leeway || expStatus > assumedExpiry+leeway {
+		t.Errorf("Status.ExpirationTimestamp not bound to requested TTL: got %d, want ~%d (requestTime+%ds) within +-%ds", expStatus, assumedExpiry, requestedTTLSeconds, leeway)
+	}
+	// The returned request spec also echoes the requested TTL.
+	checkExpiration(t, treq, requestedTTLSeconds)
+
+	// (3) Claim shape UNCHANGED — assert the canonical sub + kubernetes.io claims exactly as
+	// TestServiceAccountTokenCreate does (l281-286). Build expected values from ns/sa names.
+	checkPayload(t, token, fmt.Sprintf("%q", "system:serviceaccount:"+ns.Name+":"+sa.Name), "sub")
+	checkPayload(t, token, fmt.Sprintf("%q", ns.Name), "kubernetes.io", "namespace")
+	checkPayload(t, token, fmt.Sprintf("%q", sa.Name), "kubernetes.io", "serviceaccount", "name")
+	// Not pod/secret-bound in this request → those sub-claims are null (same as l283-284).
+	checkPayload(t, token, "null", "kubernetes.io", "pod")
+	checkPayload(t, token, "null", "kubernetes.io", "secret")
+}
