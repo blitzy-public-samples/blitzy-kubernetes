@@ -128,7 +128,9 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	at.testResources(metadata, ingress, "get", configmaps)
 
 	at.testResources(none, kubelet, node, "get", nodes, nodeStatus)
-	at.testResources(metadata, kubelet, node, "get", sysConfigmaps, secrets)
+	// secrets raised Metadata->Request by create-master-audit-policy (tech-spec §6.4.6, AAP V6); sysConfigmaps stays Metadata.
+	at.testResources(metadata, kubelet, node, "get", sysConfigmaps)
+	at.testResources(request, kubelet, node, "get", secrets)
 	at.testResources(response, kubelet, node, "create", deployments, pods)
 
 	at.testResources(none, controller, scheduler, endpointController, "get", "update", sysEndpoints)
@@ -136,7 +138,9 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 	at.testResources(response, controller, scheduler, endpointController, "update", endpoints)
 
 	at.testResources(none, apiserver, "get", namespaces, namespaceStatus, namespaceFinal)
-	at.testResources(metadata, apiserver, "get", "create", "update", sysConfigmaps, secrets)
+	// secrets now audited at Request (§6.4.6, AAP V6); sysConfigmaps stays Metadata.
+	at.testResources(metadata, apiserver, "get", "create", "update", sysConfigmaps)
+	at.testResources(request, apiserver, "get", "create", "update", secrets)
 
 	at.testResources(none, autoscaler, "get", "update", sysConfigmaps, sysEndpoints)
 	at.testResources(metadata, autoscaler, "get", "update", configmaps)
@@ -153,7 +157,9 @@ func TestCreateMasterAuditPolicy(t *testing.T) {
 
 	at.testResources(request, namespaceController, "deletecollection", pods, namespaces)
 
-	at.testResources(metadata, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", secrets, configmaps, sysConfigmaps, tokenReviews)
+	// secrets -> Request (§6.4.6, AAP V6); configmaps, sysConfigmaps, tokenReviews stay Metadata.
+	at.testResources(metadata, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", configmaps, sysConfigmaps, tokenReviews)
+	at.testResources(request, defaultSA, anonymous, npd, namespaceController, "get", "create", "update", secrets)
 	at.testResources(request, defaultSA, anonymous, npd, namespaceController, "get", "list", "watch", sysEndpoints, podMetrics, pods, clusterRoles, deployments)
 	at.testResources(response, defaultSA, anonymous, npd, namespaceController, "create", "update", "patch", "delete", sysEndpoints, podMetrics, pods, clusterRoles, deployments)
 
