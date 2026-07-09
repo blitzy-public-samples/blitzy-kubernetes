@@ -2609,3 +2609,53 @@ func (f fakeAuthorizer) Authorize(ctx context.Context, a authorizer.Attributes) 
 
 	return f.decision, "", nil
 }
+
+// TestNodeRestrictionNodeUpdatesOwnPodStatusAdmitted verifies the positive
+// node-isolation path: a node is admitted when it updates the status
+// subresource of a pod bound to itself (spec.nodeName == the node's own name).
+// This is a fast, API-server-free unit complement to the integration test
+// test/integration/auth/node_test.go::TestNodeRestrictionCrossNodeDenied.
+// AAP §0.8.1 (V7): NodeRestriction permits a kubelet to update its OWN pod's status.
+func TestNodeRestrictionNodeUpdatesOwnPodStatusAdmitted(t *testing.T) {
+	// Node identity: nodeidentifier extracts nodeName "mynode" from the
+	// "system:node:mynode" username in group "system:nodes".
+	mynode := &user.DefaultInfo{Name: "system:node:mynode", Groups: []string{"system:nodes"}}
+	podResource := api.Resource("pods").WithVersion("v1")
+	podKind := api.Kind("Pod").WithVersion("v1")
+	// coremypod is bound to "mynode"; used as BOTH old and new object so labels
+	// stay equal and spec.nodeName == the requesting node.
+	coremypod, _ := makeTestPod("ns", "mypod", "mynode", false)
+
+	// admitPodStatus does not consult podsGetter on Update, so it is left nil.
+	a := &admitTestCase{
+		name:       "node updates own pod status is admitted",
+		attributes: admission.NewAttributesRecord(coremypod, coremypod, podKind, "ns", "mypod", podResource, "status", admission.Update, &metav1.UpdateOptions{}, false, mynode),
+		err:        "",
+	}
+	a.run(t)
+}
+
+// TestNodeRestrictionCrossNodePodStatusDenied verifies the negative
+// node-isolation path: a node is denied (Forbidden) when it attempts to update
+// the status subresource of a pod bound to a DIFFERENT node (spec.nodeName !=
+// the requesting node's name). This realizes the "cross-node denied" intent of
+// test/integration/auth/node_test.go::TestNodeRestrictionCrossNodeDenied at the
+// unit level. (A plain Secret cannot be used here: the NodeRestriction Admit()
+// dispatch returns nil (admits) for ungoverned resources like Secrets — that
+// denial is enforced by the separate Node authorizer + RBAC, not this plugin.)
+// AAP §0.8.1 (V7): NodeRestriction confines each kubelet to its own node's pods;
+// a compromised node cannot update another node's pod status.
+func TestNodeRestrictionCrossNodePodStatusDenied(t *testing.T) {
+	mynode := &user.DefaultInfo{Name: "system:node:mynode", Groups: []string{"system:nodes"}}
+	podResource := api.Resource("pods").WithVersion("v1")
+	podKind := api.Kind("Pod").WithVersion("v1")
+	// coreotherpod is bound to "othernode" (NOT the requesting node "mynode").
+	coreotherpod, _ := makeTestPod("ns", "otherpod", "othernode", false)
+
+	a := &admitTestCase{
+		name:       "node cannot update cross-node pod status",
+		attributes: admission.NewAttributesRecord(coreotherpod, coreotherpod, podKind, "ns", "otherpod", podResource, "status", admission.Update, &metav1.UpdateOptions{}, false, mynode),
+		err:        "can only update pod status for pods with spec.nodeName set to itself",
+	}
+	a.run(t)
+}
