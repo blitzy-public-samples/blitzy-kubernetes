@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/component-helpers/auth/rbac/validation"
@@ -344,5 +345,67 @@ func TestNamespaceRoleVerbsConsistency(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// policyRuleIsFullWildcard reports whether a PolicyRule grants unrestricted
+// access: its Verbs, APIGroups, AND Resources must each contain "*". All three
+// dimensions must be wildcarded — a broad read rule such as {list,watch} on */*
+// (policy.go l480) or a non-resource-URL rule is deliberately NOT a full wildcard.
+// This is a bootstrappolicy_test-local reimplementation (using rbacv1.PolicyRule)
+// of the integration test's unexported, un-importable helper.
+func policyRuleIsFullWildcard(r rbacv1.PolicyRule) bool {
+	hasStar := func(s []string) bool {
+		for _, v := range s {
+			if v == "*" {
+				return true
+			}
+		}
+		return false
+	}
+	return hasStar(r.Verbs) && hasStar(r.APIGroups) && hasStar(r.Resources)
+}
+
+// TestNoWildcardClusterRoleExceptClusterAdmin locks the least-privilege invariant
+// that among the bootstrap ClusterRoles exactly one — cluster-admin — carries a
+// full */*/* rule (all verbs, all API groups, all resources), and that its
+// ClusterRoleBinding grants that authority only to the system:masters group. It is
+// the fast, API-server-free unit complement to the integration test
+// TestRBACNoWildcardOutsideSystemMasters.
+// AAP §0.8.1 (V1): no ClusterRole other than cluster-admin is full */*/*, and
+// cluster-admin is bound only to system:masters.
+func TestNoWildcardClusterRoleExceptClusterAdmin(t *testing.T) {
+	// (a) The set of ClusterRoles carrying a full-wildcard rule must equal exactly
+	// {"cluster-admin"} — asserting both directions at once (present AND no other).
+	wildcardRoles := sets.NewString()
+	for _, role := range bootstrappolicy.ClusterRoles() {
+		for _, rule := range role.Rules {
+			if policyRuleIsFullWildcard(rule) {
+				wildcardRoles.Insert(role.Name)
+			}
+		}
+	}
+	if want := sets.NewString("cluster-admin"); !wildcardRoles.Equal(want) {
+		t.Errorf("full-wildcard ClusterRoles = %v, want %v", wildcardRoles.List(), want.List())
+	}
+
+	// (b) The cluster-admin ClusterRoleBinding must bind exactly the system:masters group.
+	bindings := bootstrappolicy.ClusterRoleBindings()
+	var clusterAdminBinding *rbacv1.ClusterRoleBinding
+	for i := range bindings {
+		if bindings[i].RoleRef.Name == "cluster-admin" {
+			clusterAdminBinding = &bindings[i]
+			break
+		}
+	}
+	if clusterAdminBinding == nil {
+		t.Fatalf("cluster-admin ClusterRoleBinding not found in bootstrappolicy.ClusterRoleBindings()")
+	}
+	if got := len(clusterAdminBinding.Subjects); got != 1 {
+		t.Fatalf("cluster-admin binding has %d subjects, want exactly 1: %+v", got, clusterAdminBinding.Subjects)
+	}
+	if subj := clusterAdminBinding.Subjects[0]; subj.Kind != rbacv1.GroupKind || subj.Name != user.SystemPrivilegedGroup {
+		t.Errorf("cluster-admin binding subject = {Kind:%q Name:%q}, want {Kind:%q Name:%q}",
+			subj.Kind, subj.Name, rbacv1.GroupKind, user.SystemPrivilegedGroup)
 	}
 }
