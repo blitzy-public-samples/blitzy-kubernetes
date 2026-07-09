@@ -389,23 +389,35 @@ func TestNoWildcardClusterRoleExceptClusterAdmin(t *testing.T) {
 		t.Errorf("full-wildcard ClusterRoles = %v, want %v", wildcardRoles.List(), want.List())
 	}
 
-	// (b) The cluster-admin ClusterRoleBinding must bind exactly the system:masters group.
-	bindings := bootstrappolicy.ClusterRoleBindings()
-	var clusterAdminBinding *rbacv1.ClusterRoleBinding
-	for i := range bindings {
-		if bindings[i].RoleRef.Name == "cluster-admin" {
-			clusterAdminBinding = &bindings[i]
-			break
+	// (b) Exactly one ClusterRoleBinding may reference the full-wildcard cluster-admin
+	// role, and that sole binding must grant its authority ONLY to the system:masters
+	// group. We enumerate EVERY matching binding (never stopping at the first) so that
+	// an additional cluster-admin binding — or one whose subject lies outside
+	// system:masters — is caught rather than masked. This mirrors the integration
+	// invariant in TestRBACNoWildcardOutsideSystemMasters, which likewise rejects any
+	// binding to a full-wildcard role whose subject is outside system:masters.
+	var clusterAdminBindings []rbacv1.ClusterRoleBinding
+	for _, binding := range bootstrappolicy.ClusterRoleBindings() {
+		if binding.RoleRef.Name == "cluster-admin" {
+			clusterAdminBindings = append(clusterAdminBindings, binding)
 		}
 	}
-	if clusterAdminBinding == nil {
-		t.Fatalf("cluster-admin ClusterRoleBinding not found in bootstrappolicy.ClusterRoleBindings()")
+	if got := len(clusterAdminBindings); got != 1 {
+		t.Fatalf("found %d ClusterRoleBindings referencing cluster-admin, want exactly 1: %+v", got, clusterAdminBindings)
 	}
+	clusterAdminBinding := clusterAdminBindings[0]
 	if got := len(clusterAdminBinding.Subjects); got != 1 {
-		t.Fatalf("cluster-admin binding has %d subjects, want exactly 1: %+v", got, clusterAdminBinding.Subjects)
+		t.Fatalf("cluster-admin binding %q has %d subjects, want exactly 1: %+v", clusterAdminBinding.Name, got, clusterAdminBinding.Subjects)
 	}
-	if subj := clusterAdminBinding.Subjects[0]; subj.Kind != rbacv1.GroupKind || subj.Name != user.SystemPrivilegedGroup {
-		t.Errorf("cluster-admin binding subject = {Kind:%q Name:%q}, want {Kind:%q Name:%q}",
-			subj.Kind, subj.Name, rbacv1.GroupKind, user.SystemPrivilegedGroup)
+	// Match on ALL subject fields — Kind, Name, APIGroup, and (empty) Namespace — so a
+	// same-named subject in a different APIGroup or Namespace cannot slip through.
+	wantSubject := rbacv1.Subject{
+		APIGroup:  rbacv1.GroupName,
+		Kind:      rbacv1.GroupKind,
+		Name:      user.SystemPrivilegedGroup,
+		Namespace: "",
+	}
+	if got := clusterAdminBinding.Subjects[0]; got != wantSubject {
+		t.Errorf("cluster-admin binding %q subject = %+v, want %+v", clusterAdminBinding.Name, got, wantSubject)
 	}
 }
