@@ -123,8 +123,14 @@ All tests below originate from Blitzy's autonomous validation logs for this proj
 | Integration — Secrets encryption (V3) | Go `testing` + etcd | 1 | 1 | 0 | N/A | `TestSecretsAreEncryptedAtRest`: raw etcd read proves `k8s:enc:aesgcm` ciphertext; plaintext canary absent; apiserver decrypt round-trip |
 | Integration — Auth (V1/V2/V4/V7) | Go `testing` + apiserver | 43 | 43 | 0 | N/A | Full `test/integration/auth` package: 43 top-level tests, 0 failures, ~208s (includes new no-wildcard, privileged-pod rejection, bound/audienced token, cross-node denial) |
 | Integration — Control-plane audit (V6) | Go `testing` + apiserver | 1 | 1 | 0 | N/A | `TestAuditSensitiveResourceLevels`: secrets-`Request` + rbac-`RequestResponse` subtests pass |
+| Integration — Auth hardening (V1/V2/V4/V5/V7) | Go `testing` + apiserver | 6 | 6 | 0 | N/A | Negative-path/boundary regression tests: `TestRBACBootstrapRolesNoWildcardEnumerated` (V1: enumerate all bootstrap ClusterRoles, only `cluster-admin` holds `*/*/*`); `TestPodSecurityKubeSystemExemptionPreserved` + `TestPodSecurityAuditRestrictedBoundary` (V2: `kube-system` exemption + `audit=restricted`/`warn=restricted` boundaries); `TestServiceAccountTokenHardening` (V4: wrong-audience/expired/over-TTL-2h-clamp/deleted-SA); `TestAdmissionWebhookFailClosedDeniesUnreachable` (V5, new file: unreachable `Fail`/5s webhook denies matching PV CREATE); `TestNodeRestrictionCrossNodePodsAndEvents` (V7: cross-node pod denials + positive controls) |
+| Integration — Secrets encryption boundaries (V3) | Go `testing` + etcd | 2 | 2 | 0 | N/A | `TestEncryptionKMSv2CachesizeRejectedAtStartup` (rejects `cachesize` under KMS `apiVersion: v2` at apiserver startup — "cachesize is not supported in v2"); `TestEncryptionIdentityProviderLastFallback` (identity-provider-last ordering: new writes use aesgcm-first, plaintext canary absent, transparent decrypt) |
+| Integration — Control-plane audit fidelity (V6) | Go `testing` + apiserver | 1 | 1 | 0 | N/A | `TestAuditServiceAccountTokenRequestLevel`: `serviceaccounts/token` recorded at `Request` level + confidentiality guard that Secrets/token audit events omit the response object (no token/secret-body leak) |
+| Unit — Audit policy level table (V6) | Go `testing` | 1 | 1 | 0 | N/A | `TestAuditPolicyLevelTableNoRaise`: `expectLevel` table (Secrets & `serviceaccounts/token`→`Request`; configmaps/tokenreviews→`Metadata`; RBAC→`RequestResponse`) with a no-other-resource-raised regression guard on the real generated policy |
+| Unit — Admission-plugin ordering (V7) | Go `testing` | 1 | 1 | 0 | N/A | `TestAdmissionControlNodeRestrictionOrdering` (new file `apiserver_admission_test.go`): emitted `--enable-admission-plugins` retains `NodeRestriction` and positions it before `PodSecurity` across `config-default.sh` + `config-test.sh` |
+| Unit — etcd mTLS fail-closed (V8) | Go `testing` | 1 | 1 | 0 | N/A | `TestConfigureEtcdParamsFailClosed`: partial-credential table (cert-only/key-only/CA-only/all-absent → `exit 1`; all-6-present → `0`; `ALLOW_INSECURE=true` bypass → `0`) invoked via new subprocess helper `runConfigureEtcdParamsExitCode` (new file `configure_helper_subprocess_test.go`); confirms `ETCD_APISERVER_ALLOW_INSECURE=false` default |
 
-**Aggregate:** 6 Blitzy-authored security test functions (V1/V2/V3/V4/V6/V7) plus the modified V6 unit test, all green, executed within full-package runs that report **0 failures**. Regression-safe: all five modified test files are purely additive (0 removed lines, no `init()`/global additions).
+**Aggregate:** 6 Blitzy-authored security test functions (V1/V2/V3/V4/V6/V7) plus the modified V6 unit test, all green, executed within full-package runs that report **0 failures**. Regression-safe: all five modified test files are purely additive (0 removed lines, no `init()`/global additions). This task additionally adds **12 negative-path/boundary regression tests** across V1–V8 (6 §3 rows above), all green and strictly additive (0 removed lines, no new `init()`/globals), plus one subprocess helper (`runConfigureEtcdParamsExitCode`); `Coverage %` remains **`N/A`** by convention.
 
 ---
 
@@ -378,13 +384,17 @@ kube-bench run --targets master,etcd,policies --version <k8s-minor>
 | `cluster/gce/util.sh` | UPDATE | V8 | `kube-env` propagation of insecure-etcd toggle |
 | `cluster/gce/manifests/encryption-provider-config.yml` | CREATE | V3 | EncryptionConfiguration (KMS v2 first / identity last) |
 | `cluster/manifests/namespace-pss-labels.yaml` | CREATE | V2 | Namespace PSS labels (+ kube-system exemption) |
-| `cluster/gce/gci/audit_policy_test.go` | UPDATE | V6 | Asserts real audit-policy generator output |
-| `test/integration/auth/rbac_test.go` | UPDATE | V1 | No-wildcard-outside-system:masters |
-| `test/integration/auth/node_test.go` | UPDATE | V7 | Cross-node denial |
-| `test/integration/auth/podsecurity_test.go` | UPDATE | V2 | Privileged-pod rejection |
-| `test/integration/auth/svcaccttoken_test.go` | UPDATE | V4 | Bound/audienced token + TTL |
-| `test/integration/controlplane/audit/audit_test.go` | UPDATE | V6 | Sensitive-resource audit levels |
-| `test/integration/secrets/encryption_test.go` | CREATE | V3 | Ciphertext-at-rest assertion |
+| `cluster/gce/gci/audit_policy_test.go` | UPDATE | V6 | Asserts real audit-policy generator output; + level table & no-raise guard (`TestAuditPolicyLevelTableNoRaise`) |
+| `test/integration/auth/rbac_test.go` | UPDATE | V1 | No-wildcard-outside-system:masters; + bootstrap-role enumeration (`TestRBACBootstrapRolesNoWildcardEnumerated`) |
+| `test/integration/auth/node_test.go` | UPDATE | V7 | Cross-node denial; + additional cross-node pod denials (`TestNodeRestrictionCrossNodePodsAndEvents`) |
+| `test/integration/auth/podsecurity_test.go` | UPDATE | V2 | Privileged-pod rejection; + kube-system exemption & audit/warn=restricted boundary (`TestPodSecurityKubeSystemExemptionPreserved`, `TestPodSecurityAuditRestrictedBoundary`) |
+| `test/integration/auth/svcaccttoken_test.go` | UPDATE | V4 | Bound/audienced token + TTL; + audience-mismatch/expired/over-TTL-2h/deleted-SA (`TestServiceAccountTokenHardening`) |
+| `test/integration/controlplane/audit/audit_test.go` | UPDATE | V6 | Sensitive-resource audit levels; + serviceaccounts/token at Request + confidentiality guard (`TestAuditServiceAccountTokenRequestLevel`) |
+| `test/integration/secrets/encryption_test.go` | CREATE | V3 | Ciphertext-at-rest assertion; + cachesize-under-KMS-v2 rejection & identity-last ordering (`TestEncryptionKMSv2CachesizeRejectedAtStartup`, `TestEncryptionIdentityProviderLastFallback`) |
+| `test/integration/auth/admissionwebhook_failclosed_test.go` | CREATE | V5 | Fail-closed admission webhook: unreachable `Fail`/`timeoutSeconds:5` webhook denies a matching `persistentvolumes` CREATE; non-matching object bypasses via `matchConditions` (`TestAdmissionWebhookFailClosedDeniesUnreachable`) |
+| `cluster/gce/gci/apiserver_admission_test.go` | CREATE | V7 | Admission-plugin ordering: emitted `--enable-admission-plugins` keeps `NodeRestriction` before `PodSecurity` on both GCE profiles (`TestAdmissionControlNodeRestrictionOrdering`) |
+| `cluster/gce/gci/apiserver_etcd_test.go` | UPDATE | V8 | Partial-credential etcd-mTLS fail-closed table (cert-only/key-only/CA-only/all-absent → `exit 1`) confirming `ETCD_APISERVER_ALLOW_INSECURE=false` default (`TestConfigureEtcdParamsFailClosed`) |
+| `cluster/gce/gci/configure_helper_subprocess_test.go` | CREATE | V8 | Subprocess exit-code-capture helper (`runConfigureEtcdParamsExitCode`) sourcing the real `configure-kubeapiserver.sh` so `exit 1` is caught without killing the test process |
 
 ### D. Technology Versions
 
