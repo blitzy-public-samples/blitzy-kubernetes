@@ -36,6 +36,7 @@ import (
 	v1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/keyutil"
+	core "k8s.io/kubernetes/pkg/apis/core"
 	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 )
@@ -614,5 +615,111 @@ func TestStaticPublicKeysGetter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// saOnlyGetter satisfies serviceaccount.ServiceAccountTokenGetter for a token
+// bound only to a ServiceAccount. Only GetServiceAccount is consulted by the
+// SA-only validation path exercised below; the remaining methods return an
+// error because they are never reached in these audience-binding tests.
+type saOnlyGetter struct{}
+
+func (saOnlyGetter) GetServiceAccount(namespace, name string) (*v1.ServiceAccount, error) {
+	return &v1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "name", UID: "uid"}}, nil
+}
+
+func (saOnlyGetter) GetPod(namespace, name string) (*v1.Pod, error) {
+	return nil, fmt.Errorf("not found")
+}
+
+func (saOnlyGetter) GetSecret(namespace, name string) (*v1.Secret, error) {
+	return nil, fmt.Errorf("not found")
+}
+
+func (saOnlyGetter) GetNode(name string) (*v1.Node, error) {
+	return nil, fmt.Errorf("not found")
+}
+
+// newAudienceTokenAndAuthn mints an SA-only token carrying the supplied
+// (explicit, non-empty) tokenAudience and builds a JWT authenticator whose
+// implicit audiences are the non-empty {"api"} set. The explicit token audience
+// exercises the intersection path (an audience-less token would be treated as a
+// legacy token instead), and the non-empty implicit audiences are required so
+// the audience-mismatch error path in AuthenticateToken can fire. Determinism
+// (fixed exp/iat/nbf and JTI) is inherited from claims_test.go's package init()
+// in the same test binary, so the positive 3600s TTL keeps the token unexpired
+// against the fixed clock.
+func newAudienceTokenAndAuthn(t *testing.T, tokenAudience []string) (authenticator.Token, string) {
+	t.Helper()
+	gen, err := serviceaccount.JWTTokenGenerator(serviceaccount.LegacyIssuer, getPrivateKey(rsaPrivateKey))
+	if err != nil {
+		t.Fatalf("error making generator: %v", err)
+	}
+	sa := core.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "name", UID: "uid"}}
+	sc, pc, err := serviceaccount.Claims(sa, nil, nil, nil, int64(3600), 0, tokenAudience)
+	if err != nil {
+		t.Fatalf("error building claims: %v", err)
+	}
+	token, err := gen.GenerateToken(context.TODO(), sc, pc)
+	if err != nil {
+		t.Fatalf("error generating token: %v", err)
+	}
+	keysGetter, err := serviceaccount.StaticPublicKeysGetter([]interface{}{getPublicKey(rsaPublicKey)})
+	if err != nil {
+		t.Fatalf("error building keys getter: %v", err)
+	}
+	authn := serviceaccount.JWTTokenAuthenticator(
+		[]string{serviceaccount.LegacyIssuer},
+		keysGetter,
+		authenticator.Audiences{"api"},
+		serviceaccount.NewValidator(saOnlyGetter{}),
+	)
+	return authn, token
+}
+
+// TestAuthenticateTokenAudienceMismatch locks that a token whose audience does
+// not intersect the requested audiences is rejected with the audience-mismatch
+// error before any ServiceAccount validation is performed. AAP §0.4.2 (V4).
+func TestAuthenticateTokenAudienceMismatch(t *testing.T) {
+	authn, token := newAudienceTokenAndAuthn(t, []string{"A"})
+	ctx := authenticator.WithAudiences(context.TODO(), authenticator.Audiences{"B"})
+
+	resp, ok, err := authn.AuthenticateToken(ctx, token)
+	if ok {
+		t.Errorf("expected ok=false for a non-intersecting audience, got ok=true")
+	}
+	if err == nil {
+		t.Fatalf("expected an audience-mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "is invalid for the target audiences") {
+		t.Errorf("expected an audience-mismatch error, got %q", err.Error())
+	}
+	if resp != nil {
+		t.Errorf("expected a nil response on audience mismatch, got %#v", resp)
+	}
+}
+
+// TestAuthenticateTokenAudienceMatch locks that a token whose audience
+// intersects the requested audiences proceeds to validation and authenticates
+// as the bound ServiceAccount. AAP §0.4.2 (V4).
+func TestAuthenticateTokenAudienceMatch(t *testing.T) {
+	authn, token := newAudienceTokenAndAuthn(t, []string{"A"})
+	ctx := authenticator.WithAudiences(context.TODO(), authenticator.Audiences{"A"})
+
+	resp, ok, err := authn.AuthenticateToken(ctx, token)
+	if err != nil {
+		t.Fatalf("expected no error for an intersecting audience, got %v", err)
+	}
+	if !ok {
+		t.Errorf("expected ok=true for an intersecting audience, got ok=false")
+	}
+	if resp == nil {
+		t.Fatalf("expected a non-nil response for an intersecting audience, got nil")
+	}
+	if got, want := resp.User.GetName(), "system:serviceaccount:ns:name"; got != want {
+		t.Errorf("unexpected authenticated user name: got %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual([]string(resp.Audiences), []string{"A"}) {
+		t.Errorf("unexpected response audiences: got %v, want [A]", resp.Audiences)
 	}
 }

@@ -528,3 +528,162 @@ func (f fakeGetter) GetNode(name string) (*v1.Node, error) {
 	}
 	return f.node, nil
 }
+
+// TestClaimsExpiryBoundary locks that Claims() computes
+// Expiry == now()+expirationSeconds at the claim layer, even at large
+// expiration boundaries. This is independent of the REST-layer expiration
+// clamp, which is out of scope. AAP §0.4.2 (V4).
+func TestClaimsExpiryBoundary(t *testing.T) {
+	sa := core.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "myns",
+			Name:      "mysvcacct",
+			UID:       "mysvcacct-uid",
+		},
+	}
+	cases := []struct {
+		name              string
+		expirationSeconds int64
+	}{
+		{name: "hundred", expirationSeconds: 100},
+		{name: "extension", expirationSeconds: ExpirationExtensionSeconds},
+		{name: "large", expirationSeconds: int64(1) << 32},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc, _, err := Claims(sa, nil, nil, nil, tc.expirationSeconds, 0, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			// now() is stubbed by init() to the fixed epoch 1514764800, so the
+			// expected expiry is a deterministic function of the input.
+			want := jwt.NewNumericDate(now().Add(time.Duration(tc.expirationSeconds) * time.Second))
+			if sc.Expiry == nil || *sc.Expiry != *want {
+				t.Errorf("expiry: got %v, want %v", sc.Expiry, want)
+			}
+		})
+	}
+}
+
+// TestClaimsRejectsDualBinding locks the single-object-binding guard in
+// claims.go: a token requested with a secret plus another object (pod or node)
+// is rejected with the exact internal error, and Claims() returns nil for both
+// the standard and private claims. AAP §0.4.2 (V4).
+func TestClaimsRejectsDualBinding(t *testing.T) {
+	sa := core.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "myns",
+			Name:      "mysvcacct",
+			UID:       "mysvcacct-uid",
+		},
+	}
+	pod := &core.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "myns",
+			Name:      "mypod",
+			UID:       "mypod-uid",
+		},
+	}
+	sec := &core.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "myns",
+			Name:      "mysecret",
+			UID:       "mysecret-uid",
+		},
+	}
+	node := &core.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mynode",
+			UID:  "mynode-uid",
+		},
+	}
+	const wantErr = "internal error, token can only be bound to one object type"
+	cases := []struct {
+		name string
+		pod  *core.Pod
+		sec  *core.Secret
+		node *core.Node
+	}{
+		{name: "pod and secret", pod: pod, sec: sec},
+		{name: "secret and node", sec: sec, node: node},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc, pc, err := Claims(sa, tc.pod, tc.sec, tc.node, 0, 0, nil)
+			if err == nil {
+				t.Fatalf("expected dual-binding error, got nil")
+			}
+			if err.Error() != wantErr {
+				t.Errorf("error: got %q, want %q", err.Error(), wantErr)
+			}
+			if sc != nil {
+				t.Errorf("expected nil standard claims, got %v", sc)
+			}
+			if pc != nil {
+				t.Errorf("expected nil private claims, got %v", pc)
+			}
+		})
+	}
+}
+
+// TestClaimsKubernetesSubclaimShape locks the full pod-bound token claim shape:
+// the standard subject/audience/expiry claims plus the kubernetes.io private
+// sub-claims (namespace/serviceaccount/pod/warnafter). AAP §0.4.2 (V4).
+func TestClaimsKubernetesSubclaimShape(t *testing.T) {
+	sa := core.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "myns",
+			Name:      "mysvcacct",
+			UID:       "mysvcacct-uid",
+		},
+	}
+	pod := &core.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "myns",
+			Name:      "mypod",
+			UID:       "mypod-uid",
+		},
+	}
+	const exp int64 = 60 * 60 * 24
+	const warnafter int64 = 60 * 60
+	aud := []string{"aud1"}
+
+	sc, pc, err := Claims(sa, pod, nil, nil, exp, warnafter, aud)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Compare via JSON spew (as the frozen TestClaims does): this asserts both
+	// structural equality and JSON-serializability of the claim structs.
+	spew := func(obj interface{}) string {
+		b, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatalf("err, couldn't marshal claims: %v", err)
+		}
+		return string(b)
+	}
+
+	wantSC := &jwt.Claims{
+		Subject:   "system:serviceaccount:myns:mysvcacct",
+		Audience:  jwt.Audience{"aud1"},
+		IssuedAt:  jwt.NewNumericDate(now()),
+		NotBefore: jwt.NewNumericDate(now()),
+		Expiry:    jwt.NewNumericDate(now().Add(time.Duration(exp) * time.Second)),
+		// JTI gate is GA/on, matching every TestClaims success row.
+		ID: "fixed",
+	}
+	wantPC := &privateClaims{
+		Kubernetes: kubernetes{
+			Namespace: "myns",
+			Svcacct:   ref{Name: "mysvcacct", UID: "mysvcacct-uid"},
+			Pod:       &ref{Name: "mypod", UID: "mypod-uid"},
+			WarnAfter: jwt.NewNumericDate(now().Add(time.Duration(warnafter) * time.Second)),
+		},
+	}
+	if spew(sc) != spew(wantSC) {
+		t.Errorf("standard claims differed\n\tsaw:\t%s\n\twant:\t%s", spew(sc), spew(wantSC))
+	}
+	if spew(pc) != spew(wantPC) {
+		t.Errorf("private claims differed\n\tsaw:\t%s\n\twant:\t%s", spew(pc), spew(wantPC))
+	}
+}

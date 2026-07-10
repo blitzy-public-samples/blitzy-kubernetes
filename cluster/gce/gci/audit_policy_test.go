@@ -286,3 +286,58 @@ func resource(kind string, nsGroupSub ...string) Resource {
 	}
 	return res
 }
+
+// TestAuditPolicyKeepsLowSensitivityResourcesAtMetadata verifies, in a dedicated
+// self-contained function, that the policy emitted by create-master-audit-policy keeps
+// low-sensitivity resources at Metadata while RBAC objects stay at Request (reads) /
+// RequestResponse (writes). This re-locks the V6 audit-fidelity invariant alongside the
+// frozen TestCreateMasterAuditPolicy without editing it (AAP Priority 5 / §0.5.1).
+func TestAuditPolicyKeepsLowSensitivityResourcesAtMetadata(t *testing.T) {
+	baseDir, err := os.MkdirTemp("", "configure-helper-test") // cleaned up by c.tearDown()
+	require.NoError(t, err, "Failed to create temp directory")
+
+	policyFile := filepath.Join(baseDir, "audit_policy.yaml")
+	c := ManifestTestCase{
+		t:                t,
+		kubeHome:         baseDir,
+		manifestFuncName: fmt.Sprintf("create-master-audit-policy %s", policyFile),
+	}
+	defer c.tearDown()
+
+	// Run the real bash generator to produce audit_policy.yaml.
+	c.mustInvokeFunc(
+		kubeAPIServerEnv{KubeHome: c.kubeHome},
+		[]string{"configure-helper.sh"},
+		"base.template",
+		"testdata/kube-apiserver/base.template",
+	)
+
+	policy, err := auditpolicy.LoadPolicyFromFile(policyFile)
+	require.NoError(t, err, "Failed to load generated policy.")
+
+	at := auditTester{
+		T:         t,
+		evaluator: auditpolicy.NewPolicyRuleEvaluator(policy),
+	}
+
+	// defaultSA and anonymous fall through the user-specific rules to the default
+	// rules, so they exercise the resource-level defaults deterministically.
+	defaultSA := serviceaccount.UserInfo("default", "default", "")
+	anonymous := newUserInfo(user.Anonymous, user.AllUnauthenticated)
+
+	// Resources under test.
+	var (
+		configmaps   = resource("configmaps", "default")
+		tokenReviews = resource("tokenreviews", "", "authentication.k8s.io")
+		foos         = resource("foos", "default", "example.com")
+		clusterRoles = resource("clusterroles", "", "rbac.authorization.k8s.io")
+	)
+
+	// Low-sensitivity resources remain Metadata.
+	at.testResources(audit.LevelMetadata, defaultSA, anonymous, "get", "create", "update", configmaps, tokenReviews)
+	// Custom/catch-all resource falls to the generator's final "Default level" rule -> Metadata.
+	at.testResources(audit.LevelMetadata, defaultSA, anonymous, "get", "list", "watch", "create", "update", "patch", "delete", foos)
+	// RBAC reads -> Request; RBAC writes -> RequestResponse.
+	at.testResources(audit.LevelRequest, defaultSA, anonymous, "get", "list", "watch", clusterRoles)
+	at.testResources(audit.LevelRequestResponse, defaultSA, anonymous, "create", "update", "patch", "delete", clusterRoles)
+}

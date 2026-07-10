@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -310,3 +311,156 @@ func (r *dummyRecorder) AddWarning(agent, text string) {
 }
 
 var _ warning.Recorder = &dummyRecorder{}
+
+// TestPodSecurityEnforceBaselineRejectsHostNetwork drives the real
+// Plugin.Validate decision path in-process (no API server): a pod requesting
+// hostNetwork:true, created in a namespace labeled enforce=baseline, is rejected
+// with a Forbidden error. This is an API-server-free unit complement to the
+// integration test test/integration/auth/podsecurity_test.go::TestPodSecurityEnforceBaselineRejectsPrivileged
+// (which uses privileged/hostPID pods); hostNetwork is a DISTINCT baseline
+// "Host Namespaces" violation, so this does not duplicate the frozen scenario.
+// AAP §0.8.1 (V2): enforce=baseline must reject a hostNetwork:true pod (Forbidden).
+func TestPodSecurityEnforceBaselineRejectsHostNetwork(t *testing.T) {
+	p, err := newPlugin(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.InspectEffectiveVersion(compatibility.DefaultBuildEffectiveVersion())
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "enforce-baseline", Labels: map[string]string{"pod-security.kubernetes.io/enforce": "baseline"}}}
+	c := fake.NewSimpleClientset(ns)
+	p.SetExternalKubeClientSet(c)
+	informerFactory := informers.NewSharedInformerFactory(c, 0)
+	p.SetExternalKubeInformerFactory(informerFactory)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	informerFactory.Start(stopCh)
+	informerFactory.WaitForCacheSync(stopCh)
+	if err := p.ValidateInitialization(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pod passed to NewAttributesRecord is the INTERNAL *core.Pod; convert a
+	// v1 pod with hostNetwork:true (and one container so the PodSpec is valid).
+	corePod := &core.Pod{}
+	v1Pod := &corev1.Pod{Spec: corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "c", Image: "busybox"}}}}
+	if err := v1.Convert_v1_Pod_To_core_Pod(v1Pod, corePod, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	attrs := admission.NewAttributesRecord(
+		corePod, nil,
+		schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"},
+		ns.Name, "mypod",
+		schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+		"", admission.Create, &metav1.CreateOptions{}, false,
+		&user.DefaultInfo{Name: "myuser"},
+	)
+	err = p.Validate(context.Background(), attrs, nil)
+	if err == nil {
+		t.Fatalf("expected hostNetwork:true pod to be rejected by enforce=baseline, got err=nil")
+	}
+	if !apierrors.IsForbidden(err) {
+		t.Errorf("expected a Forbidden error from enforce=baseline, got %v", err)
+	}
+}
+
+// TestPodSecurityUnlabeledNamespaceDefaultsPrivileged is the positive-path
+// counterpart to TestPodSecurityEnforceBaselineRejectsHostNetwork: the SAME
+// hostNetwork:true pod is ADMITTED in a namespace carrying no pod-security
+// labels, because a label-less namespace inherits the cluster default level
+// (privileged), which permits host namespaces. Together these two tests lock
+// BOTH directions of the enforce decision on the identical pod.
+// AAP §0.8.1 (V2): a label-less namespace defaults to privileged and admits a hostNetwork:true pod.
+func TestPodSecurityUnlabeledNamespaceDefaultsPrivileged(t *testing.T) {
+	p, err := newPlugin(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.InspectEffectiveVersion(compatibility.DefaultBuildEffectiveVersion())
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "unlabeled", Labels: map[string]string{}}}
+	c := fake.NewSimpleClientset(ns)
+	p.SetExternalKubeClientSet(c)
+	informerFactory := informers.NewSharedInformerFactory(c, 0)
+	p.SetExternalKubeInformerFactory(informerFactory)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	informerFactory.Start(stopCh)
+	informerFactory.WaitForCacheSync(stopCh)
+	if err := p.ValidateInitialization(); err != nil {
+		t.Fatal(err)
+	}
+
+	corePod := &core.Pod{}
+	v1Pod := &corev1.Pod{Spec: corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "c", Image: "busybox"}}}}
+	if err := v1.Convert_v1_Pod_To_core_Pod(v1Pod, corePod, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	attrs := admission.NewAttributesRecord(
+		corePod, nil,
+		schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"},
+		ns.Name, "mypod",
+		schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+		"", admission.Create, &metav1.CreateOptions{}, false,
+		&user.DefaultInfo{Name: "myuser"},
+	)
+	if err := p.Validate(context.Background(), attrs, nil); err != nil {
+		t.Errorf("expected hostNetwork:true pod to be admitted in a label-less (privileged-default) namespace, got err=%v", err)
+	}
+}
+
+// TestPodSecurityWarnLevelSurfacesRestrictedViolation verifies that a pod which
+// is baseline-compliant but restricted-violating (a plain pod with no
+// securityContext — missing runAsNonRoot/seccompProfile/drop-ALL) is ADMITTED in
+// a namespace labeled warn=restricted (enforce inherits the privileged default),
+// while a non-empty warning is surfaced through the warning recorder. This
+// asserts BOTH the admit path and the warn-surfacing behavior.
+// AAP §0.8.1 (V2): warn=restricted admits a restricted-violating pod but surfaces a warning.
+func TestPodSecurityWarnLevelSurfacesRestrictedViolation(t *testing.T) {
+	p, err := newPlugin(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.InspectEffectiveVersion(compatibility.DefaultBuildEffectiveVersion())
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "warn-restricted", Labels: map[string]string{"pod-security.kubernetes.io/warn": "restricted"}}}
+	c := fake.NewSimpleClientset(ns)
+	p.SetExternalKubeClientSet(c)
+	informerFactory := informers.NewSharedInformerFactory(c, 0)
+	p.SetExternalKubeInformerFactory(informerFactory)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	informerFactory.Start(stopCh)
+	informerFactory.WaitForCacheSync(stopCh)
+	if err := p.ValidateInitialization(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain pod (no securityContext) complies with baseline but violates the
+	// restricted profile, so warn=restricted admits it yet emits a warning.
+	corePod := &core.Pod{}
+	v1Pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "busybox"}}}}
+	if err := v1.Convert_v1_Pod_To_core_Pod(v1Pod, corePod, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	attrs := admission.NewAttributesRecord(
+		corePod, nil,
+		schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"},
+		ns.Name, "mypod",
+		schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+		"", admission.Create, &metav1.CreateOptions{}, false,
+		&user.DefaultInfo{Name: "myuser"},
+	)
+	// Attach a warning recorder exactly like BenchmarkVerifyNamespace (l283-284).
+	dc := dummyRecorder{}
+	ctxWithRecorder := warning.WithWarningRecorder(context.Background(), &dc)
+	if err := p.Validate(ctxWithRecorder, attrs, nil); err != nil {
+		t.Errorf("expected restricted-violating pod to be admitted under warn=restricted (enforce=privileged default), got err=%v", err)
+	}
+	if dc.count == 0 || dc.text == "" {
+		t.Errorf("expected a non-empty PodSecurity warning to be surfaced, got count=%d text=%q", dc.count, dc.text)
+	}
+}

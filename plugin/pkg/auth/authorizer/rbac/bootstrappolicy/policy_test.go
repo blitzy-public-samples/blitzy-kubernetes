@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/component-helpers/auth/rbac/validation"
@@ -344,5 +345,79 @@ func TestNamespaceRoleVerbsConsistency(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// policyRuleIsFullWildcard reports whether a PolicyRule grants unrestricted
+// access: its Verbs, APIGroups, AND Resources must each contain "*". All three
+// dimensions must be wildcarded — a broad read rule such as {list,watch} on */*
+// (policy.go l480) or a non-resource-URL rule is deliberately NOT a full wildcard.
+// This is a bootstrappolicy_test-local reimplementation (using rbacv1.PolicyRule)
+// of the integration test's unexported, un-importable helper.
+func policyRuleIsFullWildcard(r rbacv1.PolicyRule) bool {
+	hasStar := func(s []string) bool {
+		for _, v := range s {
+			if v == "*" {
+				return true
+			}
+		}
+		return false
+	}
+	return hasStar(r.Verbs) && hasStar(r.APIGroups) && hasStar(r.Resources)
+}
+
+// TestNoWildcardClusterRoleExceptClusterAdmin locks the least-privilege invariant
+// that among the bootstrap ClusterRoles exactly one — cluster-admin — carries a
+// full */*/* rule (all verbs, all API groups, all resources), and that its
+// ClusterRoleBinding grants that authority only to the system:masters group. It is
+// the fast, API-server-free unit complement to the integration test
+// TestRBACNoWildcardOutsideSystemMasters.
+// AAP §0.8.1 (V1): no ClusterRole other than cluster-admin is full */*/*, and
+// cluster-admin is bound only to system:masters.
+func TestNoWildcardClusterRoleExceptClusterAdmin(t *testing.T) {
+	// (a) The set of ClusterRoles carrying a full-wildcard rule must equal exactly
+	// {"cluster-admin"} — asserting both directions at once (present AND no other).
+	wildcardRoles := sets.NewString()
+	for _, role := range bootstrappolicy.ClusterRoles() {
+		for _, rule := range role.Rules {
+			if policyRuleIsFullWildcard(rule) {
+				wildcardRoles.Insert(role.Name)
+			}
+		}
+	}
+	if want := sets.NewString("cluster-admin"); !wildcardRoles.Equal(want) {
+		t.Errorf("full-wildcard ClusterRoles = %v, want %v", wildcardRoles.List(), want.List())
+	}
+
+	// (b) Exactly one ClusterRoleBinding may reference the full-wildcard cluster-admin
+	// role, and that sole binding must grant its authority ONLY to the system:masters
+	// group. We enumerate EVERY matching binding (never stopping at the first) so that
+	// an additional cluster-admin binding — or one whose subject lies outside
+	// system:masters — is caught rather than masked. This mirrors the integration
+	// invariant in TestRBACNoWildcardOutsideSystemMasters, which likewise rejects any
+	// binding to a full-wildcard role whose subject is outside system:masters.
+	var clusterAdminBindings []rbacv1.ClusterRoleBinding
+	for _, binding := range bootstrappolicy.ClusterRoleBindings() {
+		if binding.RoleRef.Name == "cluster-admin" {
+			clusterAdminBindings = append(clusterAdminBindings, binding)
+		}
+	}
+	if got := len(clusterAdminBindings); got != 1 {
+		t.Fatalf("found %d ClusterRoleBindings referencing cluster-admin, want exactly 1: %+v", got, clusterAdminBindings)
+	}
+	clusterAdminBinding := clusterAdminBindings[0]
+	if got := len(clusterAdminBinding.Subjects); got != 1 {
+		t.Fatalf("cluster-admin binding %q has %d subjects, want exactly 1: %+v", clusterAdminBinding.Name, got, clusterAdminBinding.Subjects)
+	}
+	// Match on ALL subject fields — Kind, Name, APIGroup, and (empty) Namespace — so a
+	// same-named subject in a different APIGroup or Namespace cannot slip through.
+	wantSubject := rbacv1.Subject{
+		APIGroup:  rbacv1.GroupName,
+		Kind:      rbacv1.GroupKind,
+		Name:      user.SystemPrivilegedGroup,
+		Namespace: "",
+	}
+	if got := clusterAdminBinding.Subjects[0]; got != wantSubject {
+		t.Errorf("cluster-admin binding %q subject = %+v, want %+v", clusterAdminBinding.Name, got, wantSubject)
 	}
 }
