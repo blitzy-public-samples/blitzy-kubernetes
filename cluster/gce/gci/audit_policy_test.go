@@ -294,7 +294,7 @@ func resource(kind string, nsGroupSub ...string) Resource {
 // ordinary resources keep the documented Request-for-reads / RequestResponse-for-writes
 // defaults). It deliberately reloads its own policy and asserts an independent, minimal table
 // rather than depending on TestCreateMasterAuditPolicy's state.
-// AAP §6.6.10 / §0.8.1 (V6) + §6.4.x
+// AAP §6.6.10 / §0.8.1 (V6) + §6.4.6
 func TestAuditPolicyLevelTableNoRaise(t *testing.T) {
 	baseDir, err := os.MkdirTemp("", "configure-helper-test") // cleaned up by c.tearDown()
 	require.NoError(t, err, "Failed to create temp directory")

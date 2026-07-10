@@ -1704,15 +1704,20 @@ func TestNodeRestrictionCrossNodePodsAndEvents(t *testing.T) {
 	)
 
 	tokenFile, err := os.CreateTemp("", "kubeconfig")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tokenFile.WriteString(strings.Join([]string{
+	checkNilError(t, err)
+	// AAP §0.8.1 (V7) / Rule#7 (robust test setup): remove the temp token file at test end and
+	// check the write/close errors via checkNilError (t.Fatalf) — matching the robust os.CreateTemp
+	// handling already used by TestNodeRestrictionServiceAccount in this file, so a partial or failed
+	// write can never silently produce a malformed token file that masks the V7 assertions below.
+	defer os.Remove(tokenFile.Name())
+
+	_, err = tokenFile.WriteString(strings.Join([]string{
 		fmt.Sprintf(`%s,admin,uid1,"system:masters"`, tokenMaster),
 		fmt.Sprintf(`%s,system:node:node1,uid3,"system:nodes"`, tokenNode1),
 		fmt.Sprintf(`%s,system:node:node2,uid4,"system:nodes"`, tokenNode2),
 	}, "\n"))
-	tokenFile.Close()
+	checkNilError(t, err)
+	checkNilError(t, tokenFile.Close())
 
 	// AAP §0.8.1 (V7): enable the NodeRestriction admission plugin together with
 	// Node authorization. The behavioral Forbidden results asserted below only hold
