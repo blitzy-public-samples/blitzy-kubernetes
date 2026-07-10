@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -52,10 +53,26 @@ func runConfigureEtcdParamsExitCode(t *testing.T, env map[string]string) int {
 	script := fmt.Sprintf("cd %q; source %q; params=''; configure-etcd-params params", cwd, kubeAPIServerConfigScriptName)
 
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = os.Environ()
-	for k, v := range env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	// Build a hermetic child environment: inherit the parent environment EXCEPT any
+	// ETCD_APISERVER_* variables, then layer the per-case env on top. Stripping the
+	// inherited ETCD_APISERVER_* prefix keeps the partial-credential / all-absent cases
+	// deterministic even when the parent shell already exports those credential vars:
+	// without this filter, an inherited credential (e.g. ETCD_APISERVER_CA_CERT) would be
+	// injected into a case that intends to omit it, turning an all-absent/bypass case into
+	// a partial-credential set and masking the fail-closed `exit 1` decision. The per-case
+	// env is appended last so an explicit case value always wins over any inherited value.
+	parentEnv := os.Environ()
+	childEnv := make([]string, 0, len(parentEnv)+len(env))
+	for _, kv := range parentEnv {
+		if strings.HasPrefix(kv, "ETCD_APISERVER_") {
+			continue
+		}
+		childEnv = append(childEnv, kv)
 	}
+	for k, v := range env {
+		childEnv = append(childEnv, fmt.Sprintf("%s=%s", k, v))
+	}
+	cmd.Env = childEnv
 
 	out, err := cmd.CombinedOutput()
 	if err == nil {
