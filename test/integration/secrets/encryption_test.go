@@ -254,10 +254,27 @@ resources:
 		"child subprocess must prove the API server fails closed (cachesize rejected at real kube-apiserver startup)")
 }
 
-// TestEncryptionIdentityProviderLastFallback verifies V3: with a strong provider FIRST (aesgcm) and
-// the identity provider LAST, new Secret writes are encrypted by the strong provider (ciphertext in
-// etcd) while identity-present-but-last never causes plaintext storage; it also re-asserts that the
-// plaintext canary is absent from the raw blob and that the apiserver still transparently decrypts.
+// TestEncryptionIdentityProviderLastFallback verifies V3 identity-provider-last fallback ordering in
+// BOTH directions, against the REAL in-process kube-apiserver and REAL etcd (no control-plane mocks):
+//
+//  1. Fallback DECRYPTION of pre-existing data: a Secret written BEFORE encryption was enabled — i.e.
+//     stored via the identity (plaintext) path, exactly the data an upgraded cluster already holds —
+//     must remain readable once the aesgcm-first/identity-last EncryptionConfiguration is applied.
+//     Only the identity provider at the END of the decrypt chain can interpret the unencrypted blob
+//     (the aesgcm transformer's "k8s:enc:aesgcm:..." prefix does not match the plaintext "k8s\x00..."
+//     storage magic), so a successful read of the original value proves identity-provider-last
+//     fallback decryption. The pre-existing object is seeded by a FIRST, plain (identity-storage) API
+//     server that shares the same framework.SharedEtcd() instance, then read back through the
+//     aesgcm-first/identity-last server after a restart — the repository's canonical restart-and-read
+//     pattern (test/integration/controlplane/transformation/kmsv2_transformation_test.go).
+//  2. Ordering for NEW writes: new Secret writes are encrypted by the FIRST (aesgcm) provider
+//     (ciphertext in etcd), identity-present-but-last never causes plaintext storage, the plaintext
+//     canary is absent from the raw new-write blob, and the apiserver still transparently decrypts.
+//
+// Regression lock (both directions): if identity were removed from / not last in the chain, the read
+// of the pre-existing plaintext object would fail with a decryption ("no matching prefix") error; if
+// aesgcm were not first, the new-write blob would not carry the aesgcm prefix. Neither pre-remediation
+// state passes — so the test proves the control, not the harness.
 // AAP §6.6.10 / §0.8.1 (V3) + §6.4.5 (Minimal Change Clause §0.11).
 func TestEncryptionIdentityProviderLastFallback(t *testing.T) {
 	// Function-local (Minimal Change Clause §0.11 — no new package-level state) aesgcm-first +
@@ -277,10 +294,71 @@ resources:
     - identity: {}
 `
 
-	// Capture the SAME shared etcd config passed to the server; its .Prefix and .Transport are
-	// needed for the raw (unencrypted-path) read below.
+	// Capture the SAME shared etcd config ONCE and reuse it for BOTH the seed server and the
+	// aesgcm-first/identity-last server. framework.SharedEtcd() mints a fresh per-call UUID prefix, so
+	// both servers must share THIS instance to observe the same stored objects; its .Prefix and
+	// .Transport are also needed for the raw (unencrypted-path) reads below (never hardcode "registry").
 	storageConfig := framework.SharedEtcd()
 
+	// Distinct namespace/secret names so this test never collides with the existing
+	// TestSecretsAreEncryptedAtRest ("secret-encryption"/"encrypted-secret").
+	const (
+		nsName          = "secret-encryption-fallback"
+		preexistingName = "preexisting-plaintext-secret" // seeded via identity (plaintext) storage
+		newWriteName    = "fallback-new-write-secret"    // written via the aesgcm-first provider
+	)
+
+	// Function-local raw-etcd reader (Minimal Change Clause §0.11 — no new package-level state):
+	// returns the single stored blob for a secret key, reusing the existing etcdKeyForSecret helper
+	// and storageConfig.Prefix/.Transport. Each call opens and closes its OWN etcd client (rawClient
+	// wraps kvClient), so no client is leaked across the two server lifecycles.
+	readRawSecretBlob := func(namespace, name string) []byte {
+		rawClient, kvClient, err := integration.GetEtcdClients(storageConfig.Transport)
+		require.NoError(t, err)
+		defer rawClient.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		resp, err := kvClient.Get(ctx, etcdKeyForSecret(storageConfig.Prefix, namespace, name), clientv3.WithPrefix())
+		require.NoError(t, err)
+		require.Len(t, resp.Kvs, 1)
+		return resp.Kvs[0].Value
+	}
+
+	// Phase 1 — seed a PRE-EXISTING identity/plaintext Secret (data written before encryption).
+	// A FIRST API server started with NO --encryption-provider-config stores secrets via the identity
+	// transformer (plaintext at rest) — exactly the pre-remediation, unencrypted data an upgraded
+	// cluster would already hold. Wrapped in an immediately-invoked function so `defer
+	// seedServer.TearDownFn()` ALWAYS runs (fully firing the storage DestroyFunc chain, keeping the
+	// package goroutine-leak check clean) BEFORE the second server starts; the seeded object persists
+	// in the shared etcd across the restart (canonical restart-and-read pattern, kmsv2_transformation).
+	var ns *corev1.Namespace
+	func() {
+		seedServer := kubeapiservertesting.StartTestServerOrDie(t, nil, []string{
+			"--disable-admission-plugins", "ServiceAccount",
+		}, storageConfig)
+		defer seedServer.TearDownFn()
+
+		seedClient := clientset.NewForConfigOrDie(seedServer.ClientConfig)
+		ns = framework.CreateNamespaceOrDie(seedClient, nsName, t)
+
+		preexisting := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: preexistingName, Namespace: ns.Name},
+			Data:       map[string][]byte{"api_key": []byte(plaintextCanary)},
+		}
+		_, err := seedClient.CoreV1().Secrets(ns.Name).Create(context.TODO(), preexisting, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		// Self-check: confirm the seed is GENUINELY stored as identity/plaintext (NO aesgcm prefix,
+		// canary PRESENT) so the later fallback-decrypt read is unambiguous — it proves the identity
+		// provider handled real plaintext, not accidentally-encrypted data.
+		raw := readRawSecretBlob(ns.Name, preexistingName)
+		assert.False(t, bytes.HasPrefix(raw, []byte(aesGCMPrefix)),
+			"pre-existing seed must be stored via identity (plaintext), not aesgcm, got %q", raw)
+		assert.True(t, bytes.Contains(raw, []byte(plaintextCanary)),
+			"pre-existing seed must contain the plaintext canary (identity/plaintext storage), got %q", raw)
+	}()
+
+	// Phase 2 — read the PRE-EXISTING plaintext object through the aesgcm-first/identity-last server.
 	encPath := filepath.Join(t.TempDir(), "encryption-config.yaml")
 	require.NoError(t, os.WriteFile(encPath, []byte(aesGCMFirstIdentityLastConfigYAML), 0644))
 
@@ -292,47 +370,43 @@ resources:
 	defer server.TearDownFn()
 
 	client := clientset.NewForConfigOrDie(server.ClientConfig)
-
-	// Distinct namespace/secret names so this test never collides with the existing
-	// TestSecretsAreEncryptedAtRest ("secret-encryption"/"encrypted-secret").
-	ns := framework.CreateNamespaceOrDie(client, "secret-encryption-fallback", t)
+	// Delete the namespace via the SECOND (live) server's client; defers run LIFO, so this runs
+	// before server.TearDownFn().
 	defer framework.DeleteNamespaceOrDie(client, ns, t)
 
-	// Create a Secret whose value is the known plaintext canary.
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "fallback-secret", Namespace: ns.Name},
+	// THE FALLBACK-DECRYPTION PROOF: the aesgcm-first/identity-last server must transparently read the
+	// pre-existing plaintext object. The read can only succeed via the identity provider at the END of
+	// the decrypt chain (the aesgcm transformer's prefix does not match the plaintext blob), so a
+	// successful read with the original value proves identity-provider-last fallback decryption. This
+	// is the regression lock: remove/misorder identity and this read fails with a decryption error.
+	gotPre, err := client.CoreV1().Secrets(ns.Name).Get(context.TODO(), preexistingName, metav1.GetOptions{})
+	require.NoError(t, err, "aesgcm-first/identity-last server must read the pre-existing plaintext Secret via the identity (last) provider — fallback decryption")
+	assert.Equal(t, plaintextCanary, string(gotPre.Data["api_key"]),
+		"identity-last fallback must return the original pre-existing plaintext value")
+
+	// Phase 3 — NEW writes are encrypted by the FIRST (aesgcm) provider (existing assertions preserved).
+	newSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: newWriteName, Namespace: ns.Name},
 		Data:       map[string][]byte{"api_key": []byte(plaintextCanary)},
 	}
-	_, err := client.CoreV1().Secrets(ns.Name).Create(context.TODO(), secret, metav1.CreateOptions{})
+	_, err = client.CoreV1().Secrets(ns.Name).Create(context.TODO(), newSecret, metav1.CreateOptions{})
 	require.NoError(t, err)
 
-	// Raw etcd read: reuse the existing etcdKeyForSecret helper and storageConfig.Prefix (never
-	// hardcode "registry" — it embeds a per-run UUID).
-	rawClient, kvClient, err := integration.GetEtcdClients(storageConfig.Transport)
-	require.NoError(t, err)
-	// Closing rawClient avoids leaked goroutines; kvClient wraps it.
-	defer rawClient.Close()
-
-	key := etcdKeyForSecret(storageConfig.Prefix, ns.Name, secret.Name)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	resp, err := kvClient.Get(ctx, key, clientv3.WithPrefix())
-	require.NoError(t, err)
-	require.Len(t, resp.Kvs, 1)
+	newRaw := readRawSecretBlob(ns.Name, newWriteName)
 
 	// Ordering assertion: the FIRST (aesgcm) provider — not identity — encrypts new writes, so the
 	// stored blob must carry the aesgcm ciphertext prefix.
-	assert.True(t, bytes.HasPrefix(resp.Kvs[0].Value, []byte(aesGCMPrefix)),
-		"new writes must be encrypted by the first (aesgcm) provider, got %q", resp.Kvs[0].Value)
+	assert.True(t, bytes.HasPrefix(newRaw, []byte(aesGCMPrefix)),
+		"new writes must be encrypted by the first (aesgcm) provider, got %q", newRaw)
 
 	// Confidentiality assertion: the known plaintext canary must be ABSENT from the raw blob —
 	// identity-being-present-but-last must not cause plaintext storage.
-	assert.False(t, bytes.Contains(resp.Kvs[0].Value, []byte(plaintextCanary)),
+	assert.False(t, bytes.Contains(newRaw, []byte(plaintextCanary)),
 		"plaintext canary %q must not appear in etcd — identity-last must not cause plaintext storage", plaintextCanary)
 
-	// Contract preservation: the apiserver still transparently decrypts on read (identity being
-	// present-but-last in the decrypt chain is harmless).
-	got, err := client.CoreV1().Secrets(ns.Name).Get(context.TODO(), secret.Name, metav1.GetOptions{})
+	// Contract preservation: the apiserver still transparently decrypts the new (aesgcm) write on read
+	// (identity being present-but-last in the decrypt chain is harmless).
+	gotNew, err := client.CoreV1().Secrets(ns.Name).Get(context.TODO(), newWriteName, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, plaintextCanary, string(got.Data["api_key"]))
+	assert.Equal(t, plaintextCanary, string(gotNew.Data["api_key"]))
 }
