@@ -1297,3 +1297,121 @@ func TestRBACNoWildcardOutsideSystemMasters(t *testing.T) {
 		}
 	}
 }
+
+// TestRBACBootstrapRolesNoWildcardEnumerated enumerates every bootstrap ClusterRole
+// and asserts that only cluster-admin carries a full */*/* rule, and that a table of
+// representative built-in roles (edit/view/admin/system:controller:*) carry none.
+// AAP §6.6.10 / §0.8.1 (V1): least-privilege RBAC — only cluster-admin may resolve */*/*.
+func TestRBACBootstrapRolesNoWildcardEnumerated(t *testing.T) {
+	tCtx := ktesting.Init(t)
+	clientset, _, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
+		ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
+			opts.Authorization.Modes = []string{"RBAC"}
+		},
+	})
+	defer tearDownFn()
+
+	// Wait for the RBAC bootstrap policy to populate before listing. This mirrors
+	// the Watch pattern in TestRBACNoWildcardOutsideSystemMasters: block until the
+	// first ClusterRole Added event, then List.
+	watcher, err := clientset.RbacV1().ClusterRoles().Watch(tCtx, metav1.ListOptions{ResourceVersion: "0"})
+	if err != nil {
+		t.Fatalf("unexpected error establishing ClusterRoles watch: %v", err)
+	}
+	if _, err = watchtools.UntilWithoutRetry(tCtx, watcher, func(event watch.Event) (bool, error) {
+		return event.Type == watch.Added, nil
+	}); err != nil {
+		t.Fatalf("unexpected error waiting for ClusterRoles to populate: %v", err)
+	}
+
+	clusterRoles, err := clientset.RbacV1().ClusterRoles().List(tCtx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error listing ClusterRoles: %v", err)
+	}
+	if len(clusterRoles.Items) == 0 {
+		t.Fatalf("missing cluster roles; RBAC bootstrap did not populate")
+	}
+
+	// Index the bootstrap ClusterRoles by name so the representative-role table
+	// below can look up specific built-ins directly.
+	rolesByName := make(map[string]rbacapi.ClusterRole, len(clusterRoles.Items))
+	for _, role := range clusterRoles.Items {
+		rolesByName[role.Name] = role
+	}
+
+	// Exhaustive enumeration: collect every ClusterRole whose rules include a full
+	// */*/* grant (via the shared policyRuleIsFullWildcard helper). The hardened
+	// bootstrap policy must confine that grant to cluster-admin alone.
+	//
+	// AAP §0.8.1 (V1): the full */*/* rule is permitted only in cluster-admin.
+	fullWildcardRoles := map[string]bool{}
+	for _, role := range clusterRoles.Items {
+		for _, rule := range role.Rules {
+			if policyRuleIsFullWildcard(rule) {
+				fullWildcardRoles[role.Name] = true
+				break
+			}
+		}
+	}
+	if !fullWildcardRoles["cluster-admin"] {
+		t.Errorf("expected cluster-admin to carry full wildcard */*/*; full-wildcard roles found: %v", fullWildcardRoles)
+	}
+	for name := range fullWildcardRoles {
+		if name != "cluster-admin" {
+			// AAP §0.8.1 (V1): a non-cluster-admin role holding */*/* is the finding.
+			t.Errorf("V1 finding (AAP §0.8.1): ClusterRole %q carries full */*/* outside cluster-admin", name)
+		}
+	}
+
+	// Positive control: prove the full */*/* rule IS present exactly where it is
+	// expected (cluster-admin). A failure here means the test setup is broken
+	// rather than a genuine least-privilege finding.
+	clusterAdmin, ok := rolesByName["cluster-admin"]
+	if !ok {
+		t.Fatalf("test setup broken: cluster-admin ClusterRole missing from bootstrap policy")
+	}
+	clusterAdminHasWildcard := false
+	for _, rule := range clusterAdmin.Rules {
+		if policyRuleIsFullWildcard(rule) {
+			clusterAdminHasWildcard = true
+			break
+		}
+	}
+	if !clusterAdminHasWildcard {
+		t.Fatalf("test setup broken: cluster-admin does not carry the expected full */*/* rule")
+	}
+
+	// Representative-role regression lock: a hardcoded table of high-value built-in
+	// ClusterRoles that MUST exist in the bootstrap set and MUST NOT carry a full
+	// */*/* wildcard rule. Locking these by name catches any future change that
+	// reintroduces a wildcard grant into a role that should stay least-privilege.
+	cases := []struct {
+		name string
+	}{
+		{"edit"},
+		{"view"},
+		{"admin"},
+		{"system:controller:generic-garbage-collector"},
+		{"system:controller:namespace-controller"},
+		{"system:controller:resourcequota-controller"},
+		{"system:kube-scheduler"},
+		{"system:node"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			role, ok := rolesByName[tc.name]
+			if !ok {
+				// A missing built-in means the bootstrap policy changed; surface it.
+				t.Errorf("expected built-in ClusterRole %q to exist in bootstrap policy", tc.name)
+				return
+			}
+			// AAP §0.8.1 (V1): none of these built-in roles may resolve */*/*.
+			for _, rule := range role.Rules {
+				if policyRuleIsFullWildcard(rule) {
+					t.Errorf("V1 finding (AAP §0.8.1): built-in ClusterRole %q unexpectedly carries a full */*/* wildcard rule; least-privilege RBAC requires none", tc.name)
+					break
+				}
+			}
+		})
+	}
+}

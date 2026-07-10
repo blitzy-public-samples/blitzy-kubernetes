@@ -1,6 +1,10 @@
-# Blitzy Project Guide — `blitzy-kubernetes` Security-Hardening Remediation (V1–V8)
+# Blitzy Project Guide
 
-> **Brand legend:** Completed / AI Work = **Dark Blue `#5B39F3`** · Remaining / Not Completed = **White `#FFFFFF`** · Headings/Accents = Violet-Black `#B23AF2` · Highlight = Mint `#A8FDD9`
+> **Project:** Security Regression-Suite Hardening (V1–V8) — Kubernetes GCE-Reference Fork
+> **Branch:** `blitzy-533dfec5-aad9-4a9b-8814-711d6ad18039` · **HEAD:** `12e9ead8590` · **Base:** `dc329e1a146`
+> **Nature:** Additive, test-only hardening — no production/control-plane code modified · dependencies frozen
+>
+> **Brand color legend:** Completed / AI Work = Dark Blue `#5B39F3` · Remaining / Not Completed = White `#FFFFFF` · Headings / Accents = Violet-Black `#B23AF2` · Highlight = Mint `#A8FDD9`
 
 ---
 
@@ -8,64 +12,64 @@
 
 ### 1.1 Project Overview
 
-This project is a **security-hardening remediation** of the `blitzy-kubernetes` control plane (Go module `k8s.io/kubernetes`, toolchain `go 1.25.0`). Following a strict *minimal-change, configuration-first* mandate, it closes eight deployment-hardening weaknesses (V1–V8) — RBAC scoping, Pod Security enforcement, Secrets encryption at rest, ServiceAccount-token hygiene, admission-webhook posture, audit fidelity, NodeRestriction, and etcd mutual-TLS — without touching control-plane mechanism code, dependencies, or public contracts. Target beneficiaries are platform/security engineers operating Kubernetes clusters that must meet CIS, NSA/CISA, and OWASP hardening standards. The remediation surface is the GCE reference deployment scripts, generated admission/encryption/audit configuration, namespace labels, and API-server flags, plus targeted security regression tests.
+This project hardens the automated regression suite of a Kubernetes GCE-reference fork for eight previously-remediated security weaknesses — **V1** RBAC least-privilege, **V2** Pod Security admission, **V3** secrets encryption-at-rest, **V4** ServiceAccount-token hygiene, **V5** admission-webhook fail-closed, **V6** audit fidelity, **V7** NodeRestriction, and **V8** etcd mutual-TLS. It adds **12 new negative-path and boundary-condition test functions across 11 files**, each locking a control against silent regression by exercising the real in-process API server and the real bash config generators. Target users are platform-security and Kubernetes-release engineers who rely on pass/fail regression gates. Business impact: converts single acceptance tests into defense-in-depth regression locks. The change is strictly additive and test-only — no production code is touched.
 
 ### 1.2 Completion Status
 
 ```mermaid
-pie showData title Completion — 68.8% Complete (53 of 77 hours)
-    "Completed Work (hrs) #5B39F3" : 53
-    "Remaining Work (hrs) #FFFFFF" : 24
+%%{init: {'theme':'base','themeVariables':{'pie1':'#5B39F3','pie2':'#FFFFFF','pieStrokeColor':'#B23AF2','pieOuterStrokeColor':'#B23AF2','pieStrokeWidth':'2px','pieTitleTextColor':'#B23AF2','pieSectionTextColor':'#111111','pieLegendTextColor':'#111111'}}}%%
+pie showData title Project Completion — 90.5% Complete
+    "Completed (AI) — 95h" : 95
+    "Remaining — 10h" : 10
 ```
 
-<div align="center"><strong>68.8% Complete</strong></div>
-
-| Metric | Hours |
+| Metric | Value |
 |--------|-------|
-| **Total Hours** | **77** |
-| Completed Hours (AI + Manual) | 53 |
-| Remaining Hours | 24 |
-| **Percent Complete** | **68.8%** |
+| **Total Hours** | **105** |
+| **Completed Hours (AI + Manual)** | **95** (95 AI + 0 Manual) |
+| **Remaining Hours** | **10** |
+| **Percent Complete** | **90.5%** (95 ÷ 105) |
 
-> Completion is computed per PA1 (AAP-scoped hours only): `53 / (53 + 24) × 100 = 68.8%`. Completed hours are 100% AI-authored/validated (Manual = 0). Remaining hours are path-to-production deployment/operational work.
+> Completion is computed on AAP-scoped work + in-scope path-to-production (peer review, CI confirmation), per PA1. Deferred deployment-time provisioning is out of AAP scope and excluded from this calculation (see §2.3).
 
 ### 1.3 Key Accomplishments
 
-- ✅ **V3 — Secrets encryption at rest:** Created `EncryptionConfiguration` (KMS v2 first, `identity` last) and wired `--encryption-provider-config` in the API-server bootstrap; integration test asserts `k8s:enc:aesgcm` ciphertext in raw etcd with the plaintext canary absent.
-- ✅ **V2 — Pod Security enforced:** Added a `PodSecurity` admission block (`enforce=baseline`, `warn/audit=restricted`, `kube-system` exempt) with the config envelope raised `v1alpha1`→`v1`, plus a namespace PSS-labels manifest; `PodSecurity` added to `ADMISSION_CONTROL` on both GCE profiles.
-- ✅ **V6 — Audit fidelity raised:** Secrets and `serviceaccounts/token` raised `Metadata`→`Request` (RBAC stays `RequestResponse`; ConfigMaps/TokenReviews stay `Metadata`), with a deliberate `Request`-not-`RequestResponse` choice to keep issued tokens and read payloads out of the log.
-- ✅ **V8 — etcd transport fail-closed:** Hardened profiles refuse plaintext etcd fallback (`ETCD_APISERVER_ALLOW_INSECURE=false`, `exit 1` when mTLS creds absent), propagated through `kube-env`.
-- ✅ **V1 / V4 / V5 / V7 — verified secure & regression-locked:** RBAC least-privilege (wildcard only in `cluster-admin`→`system:masters`), bound/audience-scoped SA tokens, fail-closed webhook (`Fail`, `5s`), and `NodeRestriction` presence — each pinned by a new regression test.
-- ✅ **Quality gates:** `gofmt`/`go vet`/`shellcheck`/YAML all clean (independently re-verified); unit + integration suites green; control-plane binaries build and run; every artifact carries inline tech-spec/AAP citations.
+- ✅ **All 8 weaknesses locked** with at least one new negative-path/boundary test each (12 new `Test*` functions).
+- ✅ **V5 gap closed** — the fail-closed admission-webhook path went from *zero* Go tests to a dedicated deny-on-unreachable test (new file).
+- ✅ **Two priority controls hardened** — V3 (data-at-rest) `cachesize`-under-KMS-v2 startup rejection + identity-provider-last fallback; V8 (transport) partial-credential `exit 1` fail-closed table via a new subprocess helper.
+- ✅ **Strictly additive** — 0 removed lines across all 11 test files; only the docs file has edits. Minimal Change Clause (§0.11) satisfied.
+- ✅ **All quality gates green** — `gofmt -l` empty, `go vet` clean, `shellcheck --severity=error` 0 findings.
+- ✅ **67 top-level tests pass, 0 fail** across the 4 target packages; all 12 new tests individually confirmed PASS.
+- ✅ **Dependencies frozen & verified** — `go mod verify` → all modules verified; offline build works; `go.mod`/`go.work`/`vendor/` untouched.
+- ✅ **Runtime validated** — `kube-apiserver` builds and reports `v1.34.0-blitzy`.
+- ✅ **Within budget** — 1,726 net-new test lines vs. the 5,000-line hard budget; no descoping triggered.
 
 ### 1.4 Critical Unresolved Issues
 
 | Issue | Impact | Owner | ETA |
 |-------|--------|-------|-----|
-| Encryption key material (KMS/AES-GCM) not provisioned; existing Secrets not yet migrated | Secrets remain plaintext in etcd until keys are provisioned and storage migration runs (V3 value unrealized) | Platform Security Eng | ~8h |
-| Pod Security `enforce` not yet flipped on live namespaces | Privileged pods still admitted until warn/audit soak completes and `enforce=baseline` is applied (V2 value unrealized) | Platform Eng | ~4h |
-| etcd mTLS certs / network isolation not verified on target cluster | etcd transport hardening (V8) unverified in the live environment | Platform/Infra Eng | ~3h |
-| `kube-bench` CIS before/after delta not yet captured | No automated benchmark sign-off evidence yet | Security Eng | ~3h |
+| Mandatory human peer review & merge pending | Change cannot land until reviewed/merged (standard gate) | Kubernetes reviewer / repo maintainer | 0.75 day (6h) |
+| Regression-lock efficacy is design-verified, not independently counter-run | Low — provenance comments document the pre-remediation failure path; a reviewer spot-check confirms it | Reviewer | Within review (included in 6h) |
+| New tests not yet confirmed in canonical external Prow CI | Low — Go `*_test.go` auto-discovery means no config change; needs a presubmit confirmation | CI/Release engineer | 0.25 day (2h) |
 
-> These are **deployment-execution** items, not code defects. No compilation or test failures exist on this branch.
+> **No code-level blockers exist.** All tests pass, all static gates are green, and the build succeeds. The only gating items are the standard human review/merge and CI confirmation.
 
 ### 1.5 Access Issues
 
-| System/Resource | Type of Access | Issue Description | Resolution Status | Owner |
-|-----------------|----------------|-------------------|-------------------|-------|
-| KMS provider (KMS v2 plugin) | Key-management endpoint / socket | Real KMS socket or 32-byte AES-GCM key must be provisioned **out-of-band** (never committed); repo ships placeholders only | Open — deployment prerequisite | Platform Security Eng |
-| etcd mTLS PKI | CA / server / client certificates | etcd apiserver certificates must be present (GCE auto-provisions via `build-kube-master-certs`); verify in target env | Open — deployment prerequisite | Platform/Infra Eng |
-| Target cluster / GCE project | Cluster admin + deploy rights | Applying namespace labels, running storage migration, and `kube-bench` require live-cluster credentials not available to autonomous validation | Open — expected | Platform Eng |
+| System / Resource | Type of Access | Issue Description | Resolution Status | Owner |
+|-------------------|----------------|-------------------|-------------------|-------|
+| Source repository | Write / merge | Test PR requires reviewer approval + merge rights | Pending human action (not blocked) | Repo maintainer |
+| External Prow CI (test-infra) | Job config visibility | Confirm presubmit runs the new tests | Pending (informational) | CI engineer |
+| Live KMS / etcd PKI / SIEM (deferred) | Secret material / infra credentials | Needed only for *deployment* of the underlying controls — **out of scope** for this test effort | Deferred (see §2.3) | Platform/SRE team |
 
-> No access issue affects the committed repository, build, or the autonomous test suite. All items above are inherent to a config-first hardening that finalizes on live infrastructure.
+> **No access issues prevented automated build or validation of this test-hardening effort** — the offline build and the full test suite both succeed. The infra-credential rows above pertain to a separate, deferred deployment effort.
 
 ### 1.6 Recommended Next Steps
 
-1. **[High]** Provision encryption key material (KMS v2 or AES-GCM) out-of-band, set `ENCRYPTION_PROVIDER_CONFIG`, deploy, then run the Secrets storage migration and remove `identity` from the decrypt list (V3).
-2. **[High]** Apply `cluster/manifests/namespace-pss-labels.yaml` to all workload namespaces, complete a `warn`/`audit` soak, remediate violations, then flip `enforce=baseline` (V2).
-3. **[Medium]** Provision/verify etcd mTLS certificates, network-isolate etcd, and confirm `https` transport with no plaintext fallback (V8).
-4. **[Medium]** Run `kube-bench` CIS before/after on the running cluster and capture the delta; perform `etcdctl` ciphertext and `kubectl auth can-i` / namespace-label spot-checks (verification sign-off).
-5. **[Low]** Wire SIEM alerts for the now-captured high-signal audit events (secret access, RBAC mutations, privilege escalation).
+1. **[High]** Peer-review the additive test PR (12 files), confirm additive-only / no frozen-file changes, and **spot-check one regression-lock counter-run** against the unhardened config; then merge. *(6h)*
+2. **[Medium]** Confirm the CI/Prow presubmit **discovers and runs the 12 new `Test*` functions** across the 4 target packages. *(2h)*
+3. **[Medium]** Run the **full integration suite green in the canonical CI environment** (etcd on `PATH`; `KUBERNETES_SERVICE_*` unset when inside a pod). *(2h)*
+4. **[Low]** Schedule the **deferred deployment-time provisioning** (real KMS keys, live etcd mTLS certs, SIEM wiring, kube-bench) as a separate initiative — see §2.3. *(out-of-scope, informational)*
 
 ---
 
@@ -74,165 +78,184 @@ pie showData title Completion — 68.8% Complete (53 of 77 hours)
 ### 2.1 Completed Work Detail
 
 | Component | Hours | Description |
-|-----------|-------|-------------|
-| V3 — Encryption-at-rest configuration | 7 | `EncryptionConfiguration` manifest (KMS v2 first / identity last, placeholder keys) + `--encryption-provider-config` wiring in `configure-kubeapiserver.sh` + env docs in both config profiles |
-| V2 — Pod Security admission + namespace labels | 8 | `PodSecurity` block in generated `admission_controller_config.yaml` (envelope `v1alpha1`→`v1`), `namespace-pss-labels.yaml`, `PodSecurity` added to `ADMISSION_CONTROL` on both profiles |
-| V6 — Audit-fidelity raise + advanced-audit enablement | 5 | Secrets/`serviceaccounts/token` `Metadata`→`Request` in `create-master-audit-policy`; `ENABLE_APISERVER_ADVANCED_AUDIT` on both profiles; credential-safety reasoning |
-| V8 — etcd fail-closed mTLS wiring | 5 | Fail-closed `configure-etcd-params` logic (`ETCD_APISERVER_ALLOW_INSECURE`), `kube-env` propagation in `util.sh`, hardened defaults in both profiles |
-| V1 — RBAC least-privilege verification + regression test | 3 | Verified wildcard only in `cluster-admin`→`system:masters`; `TestRBACNoWildcardOutsideSystemMasters` |
-| V7 — NodeRestriction verification + cross-node test | 3 | Confirmed `NodeRestriction` in admission chain; `TestNodeRestrictionCrossNodeDenied` |
-| V4 — ServiceAccount bound/audience token verification + test | 3 | Confirmed bound/audience tokens + GA cleanup controller; `TestServiceAccountTokenBoundAndAudienced` (asserts `exp`/`aud`/TTL) |
-| V5 — Admission webhook fail-closed verification | 1 | Verified sole committed webhook is `failurePolicy: Fail`, `timeoutSeconds: 5` |
-| Security test suite authoring (6 files, +740 LOC) | 10 | Unit + integration tests spanning secrets/auth/audit harnesses (`framework.SharedEtcd`, raw etcd reads) |
-| Autonomous validation (compile/vet/gofmt/shellcheck/unit+integration/runtime builds) | 5 | Full gate execution incl. building `kube-apiserver`/`kcm`/`kubeadm` and proving configs apiserver-consumable |
-| Inline documentation + QA review cycles | 3 | Tech-spec/AAP citations on every artifact + multi-round CP/QA fixes (10 commits) |
-| **Total** | **53** | |
+|-----------|:-----:|-------------|
+| V1 — RBAC least-privilege enumeration | 4 | `TestRBACBootstrapRolesNoWildcardEnumerated`: enumerate all bootstrap ClusterRoles; assert only `cluster-admin`/`system:masters` hold `*/*/*` via `policyRuleIsFullWildcard` (rbac_test.go, +118) |
+| V2 — Pod Security boundary + exemption | 11 | `TestPodSecurityKubeSystemExemptionPreserved`, `TestPodSecurityAuditRestrictedBoundary`: enforce/warn/`audit=restricted` boundaries; `kube-system` exemption preserved; no-loosening (podsecurity_test.go, +331) |
+| V3 — Secrets encryption (priority) | 11 | `TestEncryptionKMSv2CachesizeRejectedAtStartup`, `TestEncryptionIdentityProviderLastFallback`: `cachesize`-under-v2 startup rejection; identity-last decryption fallback; plaintext-canary absence (encryption_test.go, +259) |
+| V4 — ServiceAccount-token hygiene | 8 | `TestServiceAccountTokenHardening`: (a) audience-mismatch reject, (b) expired-token reject, (c) over-TTL clamp to 2h, (d) cleanup-controller (svcaccttoken_test.go, +172) |
+| V5 — Admission-webhook fail-closed (new file) | 8 | `TestAdmissionWebhookFailClosedDeniesUnreachable`: `failurePolicy: Fail`/`timeoutSeconds: 5` unreachable webhook denies a matching CREATE; non-matching bypass via matchConditions (+193) |
+| V6 — Audit fidelity (Go + bash) | 9 | `TestAuditServiceAccountTokenRequestLevel` (+137) + `TestAuditPolicyLevelTableNoRaise` (+79): Request-level fields, confidentiality (no response body), level table + no-raise regression |
+| V7 — NodeRestriction cross-node + ordering (new file) | 9 | `TestNodeRestrictionCrossNodePodsAndEvents` (+162) + `TestAdmissionControlNodeRestrictionOrdering` (+104): cross-node denials; NodeRestriction precedes PodSecurity in emitted plugins |
+| V8 — etcd mTLS fail-closed + subprocess helper (priority, new file) | 8 | `TestConfigureEtcdParamsFailClosed` (+83) + `runConfigureEtcdParamsExitCode` helper (+88): partial-credential `exit 1` table; `ALLOW_INSECURE=false` default |
+| Discovery & existing-infra analysis | 4 | Target-file confirmation, harness/fixture mapping, gap analysis across the 4 packages |
+| Web research (version compatibility) | 2 | testify v1.11.1 / ginkgo v2.27.2 / gomega v1.38.2 / goleak v1.3.0 vs Go 1.25.4 (frozen stack validation) |
+| Fixture setup & reuse | 2 | `namespace-pss-labels.yaml` (V2), `encryption-provider-config.yml` (V3) reused; inline malformed `cachesize` variant |
+| Validation, debugging & code-review remediation | 12 | 22 agent commits incl. multiple review rounds (CP/CP2/QA R6-I1), in-pod env troubleshooting, regression-lock iteration |
+| Quality-gate conformance | 3 | `gofmt` / `go vet` / `shellcheck --severity=error` / golangci across 11 files + 5 referenced scripts |
+| Documentation | 4 | `Project Guide.md` §3 measurable-objectives table + Appendix C artifact-to-weakness map + 49/49 accuracy corrections |
+| **Total** | **95** | **Matches Completed Hours in §1.2** |
 
 ### 2.2 Remaining Work Detail
 
 | Category | Hours | Priority |
-|----------|-------|----------|
-| V3 — KMS/AES-GCM key provisioning (out-of-band) + storage migration to re-encrypt existing Secrets + remove `identity` | 8 | High |
-| V2 — Apply PSS labels to all workload namespaces + `warn`/`audit` soak + remediate + flip `enforce=baseline` | 4 | High |
-| V8 — Provision/verify etcd mTLS certs + network-isolate etcd + verify `https` transport | 3 | Medium |
-| Verification — `kube-bench` CIS before/after delta + manual `etcdctl`/`kubectl` spot-checks | 3 | Medium |
-| Path-to-production — pre-deployment security review sign-off + staging dry-run of coordinated rollout | 2.5 | Medium |
-| V4 — Verify `LegacyServiceAccountTokenCleanUp` active on control plane + optional `--service-account-token-max-expiration` | 1.5 | Medium |
-| Operational — Wire SIEM monitoring/alerting (secret access, RBAC mutations, privilege escalation) | 2 | Low |
-| **Total** | **24** | |
+|----------|:-----:|----------|
+| Human peer review, feedback remediation & merge (incl. one regression-lock counter-run spot-check) | 6 | High |
+| CI/Prow presubmit wiring confirmation (new `Test*` functions discovered & run) | 2 | Medium |
+| Canonical CI full integration-suite green run + env-invocation triage | 2 | Medium |
+| **Total** | **10** | **Matches Remaining Hours in §1.2 and §7** |
 
-### 2.3 Hours Reconciliation
+### 2.3 Deferred / Out-of-Scope (Informational — NOT counted in the 105h)
 
-- **Completed (2.1)** = **53h** · **Remaining (2.2)** = **24h** · **Total** = **77h**
-- Verification: `2.1 (53) + 2.2 (24) = 77` = Section 1.2 Total ✓ · Section 2.2 (24) = Section 1.2 Remaining = Section 7 "Remaining Work" ✓
-- Completion: `53 / 77 = 68.8%` ✓
+These items are explicitly **out of scope** for this test-hardening effort (AAP §0.8.2). They require live infrastructure / out-of-band secrets and belong to a separate deployment initiative. They are listed for planning visibility only and are **excluded** from the completion percentage and from §2.1/§2.2.
+
+| Deferred Item | Indicative Range | Rationale |
+|---------------|:----------------:|-----------|
+| Real KMS key material / AES-GCM provisioning (V3) | ~8–16h | Requires live KMS + out-of-band key material |
+| Live etcd mutual-TLS cert provisioning + network isolation (V8) | ~8–16h | Requires PKI + cluster network configuration |
+| SIEM alerting integration for the V6 audit stream | ~8–16h | Requires SIEM endpoint/credentials |
+| kube-bench / CIS benchmark delta run | ~4–8h | Requires a deployed cluster |
 
 ---
 
 ## 3. Test Results
 
-All tests below originate from Blitzy's autonomous validation logs for this project and were re-verified where fast to run. This remediation ships **targeted security regression tests** (pass/fail gates), not coverage-driven suites; code coverage % was not a measured deliverable and is reported as **N/A**.
+All results below originate from **Blitzy's autonomous validation logs** for this project; the bash-unit tier was additionally re-verified firsthand during this assessment. Coverage is reported as **N/A** by repository convention (pass/fail regression gates; line coverage is opt-in via `KUBE_COVER=y` and not a merge gate).
 
 | Test Category | Framework | Total Tests | Passed | Failed | Coverage % | Notes |
-|---------------|-----------|-------------|--------|--------|------------|-------|
-| Unit — Audit policy (V6) | Go `testing` | 1 | 1 | 0 | N/A | `TestCreateMasterAuditPolicy` executes the **real** `create-master-audit-policy` bash fn; asserts Secrets/SA-token→`Request`, RBAC stays `RequestResponse` (re-verified: `ok 0.031s`) |
-| Unit — RBAC mechanism (V1) | Go `testing` | 2 pkgs | 2 pkgs | 0 | N/A | `rbac` + `bootstrappolicy` packages green (re-verified `ok`) |
-| Unit — PodSecurity admission (V2) | Go `testing` | 1 pkg | 1 pkg | 0 | N/A | `plugin/pkg/admission/security/podsecurity` green (re-verified `ok`) |
-| Unit — NodeRestriction (V7) | Go `testing` | 1 pkg | 1 pkg | 0 | N/A | `plugin/pkg/admission/noderestriction` green (re-verified `ok`) |
-| Unit — ServiceAccount (V4) | Go `testing` | 1 pkg | 1 pkg | 0 | N/A | `pkg/serviceaccount` (+externaljwt) green (per logs) |
-| Integration — Secrets encryption (V3) | Go `testing` + etcd | 1 | 1 | 0 | N/A | `TestSecretsAreEncryptedAtRest`: raw etcd read proves `k8s:enc:aesgcm` ciphertext; plaintext canary absent; apiserver decrypt round-trip |
-| Integration — Auth (V1/V2/V4/V7) | Go `testing` + apiserver | 43 | 43 | 0 | N/A | Full `test/integration/auth` package: 43 top-level tests, 0 failures, ~208s (includes new no-wildcard, privileged-pod rejection, bound/audienced token, cross-node denial) |
-| Integration — Control-plane audit (V6) | Go `testing` + apiserver | 1 | 1 | 0 | N/A | `TestAuditSensitiveResourceLevels`: secrets-`Request` + rbac-`RequestResponse` subtests pass |
+|---------------|-----------|:-----------:|:------:|:------:|:----------:|-------|
+| Auth integration (V1/V2/V4/V5/V7) | `testify` + `go test` (in-process API server + shared etcd) | 49 | 49 | 0 | N/A | ~227.6s; top-level tests |
+| Secrets integration (V3) | `testify` + `go test` | 4 | 4 | 0 | N/A | ~19.8s; raw-etcd ciphertext read |
+| Audit integration (V6) | `testify` + `go test` | 3 | 3 | 0 | N/A | ~19.5s; audit-log field checks |
+| GCE bash-unit (V6/V7/V8) | `testify` + `go test` (`ManifestTestCase`) | 11 | 11 | 0 | N/A | ~1.16s; 742 subtests; re-verified firsthand (`ok 1.158s`) |
+| **Aggregate** | — | **67** | **67** | **0** | **N/A** | **100% pass** |
 
-**Aggregate:** 6 Blitzy-authored security test functions (V1/V2/V3/V4/V6/V7) plus the modified V6 unit test, all green, executed within full-package runs that report **0 failures**. Regression-safe: all five modified test files are purely additive (0 removed lines, no `init()`/global additions).
+**New `Test*` functions added by this task (all PASS):**
+
+| Weakness | New Test Function(s) | Package | Result |
+|----------|----------------------|---------|:------:|
+| V1 | `TestRBACBootstrapRolesNoWildcardEnumerated` | auth | ✅ |
+| V2 | `TestPodSecurityKubeSystemExemptionPreserved`, `TestPodSecurityAuditRestrictedBoundary` | auth | ✅ |
+| V3 | `TestEncryptionKMSv2CachesizeRejectedAtStartup`, `TestEncryptionIdentityProviderLastFallback` | secrets | ✅ |
+| V4 | `TestServiceAccountTokenHardening` | auth | ✅ |
+| V5 | `TestAdmissionWebhookFailClosedDeniesUnreachable` *(new file)* | auth | ✅ |
+| V6 | `TestAuditServiceAccountTokenRequestLevel`; `TestAuditPolicyLevelTableNoRaise` | audit; gci | ✅ |
+| V7 | `TestNodeRestrictionCrossNodePodsAndEvents`; `TestAdmissionControlNodeRestrictionOrdering` *(new file)* | auth; gci | ✅ |
+| V8 | `TestConfigureEtcdParamsFailClosed` (+ `runConfigureEtcdParamsExitCode` helper, new file) | gci | ✅ |
+
+> **Test-execution note:** Inside a Kubernetes pod, the pre-existing upstream test `TestNodeRestrictionServiceAccountAudience` (NOT part of V1–V8) must be run with the pod's `KUBERNETES_SERVICE_*` env vars unset so its in-process controller-manager does not pick up the pod's SA token. With this standard invocation, the auth suite is 49/49. This is an invocation-environment effect, not a code defect.
 
 ---
 
 ## 4. Runtime Validation & UI Verification
 
-This is a control-plane/configuration project with **no UI surface**; runtime validation focuses on API-server bootstrap, config consumption, and admission/encryption/audit behavior.
+**Runtime health:**
+- ✅ **Operational** — `kube-apiserver` builds (`make WHAT=cmd/kube-apiserver`, ~85MB) and reports `Kubernetes v1.34.0-blitzy` (rc=0).
+- ✅ **Operational** — Real in-process API server + real embedded etcd start on every integration-tier run (harness runtime evidence).
+- ✅ **Operational** — Bash-unit tier renders real apiserver manifests via `ManifestTestCase` and asserts on emitted `execArgs` (re-verified firsthand: `ok 1.158s`).
+- ✅ **Operational** — Dependency graph verified offline (`GOPROXY=off go mod verify` → all modules verified).
 
-- ✅ **Operational — Control-plane binaries build & run:** `kube-apiserver` (`v1.34.0-blitzy`, exposes all V2/V3/V6/V8 flags), `kube-controller-manager` (V4), and `kubeadm` (V7) build and start.
-- ✅ **Operational — V2 admission config consumable:** `admission_controller_config.yaml` decodes via `admission.ReadAdmissionConfiguration` + PodSecurity `LoadFromReader` → `enforce=baseline`, `warn/audit=restricted`, `exemptions.namespaces=[kube-system]`.
-- ✅ **Operational — V3 encryption config consumable:** `encryption-provider-config.yml` decodes into apiserver `EncryptionConfiguration` → `resources=[secrets,configmaps]`, `providers=[kms(v2), identity]` (strong first, identity last); base64 round-trip re-verified.
-- ✅ **Operational — V5 webhook fail-closed:** sole committed webhook is `failurePolicy: Fail`, `timeoutSeconds: 5`.
-- ✅ **Operational — V8 etcd fail-closed across 4 scenarios:** hardened (no certs) → `exit 1`; dev (`ALLOW_INSECURE=true`) → plaintext loopback; unset → unit-test-compat default; full mTLS → `https` + `--etcd-cafile/certfile/keyfile`.
-- ⚠ **Partial — Live-cluster behavior:** privileged-pod rejection, ciphertext-at-rest, and cross-node denial are proven in **integration tests**; on-cluster confirmation (with real keys/certs and enforced namespaces) is pending deployment (see §2.2 / §9).
-- ❌ **Failing:** none.
+**API integration outcomes:**
+- ✅ **Operational** — V3 reads raw ciphertext from real etcd via `integration.GetEtcdClients` using the shared-etcd prefix.
+- ✅ **Operational** — V5 installs a real `MutatingWebhookConfiguration` and asserts the deny outcome against the live admission path.
+- ✅ **Operational** — V8 sources the real `configure-kubeapiserver.sh` in a `bash -c` subprocess and captures the `exit 1` fail-closed code.
+
+**UI verification:** ⚠ **Not Applicable** — this is a Kubernetes control-plane test-hardening effort with **no frontend/UI**. No browser/e2e (ginkgo) specs are added or required (confirmed).
 
 ---
 
 ## 5. Compliance & Quality Review
 
-| Deliverable / Benchmark | AAP Ref | Status | Progress | Fixes Applied / Notes |
-|-------------------------|---------|--------|----------|-----------------------|
-| V1 RBAC least-privilege (CIS RBAC) | §0.6.1 | ✅ Pass | ▓▓▓▓▓ | Verified wildcard only in `cluster-admin`→`system:masters`; regression test added; no code change |
-| V2 Pod Security (CIS/NSA `restricted`) | §6.4.4.3 | ✅ Pass (config) | ▓▓▓▓░ | Admission block + labels committed; **live `enforce` flip pending** |
-| V3 Encryption at rest (CIS/NSA) | §6.4.5 | ✅ Pass (config) | ▓▓▓▓░ | Config + wiring + test committed; **key provisioning + migration pending** |
-| V4 SA-token hygiene (NSA short-lived tokens) | §0.6.1 | ✅ Pass | ▓▓▓▓▓ | Bound/audience tokens verified; GA cleanup controller present; claim shape preserved |
-| V5 Admission webhook fail-closed | §0.5.1 | ✅ Pass | ▓▓▓▓▓ | Sole committed webhook already `Fail`/`5s`; verified |
-| V6 Audit coverage (CIS/NSA audit) | §6.4.6 | ✅ Pass | ▓▓▓▓▓ | Secrets/SA-token→`Request`; RBAC `RequestResponse`; `Request`-not-`RequestResponse` keeps payloads/tokens out of log |
-| V7 NodeRestriction (CIS node authz) | §0.6.1 | ✅ Pass | ▓▓▓▓▓ | Present in `ADMISSION_CONTROL` on both profiles; cross-node denial test |
-| V8 etcd mTLS (CIS/NSA etcd) | §6.2.4.6 | ✅ Pass (config) | ▓▓▓▓░ | Fail-closed wiring committed; **live cert/network verify pending** |
-| Minimal Change Clause | §0.11 | ✅ Pass | ▓▓▓▓▓ | Config-first; no functional code changes; `go.mod`/vendor untouched; no out-of-scope edits |
-| Documentation directive | §0.11 | ✅ Pass | ▓▓▓▓▓ | Inline tech-spec/AAP citations on every edited/created artifact |
-| Contract preservation (REST/CRI/CSI/CNI/kubectl/claim shape) | §0.10.3 | ✅ Pass | ▓▓▓▓▓ | No API/interface/claim changes |
-| Code quality gates (gofmt/vet/shellcheck/YAML) | §0.10.1 | ✅ Pass | ▓▓▓▓▓ | Independently re-verified clean (shellcheck error-severity = 0) |
-
-**Standards alignment:** CIS Kubernetes Benchmark (RBAC, Pod Security, etcd encryption, audit), NSA/CISA Kubernetes Hardening Guide v1.2, OWASP Kubernetes Top 10. Formal `kube-bench` before/after certification is a remaining verification task (§2.2).
+| Benchmark / Directive | Status | Evidence / Fixes Applied |
+|-----------------------|:------:|--------------------------|
+| Minimal Change Clause — additive-only, zero removed test lines | ✅ Pass | Per-file `numstat`: all 11 test files have 0 deletions; only docs edited (+38/−16) |
+| Dependency freeze (`go.mod`/`go.work`/`vendor/` untouched) | ✅ Pass | No frozen files in diff; `go mod verify` → all modules verified |
+| No production/mechanism/control-plane changes | ✅ Pass | No `cmd/`/`pkg/`/`plugin/`/`staging/`/`*.sh` files in diff |
+| 5,000-line budget | ✅ Pass | 1,726 net-new test lines (well under budget) |
+| Follow existing patterns (testify table-driven; `ManifestTestCase`) | ✅ Pass | New Go tests use `assert`/`require`; bash-unit uses the shared harness |
+| No control-plane mocking (real API server + etcd) | ✅ Pass | `kubeapiservertesting.StartTestServerOrDie` + `framework.SharedEtcd()`; only KMS socket / webhook endpoint faked |
+| Provenance comments (§0.11 discipline) | ✅ Pass | 51 citation lines added; V3/V8 correctly cite the Minimal Change Clause |
+| `gofmt -l` empty | ✅ Pass | Empty on all 11 files (verified firsthand) |
+| `go vet` clean | ✅ Pass | rc=0 on all 4 target packages (`gci` verified firsthand) |
+| `shellcheck --severity=error` 0 findings | ✅ Pass | 0 findings on the 5 referenced production shell scripts (validator) |
+| 100% pass — existing suite unchanged + all new tests | ✅ Pass | Existing tests byte-for-byte unchanged; 67/67 top-level pass; 12 new tests PASS |
+| Regression-lock quality bar (fail pre-remediation, pass hardened) | 🟡 Design-verified | Documented via provenance/rationale comments; independent counter-run recommended at review (risk T1) |
+| Scenario coverage — ≥1 negative/boundary test per weakness | ✅ Pass | V1–V8 each add ≥1 test; V5 moved from zero to one Go test |
 
 ---
 
 ## 6. Risk Assessment
 
 | Risk | Category | Severity | Probability | Mitigation | Status |
-|------|----------|----------|-------------|------------|--------|
-| Storage migration may leave mixed plaintext/ciphertext Secrets | Technical | Medium | Medium | Keep `identity` in decrypt list until migration verified; `etcdctl` spot-check; storage-version-migrator | Designed (identity-last committed); execution pending |
-| `enforce=baseline` may reject non-compliant running workloads if flipped without soak | Technical | Medium | Medium | `warn`/`audit`-first rollout baked into manifest + admission defaults | Mitigated by design; rollout pending |
-| AdmissionConfiguration envelope `v1alpha1`→`v1` could break admission load if malformed | Technical | Low | Low | Proven apiserver-consumable at runtime (`ReadAdmissionConfiguration`) | Resolved |
-| Integration suite not re-run by assessor (heavy: needs etcd + apiserver build) | Technical | Low | Low | Unit tests re-verified green; logs detailed & consistent | Accepted |
-| Secrets create/update at `Request` audit level writes request body into audit log | Security | Medium | High (on writes) | Chose `Request` not `RequestResponse` (responses/reads/tokens omitted); documented; restrict audit-log access | Mitigated (balanced level) |
-| KMS/AES-GCM key material & etcd certs provisioned out-of-band — mismanagement/leak | Security | High | Medium | Placeholders only in repo (§0.11); provision via secret manager; never commit | Open (deployment task) |
-| `ENCRYPTION_PROVIDER_CONFIG` left unset in real deploy → Secrets plaintext | Security | High | Medium | Env docs on both profiles; deployment checklist | Open (deployment must set it) |
-| `ETCD_APISERVER_ALLOW_INSECURE=true` in prod → plaintext etcd | Security | High | Low | Default `false` on both profiles; fail-closed `ERROR`+`exit 1`; dev-only shim documented | Mitigated (default false) |
-| No SIEM alerting yet on secret access / RBAC mutations / privilege escalation | Operational | Medium | Medium | Audit fidelity raised (enables alerts); wire high-signal alerts | Open (remaining task) |
-| `kube-bench` CIS before/after delta not yet run on live cluster | Operational | Low | N/A | Run per §0.8.2/§0.10.1; feed sign-off | Open (remaining task) |
-| Coordinated rollout ordering must be followed (certs→etcd; encrypt→migrate; warn/audit→enforce) | Operational | Medium | Medium | Documented sequence in manifests + §0.10.3 | Mitigated by docs; execution pending |
-| External KMS v2 plugin must be reachable at socket; availability/timeout affects apiserver | Integration | Medium | Medium | Bounded 3s KMS timeout; AES-GCM static-key fallback documented | Open (KMS provisioning) |
-| etcd network isolation (firewall/NetworkPolicy) is environment-specific, not in repo | Integration | Medium | Medium | §6.2.4.6 guidance; enforce mTLS | Open (deployment task) |
-| `LegacyServiceAccountTokenCleanUp` on live cluster — verify no in-use token wrongly invalidated | Integration | Low | Low | Controller uses last-used tracking; GA-stable | Low (verify only) |
+|------|----------|:--------:|:-----------:|------------|--------|
+| Regression-lock efficacy not independently counter-run | Technical | Low | Low | Reviewer spot-checks one counter-run against the unhardened config | Open (design-verified) |
+| Integration-suite runtime / flakiness | Technical | Low | Low | No sleeps (outcome-asserted); shared etcd; deterministic ordering; <30m timeout | Mitigated |
+| In-pod test-execution env coupling (upstream KCM test) | Technical | Low | Medium | Documented run command: `env -u KUBERNETES_SERVICE_* …` | Mitigated / Documented |
+| Controls are tested but not live-provisioned (KMS keys / etcd certs) | Security | High* | Low | *If mistaken for deployment. Deferred tasks tracked in §2.3; green tests ≠ deployed controls | Deferred / Documented |
+| No new attack surface introduced | Security | Info | — | Additive test-only; frozen deps; no prod/control-plane change | Confirmed safe |
+| SIEM alerting for V6 audit stream not wired | Operational | Medium | Low | Wire audit stream → SIEM at deployment (deferred) | Deferred |
+| kube-bench / CIS benchmark not executed | Operational | Low | Low | Run post-deploy against a live cluster (deferred) | Deferred |
+| New tests not yet confirmed in canonical Prow CI | Integration | Low | Low | Go `*_test.go` auto-discovery (no config change); confirm on first presubmit | Open (P2/P3) |
+| Placeholder KMS socket + unreachable V5 webhook (intentional fakes) | Integration | Low | Low | Tests assert reject/fail-closed *before* dialing; no real dependency needed | By design |
 
-**Posture:** No **Critical** open risks. Residual **High**-severity items are deployment-configuration responsibilities already de-risked by committed fail-closed defaults and documentation. Zero code-level risk.
+> **Overall risk posture: LOW.** All material risks are deferred deployment-time provisioning items explicitly out of scope; the test change itself introduces no production risk.
 
 ---
 
 ## 7. Visual Project Status
 
-**Project hours (Completed = Dark Blue `#5B39F3`, Remaining = White `#FFFFFF`):**
+**Project hours breakdown** (Completed = Dark Blue `#5B39F3`, Remaining = White `#FFFFFF`):
 
 ```mermaid
-pie showData title Project Hours Breakdown (Total 77h)
-    "Completed Work" : 53
-    "Remaining Work" : 24
+%%{init: {'theme':'base','themeVariables':{'pie1':'#5B39F3','pie2':'#FFFFFF','pieStrokeColor':'#B23AF2','pieOuterStrokeColor':'#B23AF2','pieStrokeWidth':'2px','pieTitleTextColor':'#B23AF2','pieSectionTextColor':'#111111','pieLegendTextColor':'#111111'}}}%%
+pie showData title Project Hours Breakdown (V1–V8 Test Hardening)
+    "Completed Work" : 95
+    "Remaining Work" : 10
 ```
 
-**Remaining work by priority (hours):**
+**Remaining work by category** (hours; sums to the 10h in §1.2 and §2.2):
 
 ```mermaid
-pie showData title Remaining Work by Priority (24h)
-    "High" : 12
-    "Medium" : 10
-    "Low" : 2
+xychart-beta
+    title "Remaining Work by Category (Hours)"
+    x-axis ["Review & Merge", "CI/Prow Wiring", "Canonical CI Run"]
+    y-axis "Hours" 0 --> 8
+    bar [6, 2, 2]
 ```
 
-**Remaining hours per category (from §2.2):**
+**Completed hours by weakness** (of the 68h weakness-authoring subtotal within the 95h completed):
 
-| Category | Hours |
-|----------|------:|
-| V3 key provisioning + storage migration | 8 |
-| V2 PSS soak + enforce flip | 4 |
-| V8 etcd certs + network isolation | 3 |
-| Verification (kube-bench + spot-checks) | 3 |
-| Security review + staging dry-run | 2.5 |
-| V4 cleanup verification + max-expiration | 1.5 |
-| Operational monitoring/alerting | 2 |
-| **Total** | **24** |
+```mermaid
+xychart-beta
+    title "Completed Test-Authoring Hours by Weakness"
+    x-axis ["V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8"]
+    y-axis "Hours" 0 --> 12
+    bar [4, 11, 11, 8, 8, 9, 9, 8]
+```
 
-> Integrity: "Remaining Work" (24) matches Section 1.2 Remaining and the Section 2.2 total. "Completed Work" (53) matches Section 2.1 total.
+> **Integrity check:** Remaining Work = **10h** in §1.2 (metrics table), §2.2 (Hours total), and §7 (pie + bar). Completed Work = **95h** in §1.2, §2.1, and §7. §2.1 (95) + §2.2 (10) = **105h** Total.
 
 ---
 
 ## 8. Summary & Recommendations
 
-**Achievements.** The remediation is **68.8% complete (53 of 77 hours)**, with the **entire autonomous/committable scope delivered and validated**. All eight weaknesses (V1–V8) are addressed through a disciplined, config-first change set: encryption-at-rest configuration and wiring (V3), cluster-wide Pod Security enforcement configuration (V2), raised audit fidelity (V6), fail-closed etcd transport (V8), and verified-secure RBAC/tokens/webhook/NodeRestriction (V1/V4/V5/V7) — each locked by a security regression test. `go.mod`/vendor are untouched, contracts are preserved, and every artifact is annotated with tech-spec citations.
+**Achievements.** The effort is **90.5% complete** (95h of 105h). Every one of the eight security weaknesses (V1–V8) is now locked by at least one new negative-path or boundary test — 12 new `Test*` functions across 11 files, including the previously-untested V5 fail-closed webhook path and new subprocess-based fail-closed coverage for the two priority controls (V3 data-at-rest and V8 transport). The work is strictly additive (0 removed lines in any test file), stays within budget (1,726 of 5,000 lines), and passes every quality gate: 67/67 top-level tests green, `gofmt`/`go vet`/`shellcheck` clean, and an offline build that produces a running `kube-apiserver v1.34.0-blitzy`.
 
-**Remaining gaps.** The outstanding **24 hours are path-to-production deployment/operational work** that intrinsically requires live infrastructure and out-of-band secret material the AAP forbids committing: provisioning KMS/AES-GCM keys and running the Secrets storage migration (V3), etcd certificate provisioning and network isolation (V8), the staged `warn`/`audit`→`enforce` Pod Security rollout (V2), `kube-bench` CIS validation, security-review sign-off, and SIEM alerting.
+**Remaining gaps (10h, all human/CI path-to-production).** There is **no outstanding code rework**. What remains is standard for landing any change: peer review and merge (6h), CI/Prow presubmit confirmation (2h), and a canonical full-suite CI run (2h). During review, a single regression-lock counter-run against the unhardened config is recommended to independently confirm the tests fail pre-remediation (risk T1).
 
-**Critical path to production.** (1) Provision keys → enable encryption → migrate Secrets (V3). (2) Provision/verify etcd mTLS → confirm `https` (V8). (3) Apply PSS labels → soak `warn`/`audit` → flip `enforce` (V2). (4) Run `kube-bench` before/after and manual spot-checks. (5) Security-review sign-off, then wire SIEM alerts.
+**Critical path to production.** Review & merge → confirm CI discovers/runs the new tests → confirm the canonical full-suite run is green with etcd on `PATH` and in-pod SA env vars unset.
 
-**Success metrics.** `kube-bench` moves the RBAC, Pod Security, etcd-encryption, audit, and NodeRestriction controls to PASS; `etcdctl` shows `k8s:enc:` ciphertext for Secrets; privileged pods are rejected in enforced namespaces; the auth integration suite stays green (43/43).
+**Deferred (separate effort).** Real KMS key material, live etcd mTLS certificates, SIEM alerting, and kube-bench are deployment-time activities requiring live infrastructure — explicitly out of scope here and excluded from the completion math (§2.3).
 
-**Production readiness.** The code/config is **production-quality and merge-ready**; the security *outcomes* become live only after the deployment tasks above. Recommended posture: merge now, execute the High-priority deployment tasks in a staging cluster first (using the committed `warn`/`audit`-first and identity-last-decrypt safeguards), validate with `kube-bench`, then promote.
+**Production readiness assessment.** The test-hardening deliverable is **production-ready pending human review/merge**. Confidence is **High** for the completed test work (verified firsthand and via autonomous logs) and **High** for the remaining human/CI estimate. Per honest-assessment policy, completion is capped below 100% to reflect the mandatory human review that has not yet occurred.
+
+| Metric | Value |
+|--------|-------|
+| Completion | 90.5% |
+| Total / Completed / Remaining Hours | 105 / 95 / 10 |
+| Top-level tests (pass / total) | 67 / 67 |
+| New test functions (all pass) | 12 |
+| Net-new lines vs. budget | 1,726 / 5,000 |
+| Production/frozen files changed | 0 |
 
 ---
 
@@ -240,104 +263,101 @@ pie showData title Remaining Work by Priority (24h)
 
 ### 9.1 System Prerequisites
 
-- **OS:** Linux x86_64 (validated on Ubuntu 25.10 container).
-- **Go:** `1.25.4` (pinned by `.go-version`; `go.mod` declares `go 1.25.0`). Verify: `go version` → `go1.25.4`.
-- **Tooling:** `shellcheck` ≥ 0.10.0, `git` + `git-lfs`, `make`, `python3` (for YAML/base64 helpers).
-- **Disk:** ~5 GB free for a control-plane build.
-- **Deployment-only (not needed to build/test):** access to a Kubernetes/GCE cluster, `etcd` + `etcdctl`, `kube-bench`, and a KMS v2 plugin **or** a 32-byte AES-GCM key.
+- **OS:** Linux/amd64 (validated on Ubuntu; container-friendly)
+- **Go:** 1.25.4 (pinned in `.go-version`; `go 1.25.0` directive in `go.mod`)
+- **Git:** 2.x (validated 2.51.0)
+- **etcd:** bundled at `third_party/etcd/etcd` (v3.6.x) — required for the integration tier
+- **Memory:** ~8GB RAM recommended for the integration tier + apiserver build
+- **Network:** none required — dependencies are fully vendored (offline build works)
 
 ### 9.2 Environment Setup
 
 ```bash
 # From the repository root:
-cd /path/to/blitzy-kubernetes
+source /etc/profile.d/go.sh          # put Go 1.25.4 on PATH (environment-specific)
+go version                           # expect: go version go1.25.4 linux/amd64
 
-# Load the Go toolchain onto PATH (container profile):
-. /etc/profile.d/go.sh
-go version            # expect: go version go1.25.4 linux/amd64
+export GOPROXY=off                   # dependencies are vendored; no network fetch
+# NOTE: the repo uses Go workspace mode (go.work). Do NOT set GOFLAGS=-mod=mod
+#       (it conflicts with workspace mode). Use defaults, or GOWORK=off if needed.
 ```
 
 ### 9.3 Dependency Installation
 
-```bash
-# Dependencies are VENDORED (go.work + vendor/). No download step is required
-# and none should be performed (go.mod/go.sum/vendor are intentionally untouched).
-ls vendor/ >/dev/null && echo "vendored deps present — no install needed"
-```
-
-### 9.4 Build (control-plane binaries)
+**No install step is required** — `go.mod`, `go.work`, and `vendor/` are frozen and fully vendored.
 
 ```bash
-# Build only the binaries touched by this remediation (~build minutes vary):
-KUBE_GIT_VERSION=v1.34.0-blitzy make WHAT="cmd/kube-apiserver cmd/kube-controller-manager cmd/kubeadm"
-# Binaries are emitted under _output/.
+GOPROXY=off go mod verify            # expect: all modules verified
 ```
 
-### 9.5 Verification Steps
+### 9.4 Build (optional runtime check)
 
 ```bash
-. /etc/profile.d/go.sh
-
-# 1) Formatting gate (expect EMPTY output):
-gofmt -l cluster/gce/gci/audit_policy_test.go \
-         test/integration/auth/rbac_test.go \
-         test/integration/auth/node_test.go \
-         test/integration/auth/podsecurity_test.go \
-         test/integration/auth/svcaccttoken_test.go \
-         test/integration/controlplane/audit/audit_test.go \
-         test/integration/secrets/encryption_test.go
-
-# 2) Shell lint gate (use --severity=error for a clean exit 0;
-#    plain shellcheck exits 1 only due to PRE-EXISTING SC1090/SC1091 info-notices):
-shellcheck --severity=error \
-  cluster/gce/gci/configure-kubeapiserver.sh \
-  cluster/gce/gci/configure-helper.sh \
-  cluster/gce/config-default.sh \
-  cluster/gce/config-test.sh \
-  cluster/gce/util.sh
-
-# 3) Fast unit test (V6 audit policy — runs the real bash generator):
-go test -count=1 -run TestCreateMasterAuditPolicy ./cluster/gce/gci/      # expect: ok
-
-# 4) Mechanism unit tests (V1/V2/V7):
-go test -count=1 ./plugin/pkg/auth/authorizer/rbac/... \
-                 ./plugin/pkg/admission/security/podsecurity/... \
-                 ./plugin/pkg/admission/noderestriction/...            # expect: ok
-
-# 5) Security integration tests (need etcd + a built apiserver; ~minutes):
-go test -count=1 ./test/integration/secrets/ \
-                 ./test/integration/auth/ \
-                 ./test/integration/controlplane/audit/ -timeout 30m
+KUBE_GIT_VERSION=v1.34.0-blitzy GOPROXY=off make WHAT=cmd/kube-apiserver
+_output/bin/kube-apiserver --version # expect: Kubernetes v1.34.0-blitzy
 ```
 
-### 9.6 Example Usage — Operator Wiring (path-to-production)
+### 9.5 Running the Tests
+
+**Bash-unit tier (fast, no etcd needed) — verified firsthand (`ok 1.158s`):**
 
 ```bash
-# V3 — enable Secrets encryption (provide REAL key material out-of-band; NEVER commit):
-export ENCRYPTION_PROVIDER_CONFIG="$(base64 -w0 cluster/gce/manifests/encryption-provider-config.yml)"
-# ...deploy so configure-kubeapiserver.sh wires --encryption-provider-config, then MIGRATE:
-kubectl get secrets --all-namespaces -o yaml | kubectl replace -f -
-# Verify ciphertext at rest (expect a k8s:enc:... prefix, never plaintext):
-ETCDCTL_API=3 etcdctl get /registry/secrets/<ns>/<name> | hexdump -C | head
-
-# V2 — apply Pod Security labels, soak, then enforce:
-kubectl apply -f cluster/manifests/namespace-pss-labels.yaml
-kubectl get ns --show-labels | grep pod-security.kubernetes.io
-
-# V1 — least-privilege spot audit:
-kubectl auth can-i --list --as=system:serviceaccount:<ns>:<sa>
-
-# CIS benchmark before/after delta:
-kube-bench run --targets master,etcd,policies --version <k8s-minor>
+source /etc/profile.d/go.sh
+export GOPROXY=off
+go test -count=1 ./cluster/gce/gci/
 ```
+
+**Integration tier (real API server + real etcd):**
+
+```bash
+source /etc/profile.d/go.sh
+export GOPROXY=off
+export PATH="$PWD/third_party/etcd:$PATH"     # put bundled etcd on PATH
+# Inside a Kubernetes pod, unset the pod's in-cluster env vars so the in-process
+# controller-manager does not pick up the pod's ServiceAccount token:
+env -u KUBERNETES_SERVICE_HOST -u KUBERNETES_SERVICE_PORT -u KUBERNETES_SERVICE_PORT_HTTPS \
+    -u KUBERNETES_PORT -u KUBERNETES_PORT_443_TCP -u KUBERNETES_PORT_443_TCP_ADDR \
+    -u KUBERNETES_PORT_443_TCP_PORT -u KUBERNETES_PORT_443_TCP_PROTO \
+  go test -count=1 ./test/integration/secrets/ ./test/integration/auth/ \
+    ./test/integration/controlplane/audit/ -timeout 30m
+```
+
+**Focused single-test run (`-count=1` disables the test cache):**
+
+```bash
+go test -v -count=1 -run TestConfigureEtcdParamsFailClosed ./cluster/gce/gci/
+go test -v -count=1 -run TestAdmissionWebhookFailClosedDeniesUnreachable ./test/integration/auth/
+```
+
+**Static-analysis / quality gates:**
+
+```bash
+gofmt -l <changed .go files>                          # must print nothing
+go vet ./test/integration/... ./cluster/gce/gci/
+shellcheck --severity=error <referenced .sh scripts>  # must report 0 findings
+```
+
+**Optional coverage (opt-in; not a gate; reported as N/A):**
+
+```bash
+KUBE_COVER=y go test -cover -count=1 ./test/integration/auth/
+```
+
+### 9.6 Verification (expected output)
+
+- Bash-unit: `ok  k8s.io/kubernetes/cluster/gce/gci  ~1.2s`
+- Secrets: `ok  …/test/integration/secrets  ~19.8s`
+- Audit: `ok  …/test/integration/controlplane/audit  ~19.5s`
+- Auth: `ok  …/test/integration/auth  ~227.6s` — **49/49 top-level tests pass**
+- `go mod verify` → `all modules verified`
 
 ### 9.7 Troubleshooting
 
-- **`shellcheck` exits 1:** caused by pre-existing `SC1090`/`SC1091` (dynamic `source`) info-notices, **not** by these changes. Use `--severity=error` for a clean gate.
-- **Integration tests fail to start:** they require an etcd binary and a built apiserver (`framework.SharedEtcd`); ensure the build in §9.4 succeeded.
-- **API server aborts at boot with an etcd `ERROR`:** hardened profiles fail closed when etcd mTLS creds are missing — provide certs, or set `ETCD_APISERVER_ALLOW_INSECURE=true` for local/dev only.
-- **Secrets still plaintext in etcd:** `ENCRYPTION_PROVIDER_CONFIG` was not set at deploy time, or the storage migration has not run.
-- **Privileged pod unexpectedly admitted:** the namespace lacks a `pod-security.kubernetes.io/enforce` label, or it is the documented `kube-system` exemption.
+- **`-mod may only be set to readonly or vendor when in workspace mode`** → you set `GOFLAGS=-mod=mod`; unset it (or use `GOWORK=off`). This repo uses `go.work`.
+- **Auth suite shows 1 failure inside a pod (KCM startup / `extension-apiserver-authentication`)** → run with the `KUBERNETES_SERVICE_*` env vars unset (see §9.5). This is the upstream `TestNodeRestrictionServiceAccountAudience`, not a V1–V8 test.
+- **`etcd: command not found` during integration tests** → add `third_party/etcd` to `PATH` (see §9.5).
+- **Plain `shellcheck` exits non-zero** → pre-existing `SC1090`/`SC1091` source-following notices unrelated to this task; use `--severity=error` for the gate.
+- **Network/proxy errors during `go test`** → ensure `GOPROXY=off`; the module cache is fully vendored.
 
 ---
 
@@ -348,88 +368,97 @@ kube-bench run --targets master,etcd,policies --version <k8s-minor>
 | Purpose | Command |
 |---------|---------|
 | Go version | `go version` |
-| Format gate | `gofmt -l <files>` |
-| Shell lint (clean) | `shellcheck --severity=error <scripts>` |
-| Build binaries | `KUBE_GIT_VERSION=v1.34.0-blitzy make WHAT="cmd/kube-apiserver cmd/kube-controller-manager cmd/kubeadm"` |
-| Unit test (V6) | `go test -count=1 -run TestCreateMasterAuditPolicy ./cluster/gce/gci/` |
+| Verify frozen deps | `GOPROXY=off go mod verify` |
+| Build apiserver | `KUBE_GIT_VERSION=v1.34.0-blitzy GOPROXY=off make WHAT=cmd/kube-apiserver` |
+| Bash-unit tests | `go test -count=1 ./cluster/gce/gci/` |
 | Integration tests | `go test -count=1 ./test/integration/{secrets,auth,controlplane/audit}/ -timeout 30m` |
-| CIS scan | `kube-bench run --targets master,etcd,policies --version <k8s-minor>` |
-| etcd ciphertext check | `ETCDCTL_API=3 etcdctl get /registry/secrets/<ns>/<name> | hexdump -C | head` |
-| RBAC audit | `kubectl auth can-i --list --as=system:serviceaccount:<ns>:<sa>` |
-| PSS label coverage | `kubectl get ns --show-labels | grep pod-security.kubernetes.io` |
+| Focused test | `go test -v -count=1 -run <TestName> <package>` |
+| Format check | `gofmt -l <files>` |
+| Vet | `go vet ./test/integration/... ./cluster/gce/gci/` |
+| Shell lint | `shellcheck --severity=error <scripts>` |
+| Diff vs base | `git diff dc329e1a146...HEAD --stat` |
 
 ### B. Port Reference
 
-| Component | Port | Notes |
-|-----------|------|-------|
-| kube-apiserver (secure) | 6443 | Serves the Kubernetes API |
-| etcd client | 2379 | **Must** be `https` + mTLS in hardened profiles (V8); plaintext `http://127.0.0.1:2379` fallback disabled by default |
-| etcd peer | 2380 | Peer communication |
-| KMS v2 plugin | unix socket | e.g. `unix:///tmp/kms.socket` (operator-provisioned; placeholder in repo) |
+| Component | Port / Endpoint | Notes |
+|-----------|-----------------|-------|
+| In-process API server | Ephemeral (harness-assigned) | Started by `kubeapiservertesting.StartTestServerOrDie` |
+| Embedded etcd | Ephemeral (harness-assigned) | Started via `kube::etcd::start`; `framework.SharedEtcd()` |
+| V5 webhook (test) | `https://127.0.0.1:9001/admit` | **Intentionally unreachable** — no backend started (fail-closed) |
+| KMS placeholder (V3) | `unix:///tmp/kms.socket` | Placeholder only; config rejected before any dial |
+
+> No fixed production ports are introduced by these tests.
 
 ### C. Key File Locations
 
-| File | Transform | Vuln | Role |
-|------|-----------|------|------|
-| `cluster/gce/gci/configure-kubeapiserver.sh` | UPDATE | V3, V8 | Encryption wiring + etcd fail-closed mTLS |
-| `cluster/gce/gci/configure-helper.sh` | UPDATE | V2, V6 | PodSecurity admission block + audit raise |
-| `cluster/gce/config-default.sh` | UPDATE | V2, V3, V6, V7, V8 | Admission list, audit, env docs, insecure-etcd default |
-| `cluster/gce/config-test.sh` | UPDATE | V2, V3, V6, V7, V8 | Test/CI profile parity |
-| `cluster/gce/util.sh` | UPDATE | V8 | `kube-env` propagation of insecure-etcd toggle |
-| `cluster/gce/manifests/encryption-provider-config.yml` | CREATE | V3 | EncryptionConfiguration (KMS v2 first / identity last) |
-| `cluster/manifests/namespace-pss-labels.yaml` | CREATE | V2 | Namespace PSS labels (+ kube-system exemption) |
-| `cluster/gce/gci/audit_policy_test.go` | UPDATE | V6 | Asserts real audit-policy generator output |
-| `test/integration/auth/rbac_test.go` | UPDATE | V1 | No-wildcard-outside-system:masters |
-| `test/integration/auth/node_test.go` | UPDATE | V7 | Cross-node denial |
-| `test/integration/auth/podsecurity_test.go` | UPDATE | V2 | Privileged-pod rejection |
-| `test/integration/auth/svcaccttoken_test.go` | UPDATE | V4 | Bound/audienced token + TTL |
-| `test/integration/controlplane/audit/audit_test.go` | UPDATE | V6 | Sensitive-resource audit levels |
-| `test/integration/secrets/encryption_test.go` | CREATE | V3 | Ciphertext-at-rest assertion |
+| Weakness / Role | File | Mode |
+|-----------------|------|:----:|
+| V1 | `test/integration/auth/rbac_test.go` | UPDATE |
+| V2 | `test/integration/auth/podsecurity_test.go` | UPDATE |
+| V3 | `test/integration/secrets/encryption_test.go` | UPDATE |
+| V4 | `test/integration/auth/svcaccttoken_test.go` | UPDATE |
+| V5 | `test/integration/auth/admissionwebhook_failclosed_test.go` | CREATE |
+| V6 (Go) | `test/integration/controlplane/audit/audit_test.go` | UPDATE |
+| V6 (bash) | `cluster/gce/gci/audit_policy_test.go` | UPDATE |
+| V7 (Go) | `test/integration/auth/node_test.go` | UPDATE |
+| V7 (bash) | `cluster/gce/gci/apiserver_admission_test.go` | CREATE |
+| V8 (bash) | `cluster/gce/gci/apiserver_etcd_test.go` | UPDATE |
+| V8 helper | `cluster/gce/gci/configure_helper_subprocess_test.go` | CREATE |
+| Docs | `blitzy/documentation/Project Guide.md` | UPDATE |
+| Fixture (V2) | `cluster/manifests/namespace-pss-labels.yaml` | REUSED |
+| Fixture (V3) | `cluster/gce/manifests/encryption-provider-config.yml` | REUSED |
+| Harness | `cluster/gce/gci/configure_helper_test.go` (`ManifestTestCase`) | REFERENCE |
 
 ### D. Technology Versions
 
-| Item | Version | Notes |
-|------|---------|-------|
-| Go toolchain | `1.25.4` (`.go-version`); `go 1.25.0` (`go.mod`) | Unchanged |
-| Kubernetes build | `v1.34.0-blitzy` | Runtime validation build tag |
-| EncryptionConfiguration | `apiserver.config.k8s.io/v1` | Stable |
-| KMS provider | `kms` `apiVersion: v2` | Preferred (unlimited Secrets) |
-| AdmissionConfiguration | `apiserver.config.k8s.io/v1` | Raised from `v1alpha1` |
-| PodSecurityConfiguration | `pod-security.admission.config.k8s.io/v1` | Cluster defaults |
-| Audit Policy | `audit.k8s.io/v1` | Level ordering `None`<`Metadata`<`Request`<`RequestResponse` |
-| shellcheck | `0.10.0` | Lint gate |
+| Component | Version |
+|-----------|---------|
+| Go toolchain | 1.25.4 (`go 1.25.0` directive) |
+| `github.com/stretchr/testify` | v1.11.1 |
+| `github.com/onsi/ginkgo/v2` | v2.27.2 (e2e only; not extended) |
+| `github.com/onsi/gomega` | v1.38.2 (e2e only; not extended) |
+| `go.uber.org/goleak` | v1.3.0 (unused by convention) |
+| `github.com/google/go-cmp` | v0.7.0 |
+| etcd (bundled) | v3.6.x |
+| Git | 2.51.0 |
 
 ### E. Environment Variable Reference
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `ENCRYPTION_PROVIDER_CONFIG` | unset | Base64 EncryptionConfiguration; when set, wires `--encryption-provider-config` (V3). **Provide out-of-band; never commit.** |
-| `ENCRYPTION_PROVIDER_CONFIG_PATH` | `/etc/srv/kubernetes/encryption-provider-config.yml` | Decoded config path on the node |
-| `ETCD_APISERVER_ALLOW_INSECURE` | `false` (both profiles) | Fail-closed etcd guard; `true` allows plaintext loopback (dev only) (V8) |
-| `ENABLE_APISERVER_ADVANCED_AUDIT` | `true` | Enables policy-based audit so the hardened policy is generated (V6) |
-| `ADMISSION_CONTROL` | includes `NodeRestriction,PodSecurity` | Admission plugin chain (V2/V7) |
-| `ETCD_APISERVER_CA_CERT` / `..._CLIENT_CERT` / `..._CLIENT_KEY` | unset | etcd mTLS material; when present, enables `https` + client certs (V8) |
+| Variable | Value / Use |
+|----------|-------------|
+| `GOPROXY` | `off` — dependencies vendored; no network |
+| `GOWORK` | default (workspace mode via `go.work`); set `off` to disable if needed |
+| `PATH` | prepend `$PWD/third_party/etcd` for the integration tier |
+| `KUBE_GIT_VERSION` | `v1.34.0-blitzy` for the apiserver build |
+| `KUBERNETES_SERVICE_*` | **unset** these when running integration tests inside a pod |
+| `ETCD_APISERVER_ALLOW_INSECURE` | `false` (hardened default asserted by V8) |
+| `KUBE_COVER` | `y` to opt into (non-gating) coverage |
 
 ### F. Developer Tools Guide
 
-- **`gofmt -l`** — formatting gate; empty output = clean.
-- **`go vet`** — static checks on modified packages (reported clean in logs).
-- **`shellcheck --severity=error`** — shell lint; error-severity avoids pre-existing `SC1090/1091` noise.
-- **`go test -count=1`** — disables the test cache for a true re-run; add `-run <Name>` to target a test.
-- **`etcdctl` / `hexdump`** — confirm ciphertext at rest (V3).
-- **`kube-bench`** — CIS benchmark scanner; reports only (feeds sign-off).
-- **`kubectl auth can-i` / `kubectl get ns --show-labels`** — RBAC and PSS spot-checks.
+| Tool | Command | Notes |
+|------|---------|-------|
+| gofmt | `gofmt -l <files>` | Must print nothing |
+| go vet | `go vet <packages>` | rc=0 expected |
+| golangci-lint | config: `hack/golangci.yaml` | Unchanged; new code conforms |
+| shellcheck | `shellcheck --severity=error <scripts>` | Use `--severity=error` to skip pre-existing `SC1090/1091` |
+| make | `make test` / `make test-integration` | Drive `hack/make-rules/*.sh`; CI uses `hack/jenkins/*-dockerized.sh` under Prow |
 
 ### G. Glossary
 
-| Term | Meaning |
-|------|---------|
-| PSS / PSA | Pod Security Standards / Pod Security Admission (`privileged`/`baseline`/`restricted`; modes `enforce`/`audit`/`warn`) |
-| KMS v2 | Kubernetes Key Management Service provider v2 (preferred encryption provider) |
-| AES-GCM | Authenticated static-key encryption provider (acceptable alternative to KMS) |
-| `identity` provider | No-op (plaintext) encryption provider — must be decrypt-only-last, then removed |
-| NodeRestriction | Admission plugin confining a kubelet to its own node's objects |
-| mTLS | Mutual TLS — both API server and etcd authenticate each other |
-| Storage migration | Re-encrypting already-stored objects after enabling/rotating encryption |
-| `system:masters` | The privileged group bound to `cluster-admin` (the only holder of `*/*/*`) |
-| Fail-closed | On backend failure, deny/abort rather than allow (webhooks; etcd guard) |
+| Term | Definition |
+|------|------------|
+| **V1–V8** | The eight security-hardening weaknesses under regression test (RBAC, Pod Security, secrets encryption, SA-token hygiene, webhook fail-closed, audit fidelity, NodeRestriction, etcd mTLS) |
+| **Fail-closed** | A control that denies/aborts on error or missing input (e.g., unreachable `Fail` webhook denies; missing etcd creds `exit 1`) |
+| **Regression-lock** | A test that fails against the pre-remediation config and passes against the hardened config — proving the control, not the harness |
+| **PSA** | Pod Security Admission (`enforce`/`warn`/`audit` at `baseline`/`restricted`) |
+| **KMS v2** | Encryption-at-rest provider API version under which `cachesize` is not permitted |
+| **mTLS** | Mutual TLS (etcd client/server certificate authentication) |
+| **NodeRestriction** | Admission plugin limiting what a kubelet identity may mutate |
+| **`ManifestTestCase`** | Shared bash-unit harness (`configure_helper_test.go`) that renders manifests in a temp dir and asserts on emitted args |
+| **TokenReview** | API used to validate a ServiceAccount token's audience/expiry |
+| **Prow** | Kubernetes' external CI system (test-infra) that invokes the `make` targets |
+
+---
+
+*Generated by the Blitzy Platform. All test results originate from Blitzy's autonomous validation logs; the bash-unit tier and static-analysis gates were additionally re-verified firsthand during this assessment. Completion (90.5%) reflects AAP-scoped work plus in-scope path-to-production only.*

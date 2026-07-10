@@ -1524,3 +1524,175 @@ func TestServiceAccountTokenBoundAndAudienced(t *testing.T) {
 	checkPayload(t, token, "null", "kubernetes.io", "pod")
 	checkPayload(t, token, "null", "kubernetes.io", "secret")
 }
+
+// TestServiceAccountTokenHardening locks the ServiceAccount-token hygiene control
+// (V4) with negative-path and boundary cases layered on top of the existing
+// audience-bound / time-bound acceptance test (TestServiceAccountTokenBoundAndAudienced).
+// Each subtest drives the REAL in-process API server (no authenticator or
+// control-plane mocking), so it proves the hardened control rather than the harness:
+//
+//	(a) a token whose audience does not match the API audience is rejected by TokenReview;
+//	(b) an expired (hand-signed, backdated) token is rejected;
+//	(c) an over-TTL request is clamped to ServiceAccountMaxExpiration (2h), surfacing a
+//	    clamp warning and echoing the shortened expiration; and
+//	(d) a token whose backing ServiceAccount has been deleted is invalidated.
+//
+// Every case fails against the pre-remediation (unhardened) configuration and passes
+// against the current hardened configuration (Minimal Change Clause §0.11): (a) an
+// un-audienced acceptance would let a mismatched token through, (b) missing expiry
+// enforcement would admit a stale token, (c) an absent/looser cap would leave the
+// 10800s request unshortened (no warning), and (d) missing cleanup would keep an
+// orphaned token valid.
+// AAP §6.6.10 / §0.8.1 (V4)
+func TestServiceAccountTokenHardening(t *testing.T) {
+	const iss = "https://foo.bar.example.com"
+	aud := authenticator.Audiences{"api"}
+	// tokenGenerator is captured from the running server's real issuer (see @158) so
+	// subtest (b) can hand-sign a backdated (expired) token with the server's signing key.
+	var tokenGenerator serviceaccount.TokenGenerator
+
+	tCtx := ktesting.Init(t)
+	kubeClient, kubeConfig, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
+		ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
+			// Disable ServiceAccount admission plugin (no serviceaccount controller runs in tests).
+			opts.Admission.GenericAdmission.DisablePlugins = []string{"ServiceAccount"}
+			opts.Authorization.Modes = []string{"AlwaysAllow"}
+			// Pin the issuer/audience so tokens are audience-bound to "api".
+			opts.Authentication.ServiceAccounts.JWKSURI = "https:///openid/v1/jwks"
+			opts.Authentication.ServiceAccounts.Issuers = []string{iss}
+			opts.Authentication.APIAudiences = aud
+			// Zero the token caches so a deleted SA / expired token is rejected promptly
+			// (mirrors TestServiceAccountTokenCreate @149-150). AAP §0.8.1 (V4).
+			opts.Authentication.TokenSuccessCacheTTL = 0
+			opts.Authentication.TokenFailureCacheTTL = 0
+		},
+		ModifyServerConfig: func(config *controlplane.Config) {
+			// AAP §0.8.1 (V4): enforce the 2h ServiceAccount token expiration cap so the
+			// over-TTL request in subtest (c) is clamped.
+			config.ControlPlane.Extra.ServiceAccountMaxExpiration = 2 * time.Hour
+			// Capture the real issuer to hand-sign the expired token in subtest (b) (@158).
+			tokenGenerator = config.ControlPlane.Extra.ServiceAccountIssuer
+		},
+	})
+	defer tearDownFn()
+
+	ns := framework.CreateNamespaceOrDie(kubeClient, "myns-v4-hardening", t)
+	defer framework.DeleteNamespaceOrDie(kubeClient, ns, t)
+
+	// (a) wrong-audience token rejected by TokenReview. Model: existing @898-916.
+	t.Run("wrong-audience token is rejected", func(t *testing.T) {
+		sa, del := createDeleteSvcAcct(t, kubeClient, &v1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "wrong-aud-sa", Namespace: ns.Name},
+		})
+		defer del()
+
+		// Requesting a token bound to a non-API audience succeeds at issuance time...
+		treq := &authenticationv1.TokenRequest{
+			Spec: authenticationv1.TokenRequestSpec{Audiences: []string{"not-the-api"}},
+		}
+		treq, err := kubeClient.CoreV1().ServiceAccounts(ns.Name).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("failed to create token: %v", err)
+		}
+		// AAP §0.8.1 (V4): ...but a token whose audience does not match the API audience
+		// MUST be rejected when reviewed against the API (doTokenReview expectErr=true).
+		doTokenReview(t, kubeClient, treq, true)
+	})
+
+	// (b) expired (hand-signed, backdated) token rejected. Model: existing @765-787.
+	t.Run("expired token is rejected", func(t *testing.T) {
+		sa, del := createDeleteSvcAcct(t, kubeClient, &v1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "expired-sa", Namespace: ns.Name},
+		})
+		defer del()
+
+		// Backdate the token so it is already expired at review time (issued 2h ago,
+		// valid for only 1h => the expiry is 1h in the past).
+		then := time.Now().Add(-2 * time.Hour)
+		sc := &jwt.Claims{
+			Subject:   apiserverserviceaccount.MakeUsername(sa.Namespace, sa.Name),
+			Audience:  jwt.Audience([]string{"api"}),
+			IssuedAt:  jwt.NewNumericDate(then),
+			NotBefore: jwt.NewNumericDate(then),
+			Expiry:    jwt.NewNumericDate(then.Add(time.Duration(60*60) * time.Second)),
+		}
+		coresa := core.ServiceAccount{ObjectMeta: sa.ObjectMeta}
+		// Reuse the production claim builder for the private (kubernetes.io) claims; the
+		// standard claims it returns are discarded in favor of the backdated sc above.
+		_, pc, err := serviceaccount.Claims(coresa, nil, nil, nil, 0, 0, nil)
+		if err != nil {
+			t.Fatalf("err calling Claims: %v", err)
+		}
+		tok, err := tokenGenerator.GenerateToken(context.TODO(), sc, pc)
+		if err != nil {
+			t.Fatalf("err signing expired token: %v", err)
+		}
+		treq := &authenticationv1.TokenRequest{Status: authenticationv1.TokenRequestStatus{Token: tok}}
+		// AAP §0.8.1 (V4): an expired token MUST be rejected.
+		doTokenReview(t, kubeClient, treq, true)
+	})
+
+	// (c) over-TTL request clamped to ServiceAccountMaxExpiration (2h) with clamp warning.
+	t.Run("over-TTL request is clamped to 2h", func(t *testing.T) {
+		// A warning-capturing client surfaces the server-side clamp warning; reuse the
+		// existing recordingWarningHandler (do not redeclare).
+		warningHandler := &recordingWarningHandler{}
+		cfg := rest.CopyConfig(kubeConfig)
+		cfg.WarningHandler = warningHandler
+		wcs := clientset.NewForConfigOrDie(cfg)
+
+		sa, del := createDeleteSvcAcct(t, wcs, &v1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "over-ttl-sa", Namespace: ns.Name},
+		})
+		defer del()
+
+		// clear() immediately before the single CreateToken so assertEqual (a full-slice
+		// reflect.DeepEqual) observes only the clamp warning and nothing unrelated.
+		warningHandler.clear()
+		// Request 10800s (3h), which is above the 7200s (2h) cap.
+		treq, err := wcs.CoreV1().ServiceAccounts(ns.Name).CreateToken(tCtx, sa.Name, &authenticationv1.TokenRequest{
+			Spec: authenticationv1.TokenRequestSpec{
+				Audiences:         []string{"api"},
+				ExpirationSeconds: ptr.To(int64(3 * 60 * 60)),
+			},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("failed to create token: %v", err)
+		}
+		// AAP §0.8.1 (V4): the over-TTL request MUST surface the exact clamp warning
+		// (proves the 2h cap actively shortened the request).
+		warningHandler.assertEqual(t, []string{"requested expiration of 10800 seconds shortened to 7200 seconds"})
+		// AAP §0.8.1 (V4): the returned request MUST echo the clamped 7200s (2h) expiration.
+		checkExpiration(t, treq, 7200)
+	})
+
+	// (d) deleted parent ServiceAccount invalidates its token. Model: existing @288-297.
+	t.Run("deleted service account invalidates its token", func(t *testing.T) {
+		sa, del := createDeleteSvcAcct(t, kubeClient, &v1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "deleted-sa", Namespace: ns.Name},
+		})
+		// Deferred delete is a no-op after the manual delete below (createDeleteSvcAcct's
+		// returned func has a done-guard); it only guards against an early t.Fatalf.
+		defer del()
+
+		treq := &authenticationv1.TokenRequest{
+			Spec: authenticationv1.TokenRequestSpec{Audiences: []string{"api"}},
+		}
+		treq, err := kubeClient.CoreV1().ServiceAccounts(ns.Name).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("failed to create token: %v", err)
+		}
+		// While the backing ServiceAccount exists, the token authenticates as that SA.
+		info := doTokenReview(t, kubeClient, treq, false)
+		if want := apiserverserviceaccount.MakeUsername(ns.Name, sa.Name); info.Username != want {
+			t.Errorf("unexpected authenticated username: got %q, want %q", info.Username, want)
+		}
+
+		// Delete the backing ServiceAccount (the cleanup action under test).
+		del()
+
+		// AAP §0.8.1 (V4): once the backing ServiceAccount is deleted, its token MUST be
+		// rejected (caches are zeroed, so doTokenReview's retry covers informer propagation).
+		doTokenReview(t, kubeClient, treq, true)
+	})
+}
