@@ -1685,3 +1685,160 @@ func TestNodeRestrictionCrossNodeDenied(t *testing.T) {
 		return err
 	})
 }
+
+// TestNodeRestrictionCrossNodePodsAndEvents verifies that with the NodeRestriction
+// admission plugin enabled and Node authorization active, a node identity
+// (system:node:node1) cannot create, mutate, or delete Pods bound to a different
+// node, while it retains its legitimate write paths (its own Pod's status and
+// Events). This complements TestNodeRestrictionCrossNodeDenied (which locks the
+// cross-node Node object and unrelated Secret surface) by locking the cross-node
+// POD surface, and proves the denials are targeted node-scoping rather than a
+// blanket write ban.
+// AAP §6.6.10 / §0.8.1 (V7)
+func TestNodeRestrictionCrossNodePodsAndEvents(t *testing.T) {
+	const (
+		// Define credentials. Fake values for testing.
+		tokenMaster = "master-token"
+		tokenNode1  = "node1-token"
+		tokenNode2  = "node2-token"
+	)
+
+	tokenFile, err := os.CreateTemp("", "kubeconfig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenFile.WriteString(strings.Join([]string{
+		fmt.Sprintf(`%s,admin,uid1,"system:masters"`, tokenMaster),
+		fmt.Sprintf(`%s,system:node:node1,uid3,"system:nodes"`, tokenNode1),
+		fmt.Sprintf(`%s,system:node:node2,uid4,"system:nodes"`, tokenNode2),
+	}, "\n"))
+	tokenFile.Close()
+
+	// AAP §0.8.1 (V7): enable the NodeRestriction admission plugin together with
+	// Node authorization. The behavioral Forbidden results asserted below only hold
+	// while NodeRestriction admission is enforcing, which is the regression proof
+	// required by the V7 folder requirement (no need to introspect the server's
+	// plugin list).
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, []string{
+		"--authorization-mode", "Node,RBAC",
+		"--token-auth-file", tokenFile.Name(),
+		"--enable-admission-plugins", "NodeRestriction",
+		// The "default" SA is not installed, causing the ServiceAccount plugin to retry for ~1s per
+		// API request.
+		"--disable-admission-plugins", "ServiceAccount,TaintNodesByCondition",
+	}, framework.SharedEtcd())
+	defer server.TearDownFn()
+
+	// Build client config and clientsets. Only the superuser and node1 identities
+	// are referenced; node2's identity is defined in the token file above but a
+	// node2 clientset is intentionally not declared to avoid an unused local
+	// variable and keep the file gofmt/goimports clean.
+	clientConfig := server.ClientConfig
+	superuserClient, _ := clientsetForToken(tokenMaster, clientConfig)
+	node1Client, _ := clientsetForToken(tokenNode1, clientConfig)
+
+	// Seed objects as superuser. ORDER MATTERS: node2pod MUST exist before asserting
+	// that node1 cannot mutate/delete it, otherwise the cross-node status/delete
+	// checks return NotFound instead of the deterministic Forbidden the V7 assertion
+	// requires (see TestNodeAuthorizer: NotFound before the target pod exists vs
+	// Forbidden after). apierrors.IsAlreadyExists is tolerated so the test remains
+	// robust if a prior test seeded the same names into the shared etcd.
+	if _, err := superuserClient.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	if _, err := superuserClient.CoreV1().Nodes().Create(context.TODO(), &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1"}}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	if _, err := superuserClient.CoreV1().Nodes().Create(context.TODO(), &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node2"}}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	// node2pod is bound to node2 — the cross-node target for node1's denied
+	// UpdateStatus and Delete attempts below.
+	if _, err := superuserClient.CoreV1().Pods("ns").Create(context.TODO(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "node2pod", Namespace: "ns"},
+		Spec:       corev1.PodSpec{NodeName: "node2", Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+	}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	// node1pod is bound to node1 — the positive-control target proving node1 retains
+	// access to its OWN pod's status.
+	if _, err := superuserClient.CoreV1().Pods("ns").Create(context.TODO(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "node1pod", Namespace: "ns"},
+		Spec:       corev1.PodSpec{NodeName: "node1", Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+	}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+
+	// AAP §0.8.1 (V7): node1 must NOT create a normal (non-mirror) pod bound to
+	// node2. NodeRestriction only permits a node to create mirror pods bound to
+	// itself, so this cross-node CREATE is denied (Forbidden).
+	expectForbidden(t, func() error {
+		_, err := node1Client.CoreV1().Pods("ns").Create(context.TODO(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "node1-makes-node2-pod", Namespace: "ns"},
+			Spec:       corev1.PodSpec{NodeName: "node2", Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+		}, metav1.CreateOptions{})
+		return err
+	})
+
+	// AAP §0.8.1 (V7): node1 must NOT update the status of node2pod (bound to
+	// node2). NodeRestriction confines pod-status updates to pods bound to the
+	// requesting node, so this cross-node UpdateStatus is denied now that node2pod
+	// exists.
+	expectForbidden(t, func() error {
+		_, err := node1Client.CoreV1().Pods("ns").UpdateStatus(context.TODO(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "node2pod", Namespace: "ns"},
+			Spec:       corev1.PodSpec{NodeName: "node2", Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		}, metav1.UpdateOptions{})
+		return err
+	})
+
+	// AAP §0.8.1 (V7): node1 must NOT delete node2pod (bound to node2).
+	// NodeRestriction confines pod deletion to pods bound to the requesting node,
+	// so this cross-node Delete is denied.
+	expectForbidden(t, func() error {
+		return node1Client.CoreV1().Pods("ns").Delete(context.TODO(), "node2pod", metav1.DeleteOptions{})
+	})
+
+	// AAP §0.8.1 (V7): positive control — node1 MAY update the status of its OWN
+	// pod (node1pod, bound to node1). This proves the cross-node status denial above
+	// is targeted node-scoping enforced by NodeRestriction, not a blanket ban on a
+	// node updating any pod status.
+	expectAllowed(t, func() error {
+		_, err := node1Client.CoreV1().Pods("ns").UpdateStatus(context.TODO(), &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "node1pod", Namespace: "ns"},
+			Spec:       corev1.PodSpec{NodeName: "node1", Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		}, metav1.UpdateOptions{})
+		return err
+	})
+
+	// AAP §0.8.1 (V7): events are intentionally NOT node-scoped (bootstrappolicy
+	// NodeRules grants system:nodes create/update/patch on events unconditionally;
+	// NodeRestriction has no events case). So node1 CAN create an Event — this is a
+	// POSITIVE CONTROL proving the cross-node POD denials above are targeted
+	// node-scoping, not a blanket write ban. (Corrects the AAP prose that grouped
+	// "events" under expectForbidden.)
+	//
+	// The Event is created in the "default" namespace, not "ns": legacy core Event
+	// validation (pkg/apis/core/validation/events.go legacyValidateEvent) requires
+	// that when the involvedObject is cluster-scoped (a Node, with an empty
+	// involvedObject namespace) the Event's own namespace be empty or "default".
+	// A Node-referencing core Event created in "ns" would fail validation, exactly
+	// as the "pass-core-default-cluster-scoped" vs failing other-namespace cases in
+	// test/integration/client/client_test.go demonstrate. The "default" namespace is
+	// created by the apiserver bootstrap-controller before StartTestServerOrDie
+	// returns (the server is only reported ready after post-start hooks complete).
+	expectAllowed(t, func() error {
+		_, err := node1Client.CoreV1().Events("default").Create(context.TODO(), &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: "node1-event", Namespace: "default"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Node", Name: "node1"},
+			Message:        "v7 positive control",
+			Type:           "Normal",
+			Reason:         "V7Test",
+			Source:         corev1.EventSource{Component: "kubelet", Host: "node1"},
+			LastTimestamp:  metav1.Now(),
+		}, metav1.CreateOptions{})
+		return err
+	})
+}

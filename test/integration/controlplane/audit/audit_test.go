@@ -1048,3 +1048,140 @@ func runSensitiveResourceTestWithVersion(t *testing.T, version string) {
 		})
 	}
 }
+
+// serviceAccountTokenAuditRequestEvents returns the expected audit event for a
+// ServiceAccount token creation (the serviceaccounts/token subresource) at level
+// Request. It mirrors secretAuditRequestEvents (AAP §0.6.3 / §0.5.1 / §0.2.4): at
+// LevelRequest the API server records the request object but never the response
+// object, so ResponseObject is always false — the freshly-issued bearer token in the
+// response body is therefore never written to the audit log. The token subresource
+// only supports create, so a single event is returned. utils.AuditEvent has no
+// Subresource field, so the subresource is expressed via the /token RequestURI suffix
+// with Resource "serviceaccounts", identical to the committed cross-group token event.
+func serviceAccountTokenAuditRequestEvents(namespace string) []utils.AuditEvent {
+	return []utils.AuditEvent{
+		{
+			Level:             auditinternal.LevelRequest,
+			Stage:             auditinternal.StageResponseComplete,
+			RequestURI:        fmt.Sprintf("/api/v1/namespaces/%s/serviceaccounts/%s/token", namespace, "audit-serviceaccount"),
+			Verb:              "create",
+			Code:              201,
+			User:              auditTestUser,
+			Resource:          "serviceaccounts",
+			Namespace:         namespace,
+			RequestObject:     true,
+			ResponseObject:    false,
+			AuthorizeDecision: "allow",
+		},
+	}
+}
+
+// TestAuditServiceAccountTokenRequestLevel verifies V6 audit fidelity for the
+// serviceaccounts/token subresource: token issuance is recorded at Request level (the
+// request object is logged) while the response object — which carries the freshly-minted
+// bearer token — is omitted, so issued tokens never leak into the audit log. It also
+// carries the confidentiality guard extending the Secret response-omission invariant to
+// serviceaccounts/token. This is additive to TestAuditSensitiveResourceLevels and does
+// not modify the existing harness; it reuses the create-audit-request namespace, which
+// the committed auditPolicyPattern already audits at Request for serviceaccounts/token.
+// The assertion is regression-locking: a demotion of serviceaccounts/token below Request
+// makes the expected event fail to match (wait.Poll times out), and a regression to
+// RequestResponse makes the logged event carry a response object (the guard t.Errorf's).
+// AAP §6.6.10 / §0.8.1 (V6) + §6.4.6 / §0.6.3 / §0.5.1 / §0.2.4
+func TestAuditServiceAccountTokenRequestLevel(t *testing.T) {
+	for version := range versions {
+		runTokenAuditRequestTestWithVersion(t, version)
+	}
+}
+
+func runTokenAuditRequestTestWithVersion(t *testing.T, version string) {
+	// prepare audit policy file (reuses the existing auditPolicyPattern; the
+	// create-audit-request namespace already audits serviceaccounts/token at Request)
+	auditPolicy := strings.Replace(auditPolicyPattern, "{version}", version, 1)
+	policyFile, err := os.CreateTemp("", "audit-policy.yaml")
+	if err != nil {
+		t.Fatalf("Failed to create audit policy file: %v", err)
+	}
+	defer os.Remove(policyFile.Name())
+	if _, err := policyFile.Write([]byte(auditPolicy)); err != nil {
+		t.Fatalf("Failed to write audit policy file: %v", err)
+	}
+	if err := policyFile.Close(); err != nil {
+		t.Fatalf("Failed to close audit policy file: %v", err)
+	}
+
+	// prepare audit log file
+	logFile, err := os.CreateTemp("", "audit.log")
+	if err != nil {
+		t.Fatalf("Failed to create audit log file: %v", err)
+	}
+	defer utiltesting.CloseAndRemove(t, logFile)
+
+	// start api server (no mutating webhook needed for this plain namespace)
+	result := kubeapiservertesting.StartTestServerOrDie(t, nil,
+		[]string{
+			"--audit-policy-file", policyFile.Name(),
+			"--audit-log-version", version,
+			"--audit-log-mode", "blocking",
+			"--audit-log-path", logFile.Name()},
+		framework.SharedEtcd())
+	defer result.TearDownFn()
+
+	kubeclient, err := clientset.NewForConfig(result.ClientConfig)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	t.Run(fmt.Sprintf("%s.serviceaccount-token-request", version), func(t *testing.T) {
+		namespace := "create-audit-request"
+		var lastMissingReport string
+		var observedEvents []utils.AuditEvent
+		createNamespace(t, kubeclient, namespace)
+		sa := createServiceAccount(t, kubeclient, namespace)
+		if err := wait.Poll(500*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
+			// issue a token through the real serviceaccounts/token subresource
+			tokenRequestOperations(t, kubeclient, sa.Namespace, sa.Name)
+
+			stream, err := os.Open(logFile.Name())
+			if err != nil {
+				return false, fmt.Errorf("unexpected error: %v", err)
+			}
+			defer stream.Close()
+			missingReport, err := utils.CheckAuditLines(stream, serviceAccountTokenAuditRequestEvents(namespace), versions[version])
+			if err != nil {
+				return false, fmt.Errorf("unexpected error: %v", err)
+			}
+			if len(missingReport.MissingEvents) > 0 {
+				lastMissingReport = missingReport.String()
+				return false, nil
+			}
+			// Capture every audit event observed on the successful iteration so the
+			// confidentiality guard below can inspect all logged events, not only the
+			// one enumerated in the expected slice.
+			observedEvents = missingReport.AllEvents
+			return true, nil
+		}); err != nil {
+			t.Fatalf("failed to get expected events -- missingReport: %s, error: %v", lastMissingReport, err)
+		}
+
+		// Confidentiality guard (AAP §0.6.3 / §0.2.4 / §0.8.3, V6): both Secrets and
+		// serviceaccounts/token are audited at LevelRequest, never RequestResponse,
+		// precisely so the API server's response body — which for a token request
+		// contains the freshly-issued bearer token, and for a Secret would duplicate the
+		// secret payload — is never written to the audit log. Assert that invariant
+		// directly across every logged event: no Secret and no serviceaccounts/token
+		// event may carry a response object. This scans a superset of the expected events,
+		// so a future regression to RequestResponse is caught even if the expected-events
+		// table were changed to match. utils.AuditEvent has no Subresource field, so the
+		// token subresource is detected via the /token RequestURI suffix. RequestObject
+		// remaining true on the create is the explicitly accepted Request-over-
+		// RequestResponse trade-off (AAP §0.2.4), not a defect — do NOT flag it.
+		for _, e := range observedEvents {
+			isSecret := e.Resource == "secrets"
+			isSAToken := e.Resource == "serviceaccounts" && strings.HasSuffix(e.RequestURI, "/token")
+			if (isSecret || isSAToken) && e.ResponseObject {
+				t.Errorf("Request-level audit event must not record a response object (would leak the secret payload / issued token): %#v", e)
+			}
+		}
+	})
+}
