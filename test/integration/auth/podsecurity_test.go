@@ -19,11 +19,14 @@ package auth
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +35,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	auditv1 "k8s.io/apiserver/pkg/apis/audit/v1"
 	apiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -453,5 +457,332 @@ func TestPodSecurityEnforceBaselineRejectsPrivileged(t *testing.T) {
 	warnHandler.Unlock()
 	if gotWarnings == 0 {
 		t.Errorf("expected at least one Pod Security warning under warn=restricted, got none")
+	}
+}
+
+// TestPodSecurityKubeSystemExemptionPreserved verifies that the documented
+// kube-system Pod Security exemption is preserved and that no other namespace is
+// loosened below the baseline default. startPodSecurityServer passes no
+// --admission-control-config-file (see the // TODO at its definition), so the cluster
+// PSA defaults and the kube-system exemption are not loaded there — and a namespace
+// label cannot express an "exemption" — so this test starts its own in-process API
+// server with an AdmissionConfiguration that mirrors the cluster hardening
+// (enforce=baseline / warn=restricted / audit=restricted, exemptions.namespaces:[kube-system]).
+// The behavioral reference is the read-only cluster/manifests/namespace-pss-labels.yaml,
+// which is intentionally not imported here.
+// AAP §6.6.10 / §0.8.1 (V2) + §6.4.4.3
+func TestPodSecurityKubeSystemExemptionPreserved(t *testing.T) {
+	// writePSAAdmissionConfig writes a temporary AdmissionConfiguration
+	// (apiserver.config.k8s.io/v1) whose inline PodSecurityConfiguration
+	// (pod-security.admission.config.k8s.io/v1) mirrors the cluster hardening and exempts
+	// kube-system. It is a function-local closure (AAP §0.11: no new package globals or
+	// shared mutable state) and returns the path to the written file.
+	writePSAAdmissionConfig := func() string {
+		t.Helper()
+		const cfg = `apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+- name: PodSecurity
+  configuration:
+    apiVersion: pod-security.admission.config.k8s.io/v1
+    kind: PodSecurityConfiguration
+    defaults:
+      enforce: "baseline"
+      enforce-version: "latest"
+      warn: "restricted"
+      warn-version: "latest"
+      audit: "restricted"
+      audit-version: "latest"
+    exemptions:
+      usernames: []
+      runtimeClasses: []
+      namespaces: ["kube-system"]
+`
+		path := t.TempDir() + "/psa-admission-config.yaml"
+		if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+			t.Fatalf("failed writing PodSecurity admission config: %v", err)
+		}
+		return path
+	}
+	cfgFile := writePSAAdmissionConfig()
+
+	// Mirror startPodSecurityServer (@145-146): allow privileged containers through the
+	// process-wide capabilities gate so the decision under test is PodSecurity's alone.
+	capabilities.ResetForTest()
+	capabilities.Initialize(capabilities.Capabilities{AllowPrivileged: true})
+
+	// Drive the REAL in-process API server (AAP §0.10: no control-plane mocks), loading the
+	// admission config so the baseline default and the kube-system exemption take effect.
+	server := kubeapiservertesting.StartTestServerOrDie(t, kubeapiservertesting.NewDefaultTestServerOptions(), []string{
+		"--anonymous-auth=false",
+		"--allow-privileged=true",
+		"--enable-admission-plugins=PodSecurity",
+		"--admission-control-config-file=" + cfgFile,
+	}, framework.SharedEtcd())
+	t.Cleanup(server.TearDownFn)
+	client := kubernetes.NewForConfigOrDie(server.ClientConfig)
+
+	// makeNS creates a namespace and its "default" ServiceAccount, tolerating AlreadyExists
+	// for both. kube-system may be bootstrapped by the API server, and kubeapiservertesting
+	// starts no controllers so the "default" ServiceAccount is not auto-created; the
+	// ServiceAccount admission plugin is enabled, so pod creation would otherwise fail with a
+	// non-Forbidden error before reaching PodSecurity. Creating the SA up front (mirroring the
+	// existing makeNS @375-387) ensures the assertions below observe a genuine PodSecurity
+	// decision, not a ServiceAccount error.
+	makeNS := func(name string, labels map[string]string) {
+		t.Helper()
+		if _, err := client.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+		}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("failed creating namespace %s: %v", name, err)
+		}
+		if _, err := client.CoreV1().ServiceAccounts(name).Create(context.TODO(), &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("failed creating default serviceaccount in %s: %v", name, err)
+		}
+	}
+
+	const exemptNS = "kube-system"
+	const nonExemptNS = "psa-nonexempt"
+	makeNS(exemptNS, nil)
+	makeNS(nonExemptNS, nil) // no PSA labels -> inherits the config default enforce=baseline
+
+	// newPrivilegedPod builds an identical privileged pod for each namespace so the only
+	// variable between the two assertions below is the namespace's exemption status.
+	newPrivilegedPod := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "privileged-pod"},
+			Spec: corev1.PodSpec{
+				ServiceAccountName: "default",
+				Containers: []corev1.Container{{
+					Name:            "c",
+					Image:           "busybox",
+					SecurityContext: &corev1.SecurityContext{Privileged: ptr.To(true)},
+				}},
+			},
+		}
+	}
+
+	// DryRun creates run the full admission chain but persist nothing, keeping the
+	// (uniquely-prefixed) framework.SharedEtcd() storage clean — matching the existing V2
+	// test @407.
+	dryRun := metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}
+
+	// AAP §0.8.1 (V2): the kube-system exemption must be preserved — a privileged pod in
+	// kube-system is ADMITTED. This locks against anyone over-tightening the exemption to
+	// baseline/restricted, which would break control-plane components that require it.
+	if _, err := client.CoreV1().Pods(exemptNS).Create(context.TODO(), newPrivilegedPod(), dryRun); err != nil {
+		t.Errorf("expected privileged pod to be ADMITTED in exempt namespace %q, got err=%v", exemptNS, err)
+	}
+
+	// AAP §0.8.1 (V2): nothing is loosened below baseline — the SAME privileged pod in a
+	// non-exempt, unlabeled namespace is REJECTED with Forbidden, proving the cluster default
+	// is baseline (not privileged). Pre-remediation (no --admission-control-config-file, default
+	// level privileged) this pod would be admitted and this assertion would fail, which is the
+	// regression lock.
+	if _, err := client.CoreV1().Pods(nonExemptNS).Create(context.TODO(), newPrivilegedPod(), dryRun); !apierrors.IsForbidden(err) {
+		t.Errorf("expected privileged pod to be REJECTED with Forbidden in non-exempt namespace %q under enforce=baseline default, got err=%v", nonExemptNS, err)
+	}
+}
+
+// TestPodSecurityAuditRestrictedBoundary verifies the audit=restricted and
+// warn=restricted boundaries of the cluster PSA configuration. A plain pod that is
+// baseline-compliant but restricted-violating is ADMITTED under enforce=baseline, yet it
+// (a) surfaces a client warning under warn=restricted and (b) records a
+// pod-security.kubernetes.io/audit-violations annotation under audit=restricted. That
+// annotation is emitted only to the audit backend (never to the object body or a client
+// warning), so this test starts its own API server with an audit log in blocking mode —
+// the event is written before the API response returns, so no sleeps are required.
+// AAP §6.6.10 / §0.8.1 (V2) + §6.4.4.3
+func TestPodSecurityAuditRestrictedBoundary(t *testing.T) {
+	// writePSAAdmissionConfig writes the same cluster-mirroring AdmissionConfiguration used by
+	// TestPodSecurityKubeSystemExemptionPreserved (function-local per AAP §0.11).
+	writePSAAdmissionConfig := func() string {
+		t.Helper()
+		const cfg = `apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+- name: PodSecurity
+  configuration:
+    apiVersion: pod-security.admission.config.k8s.io/v1
+    kind: PodSecurityConfiguration
+    defaults:
+      enforce: "baseline"
+      enforce-version: "latest"
+      warn: "restricted"
+      warn-version: "latest"
+      audit: "restricted"
+      audit-version: "latest"
+    exemptions:
+      usernames: []
+      runtimeClasses: []
+      namespaces: ["kube-system"]
+`
+		path := t.TempDir() + "/psa-admission-config.yaml"
+		if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+			t.Fatalf("failed writing PodSecurity admission config: %v", err)
+		}
+		return path
+	}
+
+	// writeAuditPolicy writes a minimal audit Policy that logs pods at Metadata level; audit
+	// annotations (including pod-security.kubernetes.io/audit-violations) are recorded at
+	// Metadata level and above. Function-local per AAP §0.11.
+	writeAuditPolicy := func() string {
+		t.Helper()
+		const policy = `apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+- level: Metadata
+  resources:
+  - group: ""
+    resources: ["pods"]
+`
+		path := t.TempDir() + "/audit-policy.yaml"
+		if err := os.WriteFile(path, []byte(policy), 0o600); err != nil {
+			t.Fatalf("failed writing audit policy: %v", err)
+		}
+		return path
+	}
+
+	cfgFile := writePSAAdmissionConfig()
+	auditPolicyFile := writeAuditPolicy()
+	auditLogFile, err := os.CreateTemp(t.TempDir(), "psa-audit-*.log")
+	if err != nil {
+		t.Fatalf("failed creating audit log file: %v", err)
+	}
+	if err := auditLogFile.Close(); err != nil {
+		t.Fatalf("failed closing audit log file: %v", err)
+	}
+
+	// Mirror startPodSecurityServer (@145-146): allow privileged containers through the
+	// capabilities gate so the PodSecurity decision is isolated.
+	capabilities.ResetForTest()
+	capabilities.Initialize(capabilities.Capabilities{AllowPrivileged: true})
+
+	// Real in-process API server (AAP §0.10) with the admission config AND an audit log.
+	// --audit-log-mode=blocking makes the audit event synchronous with the request, so the
+	// annotation is observable immediately after the create returns (no sleeps; AAP §0.10).
+	server := kubeapiservertesting.StartTestServerOrDie(t, kubeapiservertesting.NewDefaultTestServerOptions(), []string{
+		"--anonymous-auth=false",
+		"--allow-privileged=true",
+		"--enable-admission-plugins=PodSecurity",
+		"--admission-control-config-file=" + cfgFile,
+		"--audit-policy-file=" + auditPolicyFile,
+		"--audit-log-path=" + auditLogFile.Name(),
+		"--audit-log-mode=blocking",
+		"--audit-log-version=audit.k8s.io/v1",
+	}, framework.SharedEtcd())
+	t.Cleanup(server.TearDownFn)
+	client := kubernetes.NewForConfigOrDie(server.ClientConfig)
+
+	// makeNS creates a namespace and its "default" ServiceAccount, tolerating AlreadyExists, so
+	// the create below reaches PodSecurity rather than failing in the ServiceAccount plugin
+	// (mirrors the existing makeNS @375-387).
+	makeNS := func(name string, labels map[string]string) {
+		t.Helper()
+		if _, err := client.CoreV1().Namespaces().Create(context.TODO(), &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+		}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("failed creating namespace %s: %v", name, err)
+		}
+		if _, err := client.CoreV1().ServiceAccounts(name).Create(context.TODO(), &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("failed creating default serviceaccount in %s: %v", name, err)
+		}
+	}
+
+	// No PSA labels -> the namespace inherits the config defaults
+	// enforce=baseline / warn=restricted / audit=restricted.
+	const ns = "psa-audit-boundary"
+	makeNS(ns, nil)
+
+	// Build a warning-capturing client by reusing the package-local recordingWarningHandler
+	// (defined in svcaccttoken_test.go); it implements rest.WarningHandler (copy @432-435).
+	warnHandler := &recordingWarningHandler{}
+	warnCfg := rest.CopyConfig(server.ClientConfig)
+	warnCfg.WarningHandler = warnHandler
+	warnClient := kubernetes.NewForConfigOrDie(warnCfg)
+
+	// A plain pod (no securityContext) complies with baseline but violates the restricted
+	// profile (missing runAsNonRoot, seccompProfile, drop-ALL caps, allowPrivilegeEscalation=false).
+	// A real (non-DryRun) create is used so the audit event is emitted and persisted; the pod is
+	// cleaned up below. Storage is isolated by the unique framework.SharedEtcd() prefix.
+	restrictedViolatingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "audit-warn-pod"},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: "default",
+			Containers:         []corev1.Container{{Name: "c", Image: "busybox"}},
+		},
+	}
+
+	warnHandler.clear()
+	created, err := warnClient.CoreV1().Pods(ns).Create(context.TODO(), restrictedViolatingPod, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("expected restricted-violating pod to be ADMITTED under enforce=baseline, got err=%v", err)
+	}
+	t.Cleanup(func() {
+		_ = client.CoreV1().Pods(ns).Delete(context.TODO(), created.Name, metav1.DeleteOptions{})
+	})
+
+	// AAP §0.8.1 (V2): warn=restricted surfaces at least one client warning. Read the captured
+	// warnings under the embedded mutex (satisfies -race), copying them out for local checks.
+	warnHandler.Lock()
+	gotWarnings := append([]string(nil), warnHandler.warnings...)
+	warnHandler.Unlock()
+	if len(gotWarnings) == 0 {
+		t.Errorf("expected at least one Pod Security warning under warn=restricted, got none")
+	}
+	// Boundary specificity: at least one warning references the restricted profile.
+	foundRestricted := false
+	for _, w := range gotWarnings {
+		if strings.Contains(w, "restricted") {
+			foundRestricted = true
+			break
+		}
+	}
+	if !foundRestricted {
+		t.Errorf("expected a warn=restricted warning mentioning %q, got %v", "restricted", gotWarnings)
+	}
+
+	// AAP §0.8.1 (V2): audit=restricted records a non-empty
+	// pod-security.kubernetes.io/audit-violations annotation on the pods/create audit event.
+	// With --audit-log-mode=blocking the event is written before the response returns; the poll
+	// below (wait.PollImmediate — an existing helper, not a sleep) only tolerates file-buffer
+	// flush timing. Pre-remediation (no audit=restricted default) the annotation is absent and
+	// this assertion fails, which is the regression lock.
+	const auditViolationsKey = "pod-security.kubernetes.io/audit-violations"
+	var lastErr error
+	if pollErr := wait.PollImmediate(100*time.Millisecond, 30*time.Second, func() (bool, error) {
+		data, readErr := os.ReadFile(auditLogFile.Name())
+		if readErr != nil {
+			lastErr = readErr
+			return false, nil
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var ev auditv1.Event
+			if unmarshalErr := json.Unmarshal([]byte(line), &ev); unmarshalErr != nil {
+				continue // ignore any non-event line
+			}
+			if ev.Verb != "create" || ev.ObjectRef == nil {
+				continue
+			}
+			if ev.ObjectRef.Resource != "pods" || ev.ObjectRef.Namespace != ns {
+				continue
+			}
+			if ev.Annotations[auditViolationsKey] != "" {
+				return true, nil
+			}
+		}
+		lastErr = fmt.Errorf("no pods/create audit event in namespace %q carried a non-empty %q annotation", ns, auditViolationsKey)
+		return false, nil
+	}); pollErr != nil {
+		t.Errorf("expected audit=restricted to record a %q annotation on the pods/create event: %v", auditViolationsKey, lastErr)
 	}
 }
