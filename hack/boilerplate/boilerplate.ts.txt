@@ -14,12 +14,3 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// AAP §0.5.4 — Vite toolchain configuration for the React test tier.
-// Only the JSX/Fast-Refresh transform is required here; all test-runner
-// settings live in vitest.config.ts (which Vitest prefers over this file).
-import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
-
-export default defineConfig({
-  plugins: [react()],
-});
