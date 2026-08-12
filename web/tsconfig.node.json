@@ -1,0 +1,15 @@
+{
+  "//": "AAP §0.5.4 — TypeScript config for build tooling (vite/vitest config files). Checked by a separate `tsc --noEmit -p tsconfig.node.json` invocation rather than a project reference, because a referenced composite project may not disable emit (TS6310).",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts", "vitest.config.ts", "eslint.config.js"]
+}
