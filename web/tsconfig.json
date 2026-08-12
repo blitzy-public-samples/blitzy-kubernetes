@@ -1,25 +1,95 @@
+// TypeScript project for the React test tier's own sources under web/src:
+// components, hooks, MSW handlers, recorded fixtures and *.test.tsx specs.
+//
+// AAP §0.5.1 (web/tsconfig.json row) / §0.2.2.3 (canonical Vitest 4 + React
+// Testing Library 16 configuration shape) / tech-spec §6.6.1.3 (jsdom only --
+// browser automation, cross-browser testing and visual regression are not
+// applicable to this repository).
+//
+// Invariant locked: BARE `tsc --noEmit`, executed with web/ as the working
+// directory, typechecks every file under web/src. hack/verify-web.sh depends on
+// exactly that shape, so this is a single plain project, never a solution-style
+// one. Two shapes are therefore deliberately absent, and must stay absent:
+//   * an empty file list paired with project cross-links -- bare tsc reports
+//     TS18003, No inputs were found in config file, on an input-less project;
+//   * a composite project -- that conflicts with --noEmit (TS6304), and a
+//     cross-linked composite project may not disable emit at all (TS6310).
+// The build tooling (vite.config.ts, vitest.config.ts) is covered by the sibling
+// tsconfig.node.json in a second, separate invocation. eslint.config.js is
+// JavaScript, sits outside both projects because `allowJs` is off in each, and
+// is covered by the `npx eslint .` pass that hack/verify-web.sh runs first.
+//
+// JSONC is deliberate: TypeScript accepts comments in tsconfig.json (verified
+// against the pinned TypeScript 7.0.2) and tsc is this file's only consumer. No
+// Apache-2.0 header appears because hack/boilerplate/boilerplate.py derives its
+// gated extensions from hack/boilerplate/boilerplate.*.txt, which has no json
+// reference template, so .json is not part of that gate.
 {
-  "//": "AAP §0.5.4 / §0.3.4.2 — TypeScript config for the React (Vitest 4 + RTL 16) test tier.",
-  "//types": "Without @testing-library/jest-dom in `types`, matchers such as toBeInTheDocument fail typecheck.",
   "compilerOptions": {
+    // Language level. Vite and Vitest perform the transform, so this governs
+    // typechecking only.
     "target": "ES2022",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    // DOM and DOM.Iterable are mandatory: the component tier renders into jsdom.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    // "bundler" resolution is the correct mode for a Vite/Vitest project and
+    // requires an ESNext-family module setting. It honours package.json
+    // "exports", which is how each entry of "types" below resolves.
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "jsx": "react-jsx",
-    "useDefineForClassFields": true,
-    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
+    // The bundler emits each file in isolation, so forbid constructs that need
+    // whole-program knowledge.
     "isolatedModules": true,
-    "verbatimModuleSyntax": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-    "skipLibCheck": true,
+    // Interop with the CommonJS halves of the pinned toolchain.
+    "esModuleInterop": true,
+
+    // React 19 automatic runtime, matching @vitejs/plugin-react's transform:
+    // component and spec files need no `import React`.
+    "jsx": "react-jsx",
+
+    // Correctness gates. ESLint 10 bundles only espree and cannot parse
+    // TypeScript, and typescript-eslint's peer range excludes TypeScript 7
+    // (see web/eslint.config.js), so tsc is the ONLY gate .ts/.tsx files get.
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Typecheck only; Vite owns emit.
+    "noEmit": true,
+
+    // LOAD-BEARING, not cosmetic. This suppresses diagnostics raised *inside*
+    // third-party .d.ts files, which is what lets this tier typecheck without
+    // adding @types packages that AAP §0.6.1.2 does not pin -- notably
+    // @types/node, which Vite's own declarations reach for. Verified by
+    // removing it: @testing-library/jest-dom's types/jest.d.ts, whose first
+    // line is `/// <reference types="jest" />`, then fails the build with
+    // "TS2688: Cannot find type definition file for 'jest'".
+    "skipLibCheck": true,
+
+    // ALLOW-LIST. Once "types" is specified, ONLY these packages contribute
+    // global declarations, which is how @types/node stays out of the program
+    // even though it is installed transitively. Exactly these three, in this
+    // order (AAP §0.5.1, §0.2.2.3). Each was verified as load-bearing by
+    // removing it and observing the failure:
+    //   vitest/globals            -- bare describe/it/expect/vi, else TS2593
+    //                                and TS2304 ("Cannot find name 'expect'");
+    //   vite/client               -- import.meta.env and asset module shapes;
+    //   @testing-library/jest-dom -- toBeInTheDocument and its siblings, else
+    //                                TS2339 on type 'Assertion<HTMLElement>'.
     "types": ["vitest/globals", "vite/client", "@testing-library/jest-dom"]
   },
-  "include": ["src"]
+
+  // src/** only. vite.config.ts and vitest.config.ts belong to
+  // tsconfig.node.json; listing them here would typecheck them a second time
+  // under the wrong lib and types set.
+  "include": ["src"],
+
+  // Belt and braces -- both already sit outside "include". node_modules is a
+  // symlink to an out-of-tree store provisioned by hack/lib/node.sh, and
+  // coverage/ is the @vitest/coverage-v8 report directory named by
+  // vitest.config.ts.
+  "exclude": ["node_modules", "coverage"]
 }

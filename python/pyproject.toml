@@ -12,90 +12,344 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Configuration for the Python (pytest) test tier that ports the Go
-# security-regression surface for controls V1-V8.
+# Sole configuration file for the Python (pytest) test tier that ports the Go
+# security-regression surface for controls V1 through V8.
 #
-# AAP  §0.4.6 / §0.5.4 (test configuration)  /  tech-spec §6.6.1 (test tiers)
+# AAP §0.4.6 / tech-spec §0.5.4
 #
-# NOTE (pytest 9): the native `[tool.pytest]` table and the legacy
-# `[tool.pytest.ini_options]` table MUST NOT both appear in one file.
-# This project uses `[tool.pytest.ini_options]` exclusively (AAP §0.2.2.1).
+# INVARIANT LOCKED BY THIS FILE: the runner configuration, the marker
+# vocabulary and the machine-readable reporting contract of the pytest tier.
+# Change a key here and you change how every tier is selected, bounded and
+# reported - not what any test asserts.
+#
+# CONSUMED BY - these are contracts, not conventions:
+#   hack/make-rules/test-python.sh  cds into python/ and runs pytest, relying on
+#                                   `testpaths` below; it OWNS the coverage,
+#                                   parallelism and marker switches through
+#                                   KUBE_PYTHON_COVER (default n),
+#                                   KUBE_PYTHON_TEST_WORKERS (default 0) and
+#                                   KUBE_PYTHON_TEST_MARKERS, and passes
+#                                   --junitxml=${KUBE_JUNIT_REPORT_DIR}/python.xml
+#   hack/make-rules/test-parity.sh  selects `-m parity`, so that marker name is
+#                                   load-bearing for the migration's single
+#                                   success criterion
+#   hack/verify-python.sh           cds into python/ and runs `ruff check .` and
+#                                   `mypy .`, taking both configurations from
+#                                   the [tool.ruff*] and [tool.mypy*] tables here
+#   hack/lib/python.sh              KUBE_PYTHON_MIN_VERSION=3.10 is the floor
+#                                   that target-version / python_version express
+#
+# THIS FILE DECLARES; THE RUNNERS ACTIVATE. Coverage, parallelism and marker
+# selection are deliberately absent from `addopts` so that the repository's
+# opt-in posture holds: hack/make-rules/test.sh:65 defaults KUBE_COVER to n for
+# the Go tier, and hack/make-rules/test-python.sh:38 mirrors it exactly. Baking
+# --cov, -n or -m into `addopts` would force them on for every invocation and
+# silently override those switches.
+#
+# Distributions and their exact versions live solely in
+# python/requirements-test.txt. This file intentionally declares no
+# dependencies, no [project] table and no [build-system] table: python/ is a
+# test tree, never an installed distribution, so a packaging manifest here
+# would be inert at best and would perturb pytest's rootdir resolution at worst.
 
+# NOTE (pytest 9): a native `[tool.pytest]` table and this legacy
+# `[tool.pytest.ini_options]` table MUST NOT both appear in one file. This
+# project uses `[tool.pytest.ini_options]` exclusively (AAP §0.2.2.1).
 [tool.pytest.ini_options]
+# Fail loudly rather than mysteriously if the pinned interpreter of the tier is
+# not the one in python/requirements-test.txt. 9.1.1 and not 9.1.0: that
+# release regressed the loading of initial conftest.py files, and every fixture
+# in this suite lives in a conftest.py.
 minversion = "9.1.1"
+
+# Resolved relative to rootdir (python/), so this is python/tests.
+# hack/make-rules/test-python.sh passes no path arguments and depends on it.
 testpaths = ["tests"]
 
-# Keep the repository root importable from the test tree so that
-# `tests.fixtures.*` / `tests.helpers.*` resolve without install steps.
+# Put rootdir on sys.path so `tests.fixtures.*` and `tests.helpers.*` resolve
+# with no install step. python/tests/ deliberately carries no __init__.py -
+# only tests/fixtures/ and tests/helpers/ do - so `tests` is an implicit
+# namespace package and needs rootdir importable (AAP §0.6.2).
 pythonpath = ["."]
+
+# Resolve collected modules to their fully qualified names
+# (tests.unit.shell.conftest rather than a bare `conftest`). The tier has four
+# conftest.py files, so basename-level naming would be ambiguous; this is the
+# pytest-side counterpart of explicit_package_bases in [tool.mypy] below, and
+# is preferred over sprinkling __init__.py files the AAP does not specify.
 consider_namespace_packages = true
 
-addopts = [
-  "-ra",
-  "--strict-markers",
-  "--strict-config",
-  "--import-mode=importlib",
-]
+# -ra                summarise every non-passing outcome at the end of a run.
+# --strict-markers   an unregistered marker on a test is a collection ERROR.
+# --strict-config    an unknown or unparsable ini key is a startup ERROR.
+# Nothing else belongs here. In particular NOT --cov / -n / -m (owned by the
+# runner, see above), NOT -x or --continue-on-collection-errors (both trade
+# away findings), NOT -q (hides the summary -ra just asked for), and NOT
+# --doctest-modules, under which module-, package- and session-scoped autouse
+# fixtures declared inline in a test module can execute twice.
+addopts = "-ra --strict-markers --strict-config"
 
-# Marker vocabulary (AAP §0.5.4). `--strict-markers` makes an unknown marker
-# an error, so every marker used by a test module must be declared here.
+# Marker vocabulary. Exactly these five, each with a description, because
+# --strict-markers turns an unregistered marker into an error - and because a
+# mistyped `-m` selector is NOT an error, it merely deselects everything and
+# reports "no tests collected". Renaming one silently empties a tier.
 markers = [
-  "integration: needs a real etcd 3.6.5 binary and a real kube-apiserver (L2 tier)",
-  "shell: invokes the shipped bash generators through a subprocess (L1/L4 tiers)",
-  "config: pure decode/assert over committed or generated configuration (L3 tier)",
-  "parity: parity-contract meta-assertions against baseline/go_baseline.json",
-  "slow: runtime materially above the unit-tier budget",
+  "integration: needs a real etcd 3.6.5 binary and a real built kube-apiserver (L2 tier)",
+  "shell: invokes the shipped bash generators through a subprocess (L1 and L4 tiers)",
+  "config: pure decode-and-assert over committed or generated configuration, no subprocess (L3 tier)",
+  "parity: baseline-manifest contract assertions against tests/parity/baseline/go_baseline.json",
+  "slow: runtime materially above the unit-tier budget; separable from the fast feedback loop",
 ]
 
-# A hang must become a failure, never a wedged job: this is one half of the
-# substitute for Go's `-race` / goleak guarantees (AAP §0.4.1.2).
-# Individual integration modules may raise it with @pytest.mark.timeout(...).
+# A test marked xfail that unexpectedly passes is a result that changed, and
+# the parity contract exists precisely to catch changed results - so an XPASS
+# must fail rather than be tolerated. `strict_xfail` is the canonical pytest 9
+# spelling; `xfail_strict` survives only as an alias.
+strict_xfail = true
+
+# A hang must become a failure, never a wedged job. Together with
+# pytest-randomly and pytest-xdist this is the deliberate substitute for
+# guarantees the Go tier gets from `-race` (on by default:
+# hack/make-rules/test.sh:73) and go.uber.org/goleak, neither of which has a
+# Python analogue (AAP §0.4.1.2).
+#
+# 300s bounds a single TEST, which sits sensibly inside the Go tier's own
+# bounds: hack/make-rules/test-integration.sh:46 allows a whole PACKAGE 600s
+# (`-timeout=600s`) and hack/make-rules/test.sh:64 allows 180s, while AAP
+# §0.3.1.5 measures the heaviest ported package, test/integration/auth, at
+# about 208s in total. So this clears the heaviest single ported case with room
+# to spare and still catches a wedge. Do NOT inflate it to accommodate one slow
+# test - that would blind every other test. A genuinely slower test raises its
+# own bound with @pytest.mark.timeout(...) and carries @pytest.mark.slow.
 timeout = 300
-timeout_method = "thread"
 
-# Machine-readable reporting: JUnit XML is emitted by hack/make-rules/test-python.sh
-# into ${KUBE_JUNIT_REPORT_DIR}, the same convention gotestsum already honours.
+# `signal` (SIGALRM) over `thread`, measured rather than assumed: signal turns
+# a hang - including one blocked inside subprocess.run - into an ordinary test
+# failure with a traceback pointing at the hung line, lets the session
+# continue, and still writes the JUnit report. `thread` kills the process, so
+# under pytest-xdist the only evidence left is "worker gw0 crashed".
+timeout_method = "signal"
+
+# Machine-readable reporting. hack/make-rules/test-python.sh writes python.xml
+# into ${KUBE_JUNIT_REPORT_DIR}, which hack/make-rules/test.sh:79-81 already
+# auto-matches to CI's ${ARTIFACTS} for the Go tier, so TestGrid, the
+# go.k8s.io/triage clusterer and Spyglass keep consuming one directory. xunit2
+# yields the <testsuites name="pytest tests"> root that runner expects. The
+# output path is supplied by the runner and is deliberately not hardcoded here.
 junit_family = "xunit2"
+
+# Attach captured logs to the XML so a CI-only failure is diagnosable from the
+# artifact alone, without a local reproduction.
 junit_logging = "system-out"
-junit_duration_report = "call"
 
-xfail_strict = true
-log_cli_level = "INFO"
+# Capture at INFO so the report of a failing test carries the log context that
+# explains it - the subprocess argv of a shell-tier case, the flags a test
+# server was started with. Live logging stays off; this is report capture only.
+log_level = "INFO"
+
+# pytest-asyncio is pinned, and python/requirements-test.txt records that this
+# file sets strict mode: an async test must opt in with @pytest.mark.asyncio
+# rather than being collected by accident. Both keys are set explicitly so no
+# behaviour is inherited from a plugin default that may change, and so the
+# banner reports a decision instead of "None".
 asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 
+# Warnings are signal, so an unexpected warning fails the run. There is
+# deliberately NO blanket `ignore` and no third-party allowlist: every pinned
+# dependency (kubernetes, etcd3gw, PyJWT, PyYAML, httpx, respx, freezegun,
+# hypothesis) was verified warning-clean on import under this setting, so no
+# entry is justified today. A module that must tolerate one specific warning
+# declares it locally with @pytest.mark.filterwarnings("ignore::..."), which
+# keeps the exception reviewable and scoped to the test that needs it instead
+# of hidden in global configuration. This matters more than usual because
+# pytest 9 already promotes its own removal warnings to errors with no grace
+# period.
+filterwarnings = [
+  "error",
+  # The one entry, and it is a DOWNGRADE TO "default" RATHER THAN AN "ignore":
+  # the warning is still raised, still printed in full and still counted in the
+  # warnings summary, so no signal is masked - it simply stops being fatal.
+  #
+  # Why it is unavoidable: pytest applies these filters inside
+  # Config.issue_config_time_warning(), which runs before collection, so
+  # "error" also escalates CONFIG-TIME warnings. When python/tests does not
+  # exist yet - the normal state while the tier is populated file by file -
+  # Config._decide_args() issues exactly this PytestConfigWarning, and
+  # escalating it aborts pytest with a bare Python traceback and exit 1 instead
+  # of the clean exit 5 that hack/make-rules/test-python.sh deliberately
+  # reports as "no Python tests collected yet (migration in progress)". An
+  # illegible traceback would defeat that design for no gain: an empty tier is
+  # already reported, loudly, by the warning itself.
+  #
+  # Ordering is load-bearing. Each entry is applied in turn and the last one
+  # applied wins, so this narrowing MUST follow "error"; placed before it, the
+  # escalation returns.
+  "default:No files were found in testpaths:pytest.PytestConfigWarning",
+]
+
+# Coverage for this tier is a SECONDARY, DERIVED signal and is never a gate.
+# The repository measures no coverage today and reports it as N/A; its Go tier
+# keeps the tooling available behind KUBE_COVER=n and gates on deterministic
+# regression tests instead. That posture is mirrored, not "improved":
+# consequently `fail_under` appears NOWHERE in this file, and no CI job fails
+# on a percentage (AAP §0.7.1, §0.9.3).
+#
+# Derived floors, recorded here as documentation and explicitly ADVISORY:
+#   * 100% line and branch on pure decision logic that encodes a security
+#     invariant - the audit level-mapping table, the provider-ordering rule,
+#     the wildcard-rule predicate, the token TTL and audience predicate, the
+#     node-ownership predicate.
+#   * >= 90% line and branch on the ported V1 through V8 modules.
+#   * >= 80% line across the new Python packages.
+#   * The subprocess shell-boundary tier (tests/unit/shell/) is MEASURED BUT
+#     NOT GATED and is excluded from the floors above: the logic under test is
+#     Bash, and Python line coverage of a subprocess wrapper is not a
+#     meaningful signal. It is deliberately NOT omitted below - excluding it
+#     would stop measuring it, and the AAP asks for measurement without
+#     gating.
 [tool.coverage.run]
+# Branch coverage, because the floors above speak of branches: a security
+# predicate whose false arm is never taken is not covered in any useful sense.
 branch = true
+
+# pytest-xdist runs workers as separate processes; per-process data files that
+# pytest-cov then combines are what make a parallel run measurable. Verified
+# to produce one combined dataset both serially and under `-n 2`.
 parallel = true
+concurrency = ["thread"]
+
+# The tier under measurement. hack/make-rules/test-python.sh passes
+# --cov=tests when KUBE_PYTHON_COVER=y; this keeps a bare `coverage run`
+# equivalent.
 source = ["tests"]
+
+# Keep reports free of absolute build paths so combined data and the XML are
+# portable across the runner, CI and a developer checkout.
+relative_files = true
+
 omit = [
-  # The logic under test in the shell tiers is Bash; Python line coverage of a
-  # subprocess wrapper is not a meaningful signal (AAP §0.7.1.3: measured, not gated).
-  "tests/unit/shell/*",
+  # Executed as a standalone CLI by hack/make-rules/test-parity.sh, never
+  # imported by a test, so its coverage under pytest would be a meaningless 0%
+  # that drags the reported number away from what the suite actually exercises.
   "tests/parity/tools/*",
 ]
 
 [tool.coverage.report]
+# Name the uncovered lines: a percentage tells you nothing actionable.
 show_missing = true
 skip_covered = false
-exclude_lines = [
-  "pragma: no cover",
+precision = 1
+
+# `exclude_also` ADDS to coverage's built-in exclusions instead of replacing
+# them, so `# pragma: no cover` keeps working. Deliberately conservative:
+# nothing here can hide an untested security predicate - a TYPE_CHECKING block
+# contains no runtime logic, an unimplemented branch cannot be asserted on,
+# and a __main__ guard is a script entry point, not a decision.
+exclude_also = [
   "if TYPE_CHECKING:",
   "raise NotImplementedError",
+  "if __name__ == .__main__.:",
 ]
 
-[tool.coverage.xml]
-output = "coverage.xml"
-
 [tool.ruff]
-target-version = "py312"
+# The FLOOR, not the interpreter in use. hack/lib/python.sh provisions 3.12
+# (KUBE_PYTHON_VERSION) but declares KUBE_PYTHON_MIN_VERSION=3.10, the version
+# pytest 9 requires after dropping 3.9. Linting against the floor keeps the
+# tier runnable on the documented minimum instead of only on the machine that
+# happened to build it.
+target-version = "py310"
 line-length = 100
-extend-exclude = [".venv", "__pycache__"]
+
+# Makes `tests` first-party for import sorting without a second declaration.
+src = ["."]
+
+# python/.venv is a symlink to an out-of-tree store precisely so tree walkers
+# skip it; these three are also the paths the root .gitignore claims. Ruff's
+# own defaults already cover .venv and .pytest_cache - `extend-exclude` adds to
+# that list rather than replacing it, so nothing is lost.
+extend-exclude = [".venv", "__pycache__", ".pytest_cache"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "C4", "PT"]
+# An explicit selection suited to a test tree. E/W/F catch real defects,
+# I keeps imports ordered, UP keeps the code idiomatic for the floor, B catches
+# genuine bug patterns (mutable default arguments, assertions on tuples), C4
+# comprehension misuse, PT pytest-specific mistakes such as a bare
+# pytest.raises with no `match`, SIM needless complexity, RUF ruff's own
+# checks including RUF100 for a noqa that no longer suppresses anything.
+select = ["E", "W", "F", "I", "UP", "B", "C4", "PT", "SIM", "RUF"]
+
+ignore = [
+  # Line length is a formatting concern, and the repository does not gate
+  # formatting: its Go equivalent, gofmt, enforces no line limit either, and
+  # hack/verify-python.sh runs `ruff check` without `ruff format` by design.
+  # `line-length` above therefore configures the formatter for authors who run
+  # it, while E501 stays out of the gate so a wide fixture literal or a
+  # provenance citation cannot fail a security test suite on whitespace.
+  "E501",
+]
+
+# Deliberately NOT selected, so the gate does not fight idioms this suite must
+# use rather than being switched off wholesale by the next engineer:
+#   S   - flake8-bandit would flag `assert` (S101) in every test and the
+#         `subprocess` invocations that ARE the shell tier (S603/S607).
+#   ARG - a fixture requested purely for its side effect looks like an unused
+#         argument, and that is exactly how pytest fixtures work.
+#   D   - docstring formatting is not a defect class worth a red gate here.
+
+[tool.ruff.lint.isort]
+# `tests` is this tree's only first-party root; stating it keeps import
+# grouping stable no matter which directory ruff is invoked from.
+known-first-party = ["tests"]
 
 [tool.mypy]
-python_version = "3.12"
+# The floor, for the same reason as target-version above.
+python_version = "3.10"
+
+# hack/verify-python.sh runs `mypy .` from python/, so module names are derived
+# from paths. Without these three, the tier's four conftest.py files collide
+# with `error: Duplicate module named "conftest"` and the gate fails as soon as
+# a second tier gains fixtures; with them, each resolves to its fully qualified
+# name (tests.unit.shell.conftest). This is the mypy-side counterpart of
+# consider_namespace_packages above, and is preferred over adding __init__.py
+# files the AAP does not specify.
+mypy_path = "."
+namespace_packages = true
+explicit_package_bases = true
+
+# Never descend into the out-of-tree virtual environment or generated caches.
+# Matched as regular expressions against discovered paths, anchored so that
+# both "./.venv/..." and ".venv/..." are caught.
+exclude = [
+  '(^|/)\.venv/',
+  '(^|/)__pycache__/',
+  '(^|/)\.pytest_cache/',
+]
+
+# Strictness that is genuinely achievable for a test tree talking to the
+# Kubernetes Python client. check_untyped_defs is the setting that earns its
+# keep: it type-checks the BODY of an unannotated test function, so the tier
+# gets real analysis without every test and fixture being forced to carry
+# annotations - which is why disallow_untyped_defs stays off and is stated
+# explicitly rather than left to a default that could change.
+check_untyped_defs = true
+disallow_untyped_defs = false
+warn_redundant_casts = true
+warn_unused_ignores = true
 warn_unused_configs = true
+strict_equality = true
+warn_no_return = true
+
+# Third-party packages that ship neither inline types nor a py.typed marker.
+# The list is exactly as long as it needs to be, derived by auditing the
+# installed distributions rather than guessed: everything else the tier imports
+# (etcd3gw, PyJWT, httpx, respx, freezegun, hypothesis, pytest itself) IS
+# typed, and mypy's `X.*` pattern already matches both `X` and its submodules.
+# Extend this list only after confirming the package genuinely lacks types -
+# a redundant entry is reported as an unused section by warn_unused_configs.
+[[tool.mypy.overrides]]
+module = [
+  "kubernetes.*",
+  "yaml.*",
+]
 ignore_missing_imports = true
-exclude = ['^\.venv/']

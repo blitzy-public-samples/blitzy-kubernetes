@@ -1,15 +1,63 @@
+// AAP §0.5.1 (web/tsconfig.node.json row) / §0.5.4 — TypeScript project for the
+// BUILD TOOLING of the React (Vitest 4 + RTL 16) test tier.
+//
+// SCOPE. Exactly two modules: vite.config.ts and vitest.config.ts. Everything
+// under src/** belongs to the sibling ./tsconfig.json, so the two projects
+// never share an input and neither includes the other's. eslint.config.js is
+// deliberately NOT listed: it is JavaScript, `allowJs` is deliberately off, and
+// it is covered by the `npx eslint .` pass that hack/verify-web.sh runs first.
+//
+// WHY THIS IS A STANDALONE PROJECT, NOT A COMPOSITE/REFERENCED ONE
+// (AAP §0.11.1 "extend the repository's own gate surface, never bypass it").
+// hack/verify-web.sh typechecks this tier with two plain invocations —
+// `npx tsc --noEmit` for src/**, then `npx tsc --noEmit -p tsconfig.node.json`
+// for this project. Project references cannot be used to merge them: a
+// referenced project must set `composite`, a composite project rejects a bare
+// `tsc --noEmit` (TS6304) and may not disable emit while referenced (TS6310),
+// and a solution-style parent carrying `"files": []` reports TS18003. Hence no
+// `composite`, no `references`, and no empty `files` array here.
+//
+// WHY THERE IS NO @types/node (AAP §0.11.1 "respect the surviving freeze").
+// AAP §0.6.1.2 pins this tier's dependency set exactly and @types/node is not
+// in it; it appears under node_modules only as a transitive, hoisting-dependent
+// artifact of vite/vitest, so naming it here would make the gate depend on an
+// undeclared package and fail with TS2688 the moment hoisting changes.
+// `"types": []` is an explicit empty allow-list — no ambient type package is
+// loaded at all — and `"skipLibCheck": true` keeps the declaration files those
+// packages ship from being typechecked. BOTH ARE INVARIANTS: removing either
+// re-opens a dependency question the AAP already answered by omission. The
+// corollary contract on the two included modules is that they import nothing
+// from `node:*` and use no Node global — no `__dirname`, no `__filename`, no
+// `process` — which is why they typecheck with an empty ambient type set.
 {
-  "//": "AAP §0.5.4 — TypeScript config for build tooling (vite/vitest config files). Checked by a separate `tsc --noEmit -p tsconfig.node.json` invocation rather than a project reference, because a referenced composite project may not disable emit (TS6310).",
   "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
+    // ES2022 matches the sibling project's target. `lib` carries no DOM entry
+    // on purpose: these two modules execute inside the build tool, never in a
+    // browser, so a DOM lib would mask an accidental browser-only API.
+    "target": "ES2022",
+    "lib": ["ES2022"],
+
+    // web/package.json declares `"type": "module"`, so both modules are ESM and
+    // are resolved the way Vite itself resolves them.
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "allowSyntheticDefaultImports": true,
-    "skipLibCheck": true,
+
     "strict": true,
     "noEmit": true,
-    "types": ["node"]
+
+    // Mandatory here — see the @types/node note above.
+    "skipLibCheck": true,
+
+    // Each module must stand alone under a single-file transform, interoperate
+    // with CommonJS default exports, and resolve case-sensitively so a Linux CI
+    // run and a case-insensitive developer filesystem agree.
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Explicit empty allow-list: the executable proof that no ambient Node
+    // globals are relied upon.
+    "types": []
   },
-  "include": ["vite.config.ts", "vitest.config.ts", "eslint.config.js"]
+  "include": ["vite.config.ts", "vitest.config.ts"]
 }
