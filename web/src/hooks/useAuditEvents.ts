@@ -38,6 +38,13 @@ limitations under the License.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import {
+  AUDIT_API_VERSION,
+  AUDIT_EVENT_KIND,
+  AUDIT_REQUEST_BODY_KEY,
+  AUDIT_RESPONSE_BODY_KEY,
+} from '../domain/securityConstants';
+
 /**
  * The four audit levels of the `audit.k8s.io/v1` API, spelled exactly as they
  * appear on the wire.
@@ -74,6 +81,21 @@ export type AuditStage =
   | 'ResponseStarted'
   | 'ResponseComplete'
   | 'Panic';
+
+/**
+ * The four audit stages as a runtime value, so an incoming `stage` can be checked.
+ *
+ * The type alone is erased at compile time and checks nothing about a wire value. This
+ * constant is what makes "one of the four" assertable, and it is deliberately NOT ordered
+ * the way {@link AUDIT_LEVEL_ORDER} is: stages are a lifecycle, not a severity scale, so
+ * ranking them would invite a comparison that means nothing.
+ */
+export const AUDIT_STAGES: readonly AuditStage[] = Object.freeze([
+  'RequestReceived',
+  'ResponseStarted',
+  'ResponseComplete',
+  'Panic',
+]);
 
 /**
  * The annotation key carrying the authorizer's verdict.
@@ -361,8 +383,8 @@ export interface UseAuditEventsOptions {
   page?: number;
   /** Initial page size. Values below 1 are clamped to 1. */
   pageSize?: number;
-  /** Initial filter. */
-  filter?: AuditEventFilter;
+  /** Initial filter. Cloned on the way in, so the caller may keep and reuse its object. */
+  filter?: Readonly<AuditEventFilter>;
   /**
    * When `false` no request is issued and the status stays `idle`. This is what
    * makes the not-yet-fetched state reachable and observable -- useful for a
@@ -384,8 +406,15 @@ export interface UseAuditEventsResult {
    *
    * Never reordered, never normalised, and never filtered -- see the invariant
    * on {@link useAuditEvents}. Empty while loading, while idle, and on error.
+   *
+   * READONLY, and frozen at runtime as well as in the type. A mutable page is shared
+   * state between every consumer of one hook instance: the confidentiality guard reads
+   * this list to decide whether a Secret body was disclosed, and a panel that sorted it
+   * in place, or spliced an event out of it, would change the evidence a later assertion
+   * examines. `readonly` catches that at the gate; `Object.freeze` catches the consumer
+   * that casts the type away.
    */
-  events: AuditEvent[];
+  events: readonly AuditEvent[];
   /** The query lifecycle state. */
   status: AuditEventsStatus;
   /** `true` exactly when `status === 'loading'`. */
@@ -415,12 +444,12 @@ export interface UseAuditEventsResult {
   /** Whether a previous page exists, i.e. the page is above 1. */
   hasPreviousPage: boolean;
   /** The filter currently in effect. */
-  filter: AuditEventFilter;
+  filter: Readonly<AuditEventFilter>;
   /**
    * Replaces the filter and resets to page 1, so a new filter can never be
    * combined with a stale page offset.
    */
-  setFilter: (filter: AuditEventFilter) => void;
+  setFilter: (filter: Readonly<AuditEventFilter>) => void;
   /** Jumps to a 1-based page. Values below 1 are clamped to 1. */
   setPage: (page: number) => void;
   /** Advances one page. A no-op when no further page is known to exist. */
@@ -435,7 +464,7 @@ export interface UseAuditEventsResult {
 /** The internal reducer-free state of one query attempt. */
 interface AuditEventsQueryState {
   status: AuditEventsStatus;
-  events: AuditEvent[];
+  events: readonly AuditEvent[];
   error: AuditEventsError | null;
   total?: number;
   hasMore?: boolean;
@@ -443,7 +472,7 @@ interface AuditEventsQueryState {
 
 /** The pagination-bearing shape recovered from a successful response body. */
 interface ParsedAuditEventsPage {
-  events: AuditEvent[];
+  events: readonly AuditEvent[];
   total?: number;
   hasMore?: boolean;
 }
@@ -490,7 +519,7 @@ function appendFilterParam(
 function buildAuditEventsQuery(
   page: number,
   pageSize: number,
-  filter: AuditEventFilter,
+  filter: Readonly<AuditEventFilter>,
 ): string {
   const params = new URLSearchParams();
   params.set(AUDIT_EVENTS_QUERY_PARAMS.page, String(page));
@@ -502,34 +531,263 @@ function buildAuditEventsQuery(
   return params.toString();
 }
 
+/** Names the JSON type of a value without disclosing the value. */
+function describeJsonType(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+  if (Array.isArray(value)) {
+    return 'array';
+  }
+  return typeof value;
+}
+
+/**
+ * Reads a REQUIRED string member, or explains why it could not be read.
+ *
+ * Returns the reason rather than throwing, so the caller can accumulate a single message
+ * naming the offending index and member.
+ */
+function requiredString(
+  event: Record<string, unknown>,
+  key: string,
+): { readonly value: string } | { readonly problem: string } {
+  const raw = event[key];
+  if (typeof raw !== 'string') {
+    return {
+      problem: `"${key}" is ${describeJsonType(raw)}, not a string`,
+    };
+  }
+  if (raw.length === 0) {
+    return { problem: `"${key}" is empty` };
+  }
+  return { value: raw };
+}
+
+/**
+ * Validates an OPTIONAL audited body member: absent, or an OBJECT. Never anything else.
+ *
+ * THIS IS THE MOST IMPORTANT CHECK IN THIS MODULE. `test/utils/audit.go` L151-156 flattens
+ * `responseObject` to the boolean `true` for its Go-side comparison, and that flattening
+ * must never appear on the wire this hook reads. If it does, the presentation-layer
+ * redaction breaks in the one direction that matters: `ConfidentialityRedaction` decides
+ * what to withhold by inspecting an OBJECT, so a `responseObject: true` satisfies every
+ * `!== undefined` presence test while carrying nothing an object-shaped redactor can
+ * recognise -- the guard reports a violation it cannot describe, or, worse, a redactor
+ * that only handles objects passes the raw value through to the DOM.
+ *
+ * A boolean here is therefore a CONTRACT VIOLATION and not a leniency to absorb. The page
+ * is refused, which is the honest outcome: this client cannot tell whether a Secret body
+ * was disclosed, and reporting either answer would be a guess.
+ */
+function optionalPayload(
+  event: Record<string, unknown>,
+  key: string,
+): { readonly ok: true } | { readonly problem: string } {
+  const raw = event[key];
+  if (raw === undefined) {
+    return { ok: true };
+  }
+  if (!isRecord(raw)) {
+    return {
+      problem:
+        `"${key}" is ${describeJsonType(raw)}, but an audited body is an object on the ` +
+        'wire. A boolean here is the Go-side FLATTENED form from test/utils/audit.go ' +
+        'L151-156, which must never reach this tier: the confidentiality guard and its ' +
+        'redaction both key on an object, so a flattened value would be reported as ' +
+        'present while being unrenderable and unredactable',
+    };
+  }
+  return { ok: true };
+}
+
+/** Validates an optional nested object member, e.g. `objectRef` or `responseStatus`. */
+function optionalRecord(
+  event: Record<string, unknown>,
+  key: string,
+): { readonly ok: true } | { readonly problem: string } {
+  const raw = event[key];
+  if (raw === undefined) {
+    return { ok: true };
+  }
+  if (!isRecord(raw)) {
+    return { problem: `"${key}" is ${describeJsonType(raw)}, not an object` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Validates one wire event completely, returning a reason when it is unusable.
+ *
+ * Invariant locked: an event is accepted WHOLE or the page is refused. Nothing is
+ * repaired, defaulted or dropped.
+ *
+ * Every REQUIRED member of {@link AuditEvent} is checked, because each one is read
+ * downstream and an absent one produces `undefined` in a rendered table -- a table that
+ * looks like a report and is not. `level` and `stage` are additionally checked against
+ * their closed domains: `level` is the field F-006-RQ-002 is entirely about, and a level
+ * outside the four would compare unequal to every entry of {@link AUDIT_LEVEL_ORDER},
+ * making an ordering assertion silently unfalsifiable.
+ *
+ * `user` must be an object carrying a string `username`, because the identity of the
+ * principal is what makes an audit event evidence rather than a log line.
+ */
+function describeInvalidEvent(candidate: unknown): string | null {
+  if (!isRecord(candidate)) {
+    return `is ${describeJsonType(candidate)}, not an object`;
+  }
+
+  if (candidate['apiVersion'] !== AUDIT_API_VERSION) {
+    return (
+      `has apiVersion ${JSON.stringify(candidate['apiVersion'])}, but only ` +
+      `${JSON.stringify(AUDIT_API_VERSION)} is registered by the audit scheme`
+    );
+  }
+  if (candidate['kind'] !== AUDIT_EVENT_KIND) {
+    return (
+      `has kind ${JSON.stringify(candidate['kind'])}, but a single audit event is ` +
+      `${JSON.stringify(AUDIT_EVENT_KIND)}. An EventList is registered under the same ` +
+      'group and version, and its items would never be read'
+    );
+  }
+
+  const requiredStringKeys = [
+    'auditID',
+    'requestURI',
+    'verb',
+    'requestReceivedTimestamp',
+    'stageTimestamp',
+  ];
+  for (const key of requiredStringKeys) {
+    const read = requiredString(candidate, key);
+    if ('problem' in read) {
+      return read.problem;
+    }
+  }
+
+  const level = candidate['level'];
+  if (typeof level !== 'string' || !AUDIT_LEVEL_ORDER.includes(level as AuditLevel)) {
+    return (
+      `has level ${JSON.stringify(level)}, which is not one of ` +
+      `${JSON.stringify(AUDIT_LEVEL_ORDER)}. The level is the field F-006-RQ-002 asserts, ` +
+      'and one outside the closed set compares unequal to every entry of the ordering, ' +
+      'making the ordering assertion unfalsifiable rather than failing'
+    );
+  }
+
+  const stage = candidate['stage'];
+  if (typeof stage !== 'string' || !AUDIT_STAGES.includes(stage as AuditStage)) {
+    const known = JSON.stringify(AUDIT_STAGES);
+    return `has stage ${JSON.stringify(stage)}, which is not one of ${known}`;
+  }
+
+  const user = candidate['user'];
+  if (!isRecord(user)) {
+    return `has a "user" of ${describeJsonType(user)}, not an object`;
+  }
+  const username = requiredString(user, 'username');
+  if ('problem' in username) {
+    return `has a "user" whose ${username.problem}`;
+  }
+
+  for (const key of ['objectRef', 'responseStatus', 'impersonatedUser', 'annotations']) {
+    const nested = optionalRecord(candidate, key);
+    if ('problem' in nested) {
+      return nested.problem;
+    }
+  }
+
+  for (const key of [AUDIT_REQUEST_BODY_KEY, AUDIT_RESPONSE_BODY_KEY]) {
+    const payload = optionalPayload(candidate, key);
+    if ('problem' in payload) {
+      return payload.problem;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Validates a whole page of events, returning the first problem found.
+ *
+ * The FIRST problem rather than all of them, deliberately: the page is refused either
+ * way, so enumerating the rest adds length without adding a decision -- and the events
+ * after a malformed one may be malformed in the same way, turning one contract mismatch
+ * into fifty lines of identical text.
+ */
+function describeInvalidPage(items: readonly unknown[]): string | null {
+  for (const [index, candidate] of items.entries()) {
+    const problem = describeInvalidEvent(candidate);
+    if (problem !== null) {
+      return `event at index ${String(index)} ${problem}`;
+    }
+  }
+  return null;
+}
+
 /**
  * Recovers the event page from a parsed response body.
  *
  * Accepts the canonical {@link AuditEventList} envelope and, equivalently, a
- * bare array of events. Returns `null` for anything else, which the caller turns
+ * bare array of events. Returns a `problem` for anything else, which the caller turns
  * into an error state -- a body this hook cannot understand must never be
  * reported as a successful empty page.
  *
- * The events themselves are deliberately **not** validated, filtered or
- * normalised. Dropping an unexpected event would defeat the confidentiality
- * guard, which derives its strength from inspecting every event the server
- * returned rather than only the expected ones.
+ * EVENTS ARE VALIDATED, AND NEVER FILTERED. The distinction is the whole design:
+ *
+ * - VALIDATED, because an unvalidated cast let anything through. `body as AuditEvent[]`
+ *   is a compile-time assertion with no runtime effect, so a page of strings, of nulls,
+ *   or of objects missing every required member became a "successful" page of events. The
+ *   confidentiality guard then ran over values it could not interpret, and a
+ *   `responseObject: true` -- the Go-flattened form -- satisfied every presence test
+ *   while being invisible to object-shaped redaction.
+ * - NEVER FILTERED, because dropping an event would defeat that same guard, which derives
+ *   its strength from inspecting EVERY event the server returned rather than only the
+ *   well-formed ones. A leaked Secret body might be carried by exactly the event a
+ *   filter discarded.
+ *
+ * The two combine into one rule: a page containing an event this client cannot read is a
+ * page it cannot make any claim about, so the whole page is refused.
  */
-function parseAuditEventsPayload(body: unknown): ParsedAuditEventsPage | null {
+function parseAuditEventsPayload(
+  body: unknown,
+): { readonly page: ParsedAuditEventsPage } | { readonly problem: string } {
   if (Array.isArray(body)) {
-    return { events: body as AuditEvent[] };
+    const items = body as readonly unknown[];
+    const problem = describeInvalidPage(items);
+    if (problem !== null) {
+      return { problem };
+    }
+    return { page: { events: items as readonly AuditEvent[] } };
   }
   if (isRecord(body) && Array.isArray(body.items)) {
-    const parsed: ParsedAuditEventsPage = { events: body.items as AuditEvent[] };
-    if (typeof body.total === 'number' && Number.isFinite(body.total)) {
+    const items = body.items as readonly unknown[];
+    const problem = describeInvalidPage(items);
+    if (problem !== null) {
+      return { problem };
+    }
+    const parsed: ParsedAuditEventsPage = { events: items as readonly AuditEvent[] };
+    if (body.total !== undefined) {
+      if (typeof body.total !== 'number' || !Number.isFinite(body.total)) {
+        return {
+          problem: `"total" is ${describeJsonType(body.total)}, not a finite number`,
+        };
+      }
       parsed.total = body.total;
     }
-    if (typeof body.hasMore === 'boolean') {
+    if (body.hasMore !== undefined) {
+      if (typeof body.hasMore !== 'boolean') {
+        return { problem: `"hasMore" is ${describeJsonType(body.hasMore)}, not a boolean` };
+      }
       parsed.hasMore = body.hasMore;
     }
-    return parsed;
+    return { page: parsed };
   }
-  return null;
+  return {
+    problem:
+      `the body is ${describeJsonType(body)}; the contract is an AuditEventList envelope ` +
+      'or a bare array of events',
+  };
 }
 
 /**
@@ -667,7 +925,16 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
   const [pageSize] = useState<number>(() =>
     clampToPositiveInteger(initialPageSize, AUDIT_EVENTS_DEFAULT_PAGE_SIZE),
   );
-  const [filter, setFilterState] = useState<AuditEventFilter>(() => initialFilter ?? {});
+  // CLONED AND FROZEN on the way in. Storing the caller's object by reference made the
+  // hook's state reachable from outside it: a caller holding `{ resource: 'secrets' }`
+  // could later set `filter.resource = 'configmaps'`, and because React saw no state
+  // change there was no re-render -- so `requestUrl` still described the old query while
+  // the returned `filter` described the new one, and the two disagreed silently. Freezing
+  // the clone additionally turns a mutation attempt into a visible failure in strict mode
+  // rather than a no-op.
+  const [filter, setFilterState] = useState<Readonly<AuditEventFilter>>(() =>
+    Object.freeze({ ...initialFilter }),
+  );
   const [refreshToken, setRefreshToken] = useState<number>(0);
   const [state, setState] = useState<AuditEventsQueryState>(() => ({
     status: 'idle',
@@ -740,26 +1007,30 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
         }
 
         const parsed = parseAuditEventsPayload(body);
-        if (parsed === null) {
+        if ('problem' in parsed) {
           setState({
             status: 'error',
             events: [],
             error: {
               httpStatus: response.status,
               message:
-                'audit event response did not contain an items array or an array of events',
+                `audit event response is unusable: ${parsed.problem}. The page is refused ` +
+                'rather than partially reported, because an event this client cannot read ' +
+                'is an event the confidentiality guard cannot clear.',
             },
           });
           return;
         }
 
-        // Straight through: the events are handed on untouched.
+        // Straight through: the events are handed on untouched, only proven readable.
+        // FROZEN, so no consumer can mutate the page a later assertion will read -- see
+        // the invariant on UseAuditEventsResult.events.
         setState({
           status: 'success',
-          events: parsed.events,
+          events: Object.freeze(parsed.page.events.slice()),
           error: null,
-          total: parsed.total,
-          hasMore: parsed.hasMore,
+          total: parsed.page.total,
+          hasMore: parsed.page.hasMore,
         });
       } catch (cause) {
         // A cancelled request is not a failure and must leave the state alone:
@@ -788,8 +1059,11 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
       ? resolveHasNextPage(page, pageSize, state.events.length, state.total, state.hasMore)
       : false;
 
-  const setFilter = useCallback((next: AuditEventFilter) => {
-    setFilterState(next);
+  const setFilter = useCallback((next: Readonly<AuditEventFilter>) => {
+    // Cloned for the same reason as the seed above: the caller keeps its object and may
+    // mutate it, and a hook whose state can change without a render is a hook whose
+    // rendered output can contradict the request it issued.
+    setFilterState(Object.freeze({ ...next }));
     // Resetting the page is not a convenience: a new filter combined with a
     // stale offset would silently show the wrong slice of the wrong result set.
     setPageState(1);
@@ -835,4 +1109,3 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
     refresh,
   };
 }
-

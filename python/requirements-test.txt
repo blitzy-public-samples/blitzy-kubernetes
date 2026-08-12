@@ -30,12 +30,32 @@
 # period, so an inexact pin would let a future release fail the suite during
 # collection rather than during a deliberate upgrade.
 #
+# WHAT IS ACTUALLY INSTALLED - and why this file is not it. These 18 pins are the
+# DIRECT dependencies, and they are what a human edits. They pull in 40 more
+# distributions that are named nowhere here, so pinning only these would leave
+# every transitive version - and, without a digest, the CONTENTS of every artifact
+# at those versions - free to differ between two runs of the same manifest.
+# python/requirements-test.lock closes that: it is generated from this file, pins
+# all 58 distributions and records a SHA-256 for every artifact each one may be
+# satisfied by, and hack/lib/python.sh installs THAT with
+# `pip install --require-hashes`. The two are cross-checked before every install,
+# so a direct pin edited here without regenerating the lock is reported rather
+# than silently ignored.
+#
+# EDIT BOTH IN THE SAME CHANGE. After changing a pin below, regenerate the lock:
+#
+#   uv pip compile python/requirements-test.txt \
+#       --generate-hashes --universal --python-version 3.10 \
+#       -o python/requirements-test.lock
+#
 # CONSUMED BY - the filename is a hard contract, hyphen not underscore, and
 # directly under python/; renaming it breaks the installer:
 #   hack/lib/python.sh              kube::python::install resolves
 #                                   ${KUBE_ROOT}/python/requirements-test.txt,
-#                                   installs it into python/.venv and then
-#                                   runs `pip check`
+#                                   cross-checks it against
+#                                   python/requirements-test.lock, installs the
+#                                   lock into python/.venv under
+#                                   --require-hashes, and then runs `pip check`
 #   hack/verify-python.sh           runs the ruff and mypy pinned below; this
 #                                   file is their single source of truth
 #   hack/make-rules/test-python.sh  `make test-python` runs pytest from the

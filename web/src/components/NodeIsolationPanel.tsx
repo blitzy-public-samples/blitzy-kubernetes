@@ -90,6 +90,9 @@ import {
   type ControlVerdict,
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
+import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
+import { strictestVerdict } from '../domain/evidence';
+import { V7_OBSERVATIONS, V7_OUTCOME_TITLES } from '../domain/observationIds';
 
 /**
  * The control this panel reports on. Typed as {@link ControlId} rather than as a
@@ -145,6 +148,17 @@ type ObservedOutcome =
   | { readonly kind: 'denied-unspecified'; readonly httpStatus?: number; readonly raw: string }
   /** Something was reported, but it does not describe an outcome. */
   | { readonly kind: 'unreadable'; readonly raw: string }
+  /**
+   * The check was reported MORE THAN ONCE, so which outcome is authoritative cannot be
+   * determined.
+   *
+   * A member of its own rather than a fold into `unreadable`, because the two have
+   * different remedies: an unreadable value needs the value corrected, a duplicated
+   * label needs the report corrected. Resolving a duplicate by list order -- which is
+   * what this panel used to do -- makes a node-isolation verdict a function of
+   * serialisation order.
+   */
+  | { readonly kind: 'inconsistent'; readonly count: number }
   /** Nothing at all was reported for this check. */
   | { readonly kind: 'not-reported' };
 
@@ -157,23 +171,10 @@ type ObservedOutcome =
  *   requirement. A 404 on a denial check lands here, and so does a refusal
  *   whose status code is unknown: neither can be distinguished from a masked
  *   Forbidden.
- * - `not-reported` — nothing was observed. Absence of evidence is deliberately
- *   NOT treated as contradicting evidence; see {@link resolveEffectiveVerdict}.
+ * - `not-reported` — nothing was observed. It is not treated as CONTRADICTING evidence,
+ *   but it does prevent a pass: see {@link resolveEffectiveVerdict}.
  */
 type CheckStatus = 'satisfied' | 'violated' | 'indeterminate' | 'not-reported';
-
-/**
- * A read-only list guaranteed by the type system to hold at least one member.
- *
- * Used for the token rules below, where emptiness is not merely unlikely but
- * actively wrong: `[].every(...)` is `true`, so a check with no token groups
- * would match EVERY label, and `[].some(...)` is `false`, so a group with no
- * tokens would make its check match NOTHING. Both are silent misbehaviours.
- * Encoding non-emptiness here turns the guard that would otherwise be needed at
- * run time — and would be unreachable, untestable code — into a compile-time
- * error at the point where a new check is declared.
- */
-type NonEmptyList<T> = readonly [T, ...T[]];
 
 /**
  * One of the four outcomes the oracle asserts, as a declarative row definition.
@@ -199,22 +200,31 @@ interface NodeIsolationCheck {
   /** Why the oracle requires this outcome, rendered beneath the table. */
   readonly note: string;
   /**
-   * Observation labels that name this check outright. Compared after
-   * normalisation, so punctuation, spacing and case are irrelevant.
+   * The EXACT `ControlObservation.label` carrying this check's outcome, taken from
+   * {@link V7_OBSERVATIONS} so the fixture that records it and this panel cannot name it
+   * differently.
+   *
+   * WHY THE TOKEN MATCHER IS GONE, stated as the defect it caused. This row used to be
+   * matched by folding the label to alphanumerics and then testing token groups with
+   * `includes`, with the cross-node row keyed on the token `node2` and the Secret row on
+   * `secret`. The recorded passing payload also carries
+   * `precondition: node2 existed before the cross-node call` with the value `true` —
+   * which contains `node2`. Whether that observation or the real 403 claimed the
+   * cross-node row depended purely on which came first in the list, and if the
+   * precondition won, its `true` read as ALLOWED and a recorded PASS rendered as a
+   * FAIL. Matching is now `===` against this identity and the exact aliases below.
+   */
+  readonly observationLabel: string;
+  /**
+   * Additional labels that name this check, compared EXACTLY -- never folded, never as a
+   * substring.
+   *
+   * Present because a server may report a row under the scenario title rather than under
+   * the measurement identity, and both are legitimate names for the same fact. Two
+   * observations matching one row by ANY of its names is a conflict, not a preference
+   * order, so an alias cannot quietly override the primary identity.
    */
   readonly aliases: readonly string[];
-  /**
-   * Fallback matcher. Every group must contribute at least one token to the
-   * normalised label, which is a readable way of writing "an AND of ORs"
-   * without a regular expression nobody can maintain. Both levels are
-   * {@link NonEmptyList}, so neither degenerate case is expressible.
-   */
-  readonly tokenGroups: NonEmptyList<NonEmptyList<string>>;
-  /**
-   * Tokens that disqualify a label outright, so the two own-node rows can never
-   * absorb an observation that is plainly about node2 or about the Secret.
-   */
-  readonly excludedTokens: readonly string[];
 }
 
 /**
@@ -236,15 +246,8 @@ export const NODE_ISOLATION_CHECKS: readonly NodeIsolationCheck[] = [
       'NodeRestriction confines create, update and patch of a Node object to the node’s own ' +
       'object, so a cross-node status update must be refused. A 404 NotFound here would mean ' +
       'only that node2 was absent, which is why it cannot stand in for the 403.',
-    aliases: [
-      'cross-node-status-update',
-      'cross-node mutation',
-      'cross-node denial',
-      'node1 updates node2 status',
-      'nodes/status node2',
-    ],
-    tokenGroups: [['node2', 'crossnode']],
-    excludedTokens: [],
+    observationLabel: V7_OBSERVATIONS.crossNodeStatusUpdate,
+    aliases: [V7_OUTCOME_TITLES.crossNodeDenied],
   },
   {
     id: 'unrelated-secret-read',
@@ -256,14 +259,8 @@ export const NODE_ISOLATION_CHECKS: readonly NodeIsolationCheck[] = [
     note:
       'The Node authorizer returns no opinion for a Secret that none of node1’s pods reference, ' +
       'and no role grants that read to system:nodes, so the read must be refused.',
-    aliases: [
-      'unrelated-secret-read',
-      'unrelatedsecret',
-      'ns/unrelatedsecret',
-      'unrelated secret read',
-    ],
-    tokenGroups: [['secret']],
-    excludedTokens: [],
+    observationLabel: V7_OBSERVATIONS.unrelatedSecretRead,
+    aliases: [V7_OUTCOME_TITLES.unrelatedSecretDenied],
   },
   {
     id: 'own-node-read',
@@ -275,12 +272,8 @@ export const NODE_ISOLATION_CHECKS: readonly NodeIsolationCheck[] = [
     note:
       'Positive control. Without it the two denials above would still be reported as a healthy ' +
       'control even if every request were being refused and the authorization stack were broken.',
-    aliases: ['own-node-read', 'own node read', 'node1 reads node1'],
-    tokenGroups: [
-      ['node1', 'ownnode', 'own'],
-      ['get', 'read'],
-    ],
-    excludedTokens: ['node2', 'secret', 'crossnode'],
+    observationLabel: V7_OBSERVATIONS.ownNodeRead,
+    aliases: [V7_OUTCOME_TITLES.ownNodeReadAllowed],
   },
   {
     id: 'own-node-status-update',
@@ -292,17 +285,8 @@ export const NODE_ISOLATION_CHECKS: readonly NodeIsolationCheck[] = [
     note:
       'Positive control. NodeRestriction permits a node to act on its own Node object, so this ' +
       'must remain allowed; a denial here would mean the restriction is over-broad.',
-    aliases: [
-      'own-node-status-update',
-      'own node status update',
-      'node1 updates node1 status',
-      'nodes/status node1',
-    ],
-    tokenGroups: [
-      ['node1', 'ownnode', 'own'],
-      ['update', 'status', 'patch'],
-    ],
-    excludedTokens: ['node2', 'secret', 'crossnode'],
+    observationLabel: V7_OBSERVATIONS.ownNodeStatusUpdate,
+    aliases: [V7_OUTCOME_TITLES.ownNodeStatusUpdateAllowed],
   },
 ];
 
@@ -327,80 +311,44 @@ function normalizeLabel(label: string): string {
 }
 
 /**
- * Matches an already-normalised observation label against one check.
+ * Every name one row answers to: its measurement identity, its stable identifier and its
+ * exact aliases.
  *
- * Two layers, in order of confidence: an exact fold-equal match against the
- * check's identifier, title or declared aliases, and failing that the token
- * rules. The exact layer is tried for EVERY check before any token rule runs
- * (see {@link matchObservationsToChecks}), so a precisely named observation can
- * never be stolen by another row's looser rule.
+ * The identifier is included because it was already an EXACT match channel before this
+ * module stopped folding labels, so keeping it removes nothing a caller could rely on. It
+ * is safe to include precisely because comparison is `===`: the four identifiers are
+ * distinct strings, so no observation can name two rows.
+ *
+ * @param check - the row.
+ * @returns the names, compared with `===` at every call site.
  */
-function matchesCheckExactly(check: NodeIsolationCheck, normalizedLabel: string): boolean {
-  if (normalizedLabel === normalizeLabel(check.id) || normalizedLabel === normalizeLabel(check.title)) {
-    return true;
-  }
-  return check.aliases.some((alias) => normalizeLabel(alias) === normalizedLabel);
+function namesFor(check: NodeIsolationCheck): readonly string[] {
+  return [check.observationLabel, check.id, ...check.aliases];
 }
 
 /**
- * Matches an already-normalised observation label against a check's token rules.
+ * Finds the observations that name one row.
  *
- * No emptiness guard is needed on `tokenGroups`: {@link NonEmptyList} makes both
- * degenerate shapes unrepresentable, so the only run-time behaviour left here is
- * the behaviour under test.
- */
-function matchesCheckByTokens(check: NodeIsolationCheck, normalizedLabel: string): boolean {
-  if (check.excludedTokens.some((token) => normalizedLabel.includes(token))) {
-    return false;
-  }
-  return check.tokenGroups.every((group) => group.some((token) => normalizedLabel.includes(token)));
-}
-
-/**
- * Assigns the reported observations to the four rows.
+ * Invariants locked here, and each replaces a way the previous matcher invented evidence:
  *
- * Invariants locked here:
- *
- *   1. Exact matches win globally. The exact pass runs to completion before the
- *      token pass begins.
- *   2. One observation per row, first occurrence wins — the same rule
- *      `selectControlStatus` applies to a duplicated control, so the two behave
- *      consistently.
- *   3. Nothing is invented. A row with no matching observation is simply left
- *      out of the map and renders as `not-reported`.
+ *   1. EXACT comparison. Nothing is folded to alphanumerics and nothing is tested with
+ *      `includes`, so an unrelated observation cannot claim a row by sharing a token with
+ *      it. The `precondition: node2 ...` versus `denial: ... on node2` collision is the
+ *      cautionary case and it is now impossible.
+ *   2. ALL matches are returned, not the first. Multiplicity is the caller's decision to
+ *      make, and it makes it by rejecting rather than by picking.
+ *   3. Nothing is invented. A row nothing names resolves to `not-reported`.
  *
  * @param observations - `evidence.observations` as reported, or an empty list.
- * @returns a map from check identifier to the observation backing it.
+ * @param check - the row.
+ * @returns every observation naming the row, in reported order.
  */
-function matchObservationsToChecks(
+function observationsForCheck(
   observations: readonly ControlObservation[],
-): ReadonlyMap<NodeIsolationCheckId, ControlObservation> {
-  const assigned = new Map<NodeIsolationCheckId, ControlObservation>();
-  const unclaimed: ControlObservation[] = [];
-
-  for (const observation of observations) {
-    const normalized = normalizeLabel(observation.label);
-    const exact = NODE_ISOLATION_CHECKS.find((check) => matchesCheckExactly(check, normalized));
-    if (exact !== undefined && !assigned.has(exact.id)) {
-      assigned.set(exact.id, observation);
-      continue;
-    }
-    if (exact === undefined) {
-      unclaimed.push(observation);
-    }
-  }
-
-  for (const observation of unclaimed) {
-    const normalized = normalizeLabel(observation.label);
-    const byToken = NODE_ISOLATION_CHECKS.find(
-      (check) => !assigned.has(check.id) && matchesCheckByTokens(check, normalized),
-    );
-    if (byToken !== undefined) {
-      assigned.set(byToken.id, observation);
-    }
-  }
-
-  return assigned;
+  check: NodeIsolationCheck,
+): readonly ControlObservation[] {
+  const names = namesFor(check);
+  return observations.filter((observation) => names.includes(observation.label));
 }
 
 /**
@@ -515,32 +463,41 @@ function classifyObservedValue(value: string | number | boolean | null): Observe
  * Compares what the oracle requires with what was observed.
  *
  * THE DECISIVE RULE, stated once and implemented once: for a check the oracle
- * requires to be DENIED, only `forbidden` is `satisfied`. A `not-found` is
- * `indeterminate`, and so is a refusal whose code was not reported, because
- * neither can be told apart from a Forbidden that never happened. That is the
- * presentation-layer counterpart of the oracle's ORDER MATTERS comment.
+ * requires to be DENIED, only `forbidden` is `satisfied`.
+ *
+ * A 404 IS A VIOLATION, NOT AN INDETERMINATE. This is the correction the finding named,
+ * and the oracle settles it: `expectForbidden` (`node_test.go` L698-L703) asserts
+ * `apierrors.IsForbidden(err)` and reports anything else -- a NotFound included -- with
+ * `t.Errorf`. In Go a 404 here FAILS the test. Recording it as `indeterminate` softened a
+ * Go failure into "cannot tell", which understates it: the recorded
+ * `V7_NODE_RESTRICTION_NOT_FOUND` payload carries verdict `fail` for exactly this reason,
+ * and a panel that floored only at `unknown` would have downgraded a server-reported
+ * failure whenever the server was less certain than the evidence.
+ *
+ * A refusal whose status code was NOT reported stays `indeterminate`, and the difference
+ * is real: a 404 is a known wrong answer, while an unspecified refusal is an unknown one.
  *
  * For a check the oracle requires to be ALLOWED, only `allowed` is `satisfied`
- * and every refusal is `violated`, mirroring `expectAllowed`, which accepts
- * nothing but `err == nil`. A refusal on a positive control is a real finding —
- * it means the restriction is over-broad, or the whole stack is failing closed —
- * so it is reported as a violation rather than softened into an unknown.
+ * and every refusal is `violated`, mirroring `expectAllowed` (L1712-L1716), which accepts
+ * nothing but `err == nil` and also reports with `t.Errorf`. A refusal on a positive
+ * control is a real finding — it means the restriction is over-broad, or the whole stack
+ * is failing closed — so it is reported as a violation rather than softened.
  */
 function resolveCheckStatus(expectation: CheckExpectation, outcome: ObservedOutcome): CheckStatus {
   if (outcome.kind === 'not-reported') {
     return 'not-reported';
   }
-  if (outcome.kind === 'unreadable') {
+  if (outcome.kind === 'unreadable' || outcome.kind === 'inconsistent') {
     return 'indeterminate';
   }
   if (expectation === 'denied') {
     if (outcome.kind === 'forbidden') {
       return 'satisfied';
     }
-    if (outcome.kind === 'allowed') {
+    if (outcome.kind === 'allowed' || outcome.kind === 'not-found') {
       return 'violated';
     }
-    // 'not-found' and 'denied-unspecified' both land here.
+    // Only 'denied-unspecified' lands here: refused, but not shown to be a 403.
     return 'indeterminate';
   }
   return outcome.kind === 'allowed' ? 'satisfied' : 'violated';
@@ -554,11 +511,24 @@ interface ResolvedCheck {
   readonly status: CheckStatus;
 }
 
-/** Resolves all four rows against the evidence the server reported. */
+/**
+ * Resolves all four rows against the evidence the server reported.
+ *
+ * All four rows are always produced, in the oracle's own order, so a row the server
+ * omitted renders as `not-reported` rather than disappearing. Multiplicity is rejected
+ * here rather than resolved: two observations naming one row yield `inconsistent`.
+ *
+ * @param observations - `evidence.observations` as reported, or an empty list.
+ * @returns one resolved row per check.
+ */
 function resolveChecks(observations: readonly ControlObservation[]): readonly ResolvedCheck[] {
-  const assigned = matchObservationsToChecks(observations);
   return NODE_ISOLATION_CHECKS.map((check) => {
-    const observation = assigned.get(check.id);
+    const matches = observationsForCheck(observations, check);
+    if (matches.length > 1) {
+      const outcome: ObservedOutcome = { kind: 'inconsistent', count: matches.length };
+      return { check, outcome, status: resolveCheckStatus(check.expectation, outcome) };
+    }
+    const [observation] = matches;
     const outcome: ObservedOutcome =
       observation === undefined
         ? { kind: 'not-reported' }
@@ -594,21 +564,30 @@ function leastFavourable(left: ControlVerdict, right: ControlVerdict): ControlVe
  * this function is incapable of manufacturing a pass. That is what makes it safe
  * to run over data this client does not control.
  *
- *   - any `violated` row floors the verdict at `fail`;
- *   - any `indeterminate` row floors it at `unknown`, which is how an observed
- *     404 stops a reported pass from ever reaching the screen;
+ *   - any `violated` row floors the verdict at `fail`, which is how an observed 404 or an
+ *     allowed cross-node write stops a reported pass from ever reaching the screen;
+ *   - any `indeterminate` row floors it at `unknown`;
+ *   - any `not-reported` row floors it at `unknown` — see below;
  *   - a non-empty `findings` list floors it at `fail`, since a finding is by
  *     definition a reported violation;
  *   - a non-empty `warnings` list floors it at `warn`, which is the hook
  *     module's own documented reading of a permitted-but-objected-to operation.
  *
- * A `not-reported` row raises NO floor, and that asymmetry is deliberate. It is
- * the difference between "the server showed its working and the working is
- * unsound" and "the server did not show its working". Only the former is
- * grounds for overriding the server's own verdict; treating the latter as
- * contradiction would mean a payload carrying a plain verdict and no evidence
- * could never render as anything but unknown, which is not a boundary the
- * oracle draws.
+ * A `not-reported` ROW NOW FLOORS THE VERDICT AT `unknown`, and the previous asymmetry was
+ * the defect. The old reasoning was that absence of evidence is not contradicting
+ * evidence, which is true — and beside the point. The question is not whether silence
+ * contradicts the server's claim; it is whether silence SUPPORTS it. A payload that
+ * asserted `pass` while measuring none of the four checks rendered a clean bill of health
+ * for a control nobody had evaluated, which is the single most dangerous output this panel
+ * can produce.
+ *
+ * AAP §0.7.2 settles it: assertion density is part of the contract, and V7 keeps ALL FOUR
+ * of its assertions — two denials and two positive controls. A report that made fewer than
+ * four has not made them, so `unknown` is the honest answer. Note the floor is `unknown`
+ * and NOT `fail`: the panel does not know the control is broken, it knows it cannot tell,
+ * and inventing a defect would be as untruthful as inventing a pass.
+ *
+ * The function remains MONOTONE AND DOWNWARD ONLY, so it still cannot manufacture a pass.
  */
 function resolveEffectiveVerdict(
   reported: ControlVerdict,
@@ -623,6 +602,9 @@ function resolveEffectiveVerdict(
   if (checks.some((resolved) => resolved.status === 'indeterminate')) {
     verdict = leastFavourable(verdict, 'unknown');
   }
+  if (checks.some((resolved) => resolved.status === 'not-reported')) {
+    verdict = leastFavourable(verdict, 'unknown');
+  }
   if (findings.length > 0) {
     verdict = leastFavourable(verdict, 'fail');
   }
@@ -630,6 +612,33 @@ function resolveEffectiveVerdict(
     verdict = leastFavourable(verdict, 'warn');
   }
   return verdict;
+}
+
+/**
+ * The panel's own conservative verdict for V7, as one call over one payload.
+ *
+ * Exported for the same reason V1's is: the aggregate dashboard must count, filter and
+ * summarise the verdict this panel RENDERS rather than the raw `status.verdict` the server
+ * sent, so a badge and the count beside it cannot disagree.
+ *
+ * `strictestVerdict` combines the single derived verdict through the one shared
+ * combination function, so every control's resolver agrees on what "strongest claim"
+ * means rather than each implementing its own ordering.
+ *
+ * @param control - the payload for V7, or `undefined` when it was not reported. An absent
+ *   payload yields `unknown`, never a pass.
+ * @returns the verdict this panel renders.
+ */
+export function resolveNodeIsolationEffectiveVerdict(
+  control: ControlStatus | undefined,
+): ControlVerdict {
+  if (control === undefined) {
+    return 'unknown';
+  }
+  const checks = resolveChecks(control.evidence?.observations ?? []);
+  return strictestVerdict([
+    resolveEffectiveVerdict(control.verdict, checks, control.findings, control.warnings),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -681,12 +690,21 @@ const CHECK_STATUS_LABELS: Readonly<Record<CheckStatus, string>> = {
 const NOT_FOUND_EXPLANATION =
   'A 404 Not Found cannot establish that the restriction was enforced: the object may simply ' +
   'have been absent, and an absent object masks the 403 Forbidden this requirement depends on. ' +
-  'Such an outcome is reported as indeterminate and never as a satisfied check.';
+  'It is recorded as a VIOLATED check, because the oracle’s expectForbidden asserts the error ' +
+  'is Forbidden and reports anything else — a NotFound included — as a failure. The check has ' +
+  'to be repeated with the target object present, which is why the oracle creates node2 first.';
 
 /** The reading rules this panel applies, rendered so they are auditable on screen. */
 const INTERPRETATION_NOTES: readonly string[] = [
-  'Only a 403 Forbidden establishes an enforced denial. A 404 Not Found, and any refusal whose ' +
-    'status code was not reported, are recorded as indeterminate.',
+  'Only a 403 Forbidden establishes an enforced denial. A 404 Not Found is recorded as a ' +
+    'violation, because an absent object masks the decision entirely; a refusal whose status ' +
+    'code was not reported is recorded as indeterminate, because it may or may not have been a ' +
+    '403.',
+  'Every one of the four checks must be reported. A check nobody measured is recorded as not ' +
+    'reported and holds the verdict at Unknown, however confident the server’s own verdict was: ' +
+    'a report that made none of the four assertions has not made them.',
+  'A check reported more than once is recorded as indeterminate rather than resolved by list ' +
+    'order, so a verdict never depends on which duplicate happened to be serialised first.',
   'The two allowed rows are positive controls. They establish that the denials are targeted node ' +
     'scoping rather than a stack that refuses every request.',
   'An HTTP 403 returned by the posture endpoint itself is a failure to read posture, not an ' +
@@ -742,6 +760,11 @@ function describeOutcome(outcome: ObservedOutcome): string {
         : `Denied with HTTP ${outcome.httpStatus}`;
     case 'unreadable':
       return `Unrecognised outcome (${outcome.raw})`;
+    case 'inconsistent':
+      return (
+        `Reported ${String(outcome.count)} times — which outcome is authoritative cannot ` +
+        'be determined, so none is treated as one'
+      );
     case 'not-reported':
       // Deliberately worded differently from CHECK_STATUS_LABELS['not-reported'].
       // The two columns state the same fact from different angles — what was
@@ -848,13 +871,21 @@ export interface NodeIsolationPanelProps {
    */
   readonly status?: ControlStatus;
   /**
-   * Handler for the refresh control. When omitted, the panel uses the `refresh`
-   * handle of whichever result is driving it. In the externally controlled case
-   * — a bare `status` and no handler — the button is still rendered and still
-   * keyboard operable, but there is genuinely nothing for it to re-request, so it
-   * carries no handler; supply this prop to opt in to the interaction.
+   * Handler for the refresh control, REPLACING the `refresh` handle of whichever
+   * result is driving the panel rather than running alongside it, so one press is
+   * one request. In the externally controlled case — a bare `status` and no handler
+   * — there is genuinely nothing to re-request, so the button is rendered but
+   * DISABLED with a title saying why; supply this prop to opt in to the interaction.
    */
   readonly onRefresh?: () => void;
+  /**
+   * Whether refreshing can re-request anything at all.
+   *
+   * `false` disables this panel's refresh affordance and explains why, which is how an
+   * aggregate surface that was handed its posture directly keeps every control's button
+   * consistent with its own. Defaults to `true`, so a panel used on its own is unaffected.
+   */
+  readonly canRefresh?: boolean;
 }
 
 /** Renders the loading affordance. */
@@ -1137,7 +1168,13 @@ function NodeIsolationPanelView({ state, onRefresh }: NodeIsolationPanelViewProp
           rgb(16,16,16) ring from `outline-style: auto` — because nothing here
           overrides :focus-visible.
         */}
-        <button className="node-isolation-panel__refresh" type="button" onClick={onRefresh}>
+        <button
+          className="node-isolation-panel__refresh"
+          type="button"
+          onClick={onRefresh}
+          disabled={onRefresh === undefined}
+          title={onRefresh === undefined ? REFRESH_UNAVAILABLE_TITLE : undefined}
+        >
           Refresh V7 posture
         </button>
       </header>
@@ -1155,9 +1192,20 @@ function NodeIsolationPanelView({ state, onRefresh }: NodeIsolationPanelViewProp
  * source optional, and it keeps the promise that a pre-resolved caller issues no
  * request at all.
  */
-function NodeIsolationPanelConnected({ onRefresh }: { readonly onRefresh?: () => void }): ReactElement {
+function NodeIsolationPanelConnected({
+  onRefresh,
+  canRefresh = true,
+}: {
+  readonly onRefresh?: () => void;
+  readonly canRefresh?: boolean;
+}): ReactElement {
   const result = useControlStatus(V7_CONTROL_ID);
-  return <NodeIsolationPanelView state={result} onRefresh={onRefresh ?? result.refresh} />;
+  return (
+    <NodeIsolationPanelView
+      state={result}
+      onRefresh={resolveRefreshHandler(onRefresh, result.refresh, canRefresh)}
+    />
+  );
 }
 
 /**
@@ -1185,17 +1233,25 @@ export default function NodeIsolationPanel({
   result,
   status,
   onRefresh,
+  canRefresh = true,
 }: NodeIsolationPanelProps = {}): ReactElement {
   if (result !== undefined) {
-    return <NodeIsolationPanelView state={result} onRefresh={onRefresh ?? result.refresh} />;
-  }
-  if (status !== undefined) {
     return (
       <NodeIsolationPanelView
-        state={{ status: 'success', controls: [status], isEmpty: false }}
-        onRefresh={onRefresh}
+        state={result}
+        onRefresh={resolveRefreshHandler(onRefresh, result.refresh, canRefresh)}
       />
     );
   }
-  return <NodeIsolationPanelConnected onRefresh={onRefresh} />;
+  if (status !== undefined) {
+    // A payload handed over directly owns no request, so ONLY an explicit handler can
+    // refresh it; without one the affordance is disabled and explained.
+    return (
+      <NodeIsolationPanelView
+        state={{ status: 'success', controls: [status], isEmpty: false }}
+        onRefresh={resolveRefreshHandler(onRefresh, undefined, canRefresh)}
+      />
+    );
+  }
+  return <NodeIsolationPanelConnected onRefresh={onRefresh} canRefresh={canRefresh} />;
 }

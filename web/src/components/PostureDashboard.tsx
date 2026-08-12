@@ -74,6 +74,7 @@ import {
   type ControlVerdict,
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
+import type { EffectiveVerdict } from '../domain/evidence';
 import AuditFidelityPanel from './AuditFidelityPanel';
 import EncryptionAtRestPanel from './EncryptionAtRestPanel';
 import EtcdTransportPanel from './EtcdTransportPanel';
@@ -82,6 +83,8 @@ import PodSecurityPanel from './PodSecurityPanel';
 import RbacWildcardPanel from './RbacWildcardPanel';
 import TokenHygienePanel from './TokenHygienePanel';
 import WebhookPosturePanel from './WebhookPosturePanel';
+import { resolveEffectiveControlVerdict } from './controlVerdicts';
+import { REFRESH_UNAVAILABLE_TITLE as SHARED_REFRESH_UNAVAILABLE_TITLE } from './refreshContract';
 
 /** Block name shared by every class name in this module. */
 const BLOCK = 'posture-dashboard';
@@ -129,11 +132,14 @@ export const REFRESH_ALL_LABEL = 'Refresh all eight controls';
  * Explains a disabled refresh control.
  *
  * The button is disabled exactly when no refresh handler reached this component,
- * which is a caller-driven configuration rather than a transient state. Saying
- * so is the pattern `RbacWildcardPanel` already uses for the same situation.
+ * which is a caller-driven configuration rather than a transient state.
+ *
+ * Re-exported from `./refreshContract` rather than worded again here, and that is
+ * the whole point: this dashboard disables its own button and every child panel's
+ * button from the same fact, so the two must not offer a reader two different
+ * explanations of the same situation.
  */
-export const REFRESH_UNAVAILABLE_TITLE =
-  'No refresh handler is wired to this dashboard, so there is nothing to re-request.';
+export const REFRESH_UNAVAILABLE_TITLE = SHARED_REFRESH_UNAVAILABLE_TITLE;
 
 /** Accessible name of the verdict filter. */
 export const VERDICT_FILTER_LABEL = 'Filter controls by verdict';
@@ -287,20 +293,40 @@ export interface PostureAggregate {
 const NO_CONTROLS: readonly ControlStatus[] = Object.freeze([]);
 
 /**
- * The verdict a control holds, including the case where it has no payload.
+ * Every control's EFFECTIVE verdict — the one its own panel renders — resolved once.
  *
- * Invariant locked: an absent control is `unknown`, NEVER `pass`. The Go oracle
- * pairs every negative assertion with a positive control for exactly this
- * reason — a check that cannot tell "no evidence" from "good evidence" also
- * passes when the whole authorization stack is broken — and this function is
- * where that distinction is preserved at the presentation layer.
+ * Invariant locked, and the reason this function replaced a one-line read of
+ * `status.verdict`: the number in this dashboard's tally is produced by the SAME
+ * function call as the badge in the panel beneath it. Each panel reconciles what the
+ * check reported against what it measured and downgrades a reported `pass` that the
+ * evidence does not support — to `unknown` when the evidence is missing, to `fail`
+ * when it contradicts the claim or a finding is attached. Counting the raw reported
+ * verdict here meant the aggregate could read "Pass: 8" above a panel rendering a
+ * failure, which is the worst possible place for the two to disagree because the
+ * aggregate is the number a reader trusts at a glance.
  *
- * @param status - the payload for one control, or `undefined` when the response
- *   did not describe it.
- * @returns the reported verdict, or `unknown` when there is nothing to report.
+ * Invariant locked: an absent control is `unknown`, NEVER `pass`. The Go oracle pairs
+ * every negative assertion with a positive control for exactly this reason — a check
+ * that cannot tell "no evidence" from "good evidence" also passes when the whole
+ * authorization stack is broken.
+ *
+ * Resolved into a map ONCE per render because three consumers need the same answers —
+ * the tally, the verdict filter and each control section's `data-verdict` — and
+ * resolving separately for each would let a future edit change one and not the others.
+ *
+ * @param statuses - the payloads available, keyed by control; may be partial.
+ * @returns one verdict per control in the roster, exhaustive over `ControlId`.
  */
-export function resolveControlVerdict(status: ControlStatus | undefined): ControlVerdict {
-  return status === undefined ? 'unknown' : status.verdict;
+export function resolveEffectiveVerdicts(
+  statuses: PostureStatusMap,
+): Readonly<Record<ControlId, EffectiveVerdict>> {
+  const resolved: Partial<Record<ControlId, EffectiveVerdict>> = {};
+  for (const controlId of CONTROL_IDS) {
+    resolved[controlId] = resolveEffectiveControlVerdict(controlId, statuses[controlId]);
+  }
+  // Every key was just written in the loop above, which iterates the whole roster, so
+  // the partial is total. The assertion is confined to this one line.
+  return Object.freeze(resolved as Record<ControlId, EffectiveVerdict>);
 }
 
 /**
@@ -352,29 +378,31 @@ function verdictFromCounts(counts: Readonly<Record<ControlVerdict, number>>): Co
 }
 
 /**
- * Reduces a set of control payloads to one aggregate outcome.
+ * Tallies already-resolved per-control verdicts into one aggregate outcome.
  *
  * The population judged is always the whole roster — `CONTROL_IDS`, iterated
  * rather than re-listed — so a control missing from the payload is judged as
  * `unknown` instead of being excluded from the denominator. That is what makes
  * "seven passes and one silence" resolve to `unknown` rather than to `pass`.
  *
- * Exported so that the rule can be exercised directly, independently of any
- * rendering, and so that every arm of {@link verdictFromCounts} is reachable.
- *
- * @param statuses - the payloads available, keyed by control; may be partial.
- * @returns the aggregate verdict together with the tally behind it.
+ * Takes the resolved verdicts rather than resolving them, so the render path can
+ * resolve once and share the answers with the filter and with each control's
+ * `data-verdict`. `reported` still comes from `statuses`, because "how many controls
+ * the payload described" is a fact about the payload and not about its verdicts: a
+ * control reported with an unsupported `pass` is REPORTED and counted `unknown`.
  */
-export function summarisePosture(statuses: PostureStatusMap): PostureAggregate {
+function summariseResolved(
+  statuses: PostureStatusMap,
+  effective: Readonly<Record<ControlId, EffectiveVerdict>>,
+): PostureAggregate {
   const counts = emptyVerdictCounts();
   let reported = 0;
 
   for (const controlId of CONTROL_IDS) {
-    const status = statuses[controlId];
-    if (status !== undefined) {
+    if (statuses[controlId] !== undefined) {
       reported += 1;
     }
-    counts[resolveControlVerdict(status)] += 1;
+    counts[effective[controlId]] += 1;
   }
 
   return Object.freeze({
@@ -383,6 +411,21 @@ export function summarisePosture(statuses: PostureStatusMap): PostureAggregate {
     reported,
     total: CONTROL_IDS.length,
   });
+}
+
+/**
+ * Reduces a set of control payloads to one aggregate outcome.
+ *
+ * Exported so that the rule can be exercised directly, independently of any
+ * rendering, and so that every arm of {@link verdictFromCounts} is reachable. Every
+ * verdict counted is the EFFECTIVE one from {@link resolveEffectiveVerdicts}, so this
+ * function and the panels can never disagree.
+ *
+ * @param statuses - the payloads available, keyed by control; may be partial.
+ * @returns the aggregate verdict together with the tally behind it.
+ */
+export function summarisePosture(statuses: PostureStatusMap): PostureAggregate {
+  return summariseResolved(statuses, resolveEffectiveVerdicts(statuses));
 }
 
 /**
@@ -460,15 +503,20 @@ function resolveFromResult(result: UseControlStatusResult): PostureResolution {
 }
 
 /**
- * The refresh handler used when a caller drove the data but wired no handler.
+ * Occupies the `refresh` member of the state handed to the child panels when a
+ * caller drove the data but wired no handler.
  *
- * Deliberately a no-op with no body, and not a stub: the child panels' `refresh`
- * member is required by `UseControlStatusResult`, so some function must be
- * supplied, and the honest function for "this dashboard has nothing to
- * re-request" is one that does nothing. It is reachable only from a caller that
- * supplied posture directly and passed no `onRefresh`; this dashboard's own
- * refresh button is disabled in that configuration rather than silently doing
- * nothing when pressed. Named, so it is identifiable in a stack trace.
+ * Deliberately a no-op with no body, and not a stub: `UseControlStatusResult`
+ * requires the member, so some function must be supplied, and the honest function
+ * for "this dashboard has nothing to re-request" is one that does nothing.
+ *
+ * It is also never CALLED. In exactly the configuration that selects it — posture
+ * supplied directly, no `onRefresh` — every child is rendered with
+ * `canRefresh={false}`, so each child's refresh affordance resolves to no handler
+ * at all and is disabled with an explanation, matching this dashboard's own button
+ * instead of contradicting it. Leaving the children enabled here was a real defect:
+ * the top button correctly said it could not refresh while eight buttons beneath it
+ * looked operable and did nothing. Named, so it is identifiable in a stack trace.
  */
 function noRefresh(): void {
   /* No request exists to re-issue. See the note above. */
@@ -654,33 +702,68 @@ function VerdictCounts({
  *     state, so they cannot disagree; when a control is absent, `status` is
  *     `undefined` and every panel falls through to `result` and renders its own
  *     absent-control affordance.
- *   * `AuditFidelityPanel` accepts neither `status` nor `onRefresh` — it reads
- *     its control out of `result.controls` itself and drives its refresh button
- *     from `result.refresh` — so it receives `result` alone. Its `expectations`
- *     and `events` props are deliberately not supplied: `expectations` then
- *     defaults to the panel's own measured rows, and an omitted `events` tells it
- *     to leave that section out entirely rather than to render it empty.
+ *   * `AuditFidelityPanel` accepts no `status` — it reads its control out of
+ *     `result.controls` itself — so it receives `result` plus the refresh props.
+ *     Its `expectations` and `events` props are deliberately not supplied:
+ *     `expectations` then defaults to the panel's own measured rows, and an omitted
+ *     `events` tells it to leave that section out entirely rather than to render it
+ *     empty. That omission is also what makes its verdict identical to the one this
+ *     dashboard counts for V6, since the registry adapts its resolver with an empty
+ *     event list.
+ *   * `canRefresh` goes to ALL EIGHT and is the same boolean this dashboard uses to
+ *     disable its own button. One fact, one answer: either every refresh affordance
+ *     on the surface works or every one of them is disabled and says why.
  */
 function ControlPanel({
   controlId,
   status,
   result,
   onRefresh,
+  canRefresh,
 }: {
   readonly controlId: ControlId;
   readonly status: ControlStatus | undefined;
   readonly result: UseControlStatusResult;
   readonly onRefresh: () => void;
+  readonly canRefresh: boolean;
 }): ReactElement {
   switch (controlId) {
     case 'V1':
-      return <RbacWildcardPanel status={status} result={result} onRefresh={onRefresh} />;
+      return (
+        <RbacWildcardPanel
+          status={status}
+          result={result}
+          onRefresh={onRefresh}
+          canRefresh={canRefresh}
+        />
+      );
     case 'V2':
-      return <PodSecurityPanel status={status} result={result} onRefresh={onRefresh} />;
+      return (
+        <PodSecurityPanel
+          status={status}
+          result={result}
+          onRefresh={onRefresh}
+          canRefresh={canRefresh}
+        />
+      );
     case 'V3':
-      return <EncryptionAtRestPanel status={status} result={result} onRefresh={onRefresh} />;
+      return (
+        <EncryptionAtRestPanel
+          status={status}
+          result={result}
+          onRefresh={onRefresh}
+          canRefresh={canRefresh}
+        />
+      );
     case 'V4':
-      return <TokenHygienePanel status={status} result={result} onRefresh={onRefresh} />;
+      return (
+        <TokenHygienePanel
+          status={status}
+          result={result}
+          onRefresh={onRefresh}
+          canRefresh={canRefresh}
+        />
+      );
     case 'V5':
       return (
         <WebhookPosturePanel
@@ -688,14 +771,29 @@ function ControlPanel({
           status={status}
           result={result}
           onRefresh={onRefresh}
+          canRefresh={canRefresh}
         />
       );
     case 'V6':
-      return <AuditFidelityPanel result={result} />;
+      return <AuditFidelityPanel result={result} onRefresh={onRefresh} canRefresh={canRefresh} />;
     case 'V7':
-      return <NodeIsolationPanel status={status} result={result} onRefresh={onRefresh} />;
+      return (
+        <NodeIsolationPanel
+          status={status}
+          result={result}
+          onRefresh={onRefresh}
+          canRefresh={canRefresh}
+        />
+      );
     case 'V8':
-      return <EtcdTransportPanel status={status} result={result} onRefresh={onRefresh} />;
+      return (
+        <EtcdTransportPanel
+          status={status}
+          result={result}
+          onRefresh={onRefresh}
+          canRefresh={canRefresh}
+        />
+      );
   }
 }
 
@@ -828,8 +926,18 @@ function PostureDashboardView({ resolution, onRefresh }: PostureDashboardViewPro
   // filtered view. That is what makes it impossible for the filter to hide a
   // failing control while the aggregate still reads as a pass: the filter selects
   // what is displayed below and has no input into this value.
-  const aggregate = summarisePosture(statuses);
+  //
+  // Resolved ONCE, from each control's own panel resolver, and shared by the tally,
+  // the filter and every control section's `data-verdict`. A reader can therefore
+  // never see "Pass: 8" over a panel that rendered a failure, and the filter can
+  // never sort a control into a bucket its own panel disagrees with.
+  const effectiveVerdicts = resolveEffectiveVerdicts(statuses);
+  const aggregate = summariseResolved(statuses, effectiveVerdicts);
 
+  // ONE fact about refreshing, applied to this dashboard's button and to all eight
+  // child buttons: `canRefresh` is false exactly when no handler reached this
+  // component, which is precisely when the button below is disabled.
+  const canRefresh = onRefresh !== undefined;
   const panelRefresh = onRefresh ?? noRefresh;
   const panelResult = panelResultFor(resolution, panelRefresh);
 
@@ -846,9 +954,7 @@ function PostureDashboardView({ resolution, onRefresh }: PostureDashboardViewPro
   const visibleControlIds: readonly ControlId[] =
     filteredVerdict === undefined
       ? CONTROL_IDS
-      : CONTROL_IDS.filter(
-          (controlId) => resolveControlVerdict(statuses[controlId]) === filteredVerdict,
-        );
+      : CONTROL_IDS.filter((controlId) => effectiveVerdicts[controlId] === filteredVerdict);
   const hiddenCount = CONTROL_IDS.length - visibleControlIds.length;
 
   return (
@@ -955,7 +1061,7 @@ function PostureDashboardView({ resolution, onRefresh }: PostureDashboardViewPro
                   className={`${BLOCK}__control`}
                   aria-labelledby={`${baseId}-${controlId}-heading`}
                   data-control-id={controlId}
-                  data-verdict={resolveControlVerdict(statuses[controlId])}
+                  data-verdict={effectiveVerdicts[controlId]}
                 >
                   <h3
                     className={`${BLOCK}__control-heading`}
@@ -968,6 +1074,7 @@ function PostureDashboardView({ resolution, onRefresh }: PostureDashboardViewPro
                     status={statuses[controlId]}
                     result={panelResult}
                     onRefresh={panelRefresh}
+                    canRefresh={canRefresh}
                   />
                 </section>
               </li>
@@ -1106,4 +1213,3 @@ export default function PostureDashboard({
   }
   return <ConnectedPostureDashboard onRefresh={onRefresh} />;
 }
-

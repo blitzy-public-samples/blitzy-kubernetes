@@ -74,7 +74,7 @@ limitations under the License.
  * wire version and `key1` is the key name declared by the inline configuration
  * in SECTION 4, so the prefix also proves WHICH key encrypted the value.
  */
-export const AESGCM_PREFIX = 'k8s:enc:aesgcm:v1:key1:';
+export { AESGCM_PREFIX } from '../../domain/securityConstants';
 
 /**
  * Known plaintext marker written as the Secret's value and then asserted ABSENT
@@ -87,7 +87,25 @@ export const AESGCM_PREFIX = 'k8s:enc:aesgcm:v1:key1:';
  * not prove the body was actually encrypted. The two assertions are therefore a
  * pair, and a consumer that renders one verdict must render both.
  */
-export const PLAINTEXT_CANARY = 'BLITZY_PLAINTEXT_CANARY';
+export { PLAINTEXT_CANARY } from '../../domain/securityConstants';
+
+// RE-EXPORTED, NOT REDEFINED. Both constants above now have exactly one definition
+// `web/src/domain/securityConstants.ts`, and this module re-exports them so that every
+// existing importer of the fixture keeps working while the DEPENDENCY DIRECTION is
+// corrected: production code reads the domain, and the fixture reads the domain too.
+//
+// Before this, `web/src/components/EncryptionAtRestPanel.tsx` imported both from
+// HERE -- production code importing test code. Beyond having to ship a fixture
+// module, that made
+// a FIXTURE the source of truth for a security constant: the moment someone edited the
+// recorded prefix to express a negative case, the panel's notion of a valid prefix
+// moved
+// with it, and the test meant to catch that agreed with the bug.
+//
+// The documentation above each constant is retained here because it records the
+// PROVENANCE of the recorded value -- the Go file and line it was measured from --
+// which
+// is a fixture concern. The value itself is the domain's.
 
 // ---------------------------------------------------------------------------
 // SECTION 2 — Local structural types.
@@ -549,4 +567,3 @@ export const ENCRYPTION_AT_REST_ASSERTIONS = [
       'the published contract is unchanged',
   },
 ] as const satisfies readonly EncryptionAtRestAssertion[];
-

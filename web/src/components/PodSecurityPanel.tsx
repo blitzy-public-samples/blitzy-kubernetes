@@ -71,8 +71,10 @@ limitations under the License.
 //     accessible name. The repository's own requirement identifiers are used
 //     instead. See {@link COVERED_REQUIREMENT_IDS}.
 //
-// DEPENDENCY DISCIPLINE. The only imports are `react` and this tier's single
-// type-definition site, `../hooks/useControlStatus`. No design system, no CSS
+// DEPENDENCY DISCIPLINE. The only imports are `react`, this tier's single
+// type-definition site `../hooks/useControlStatus`, and the two
+// production-neutral `../domain` modules that hold the shared evidence readers
+// and the stable observation identities. No design system, no CSS
 // framework, no icon library, no router and no data-fetching library is
 // introduced, so web/package.json and web/package-lock.json stay in step. There
 // is also NO styling at all — no stylesheet exists anywhere under web/, AAP
@@ -94,6 +96,18 @@ import {
   type ControlVerdict,
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
+import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
+import {
+  readBoolean,
+  readNullable,
+  readNumber,
+  requireBoolean,
+  requireNull,
+  requireString,
+  strictestVerdict,
+  verdictForAbsence,
+} from '../domain/evidence';
+import { V2_OBSERVATIONS, v2NamespaceLabelObservation } from '../domain/observationIds';
 
 /** The control this panel reports on. */
 const CONTROL_ID: ControlId = 'V2';
@@ -179,6 +193,16 @@ interface EnforcementRejection {
   readonly status: number;
   /** `reason` of the rejection. */
   readonly reason: string;
+  /**
+   * Stable identity of the observation carrying this pod's response status.
+   *
+   * Taken from {@link V2_OBSERVATIONS} rather than assembled here, so the
+   * identity the panel looks for and the identity a payload records are the same
+   * string by construction and cannot drift into a silent non-match.
+   */
+  readonly statusLabel: string;
+  /** Stable identity of the observation carrying this pod's admission outcome. */
+  readonly admittedLabel: string;
 }
 
 /**
@@ -196,12 +220,16 @@ const ENFORCEMENT_REJECTIONS: readonly EnforcementRejection[] = [
     violation: 'securityContext.privileged: true',
     status: ADMISSION_REJECTION_STATUS,
     reason: ADMISSION_REJECTION_REASON,
+    statusLabel: V2_OBSERVATIONS.privilegedPodStatus,
+    admittedLabel: V2_OBSERVATIONS.privilegedPodAdmitted,
   },
   {
     pod: 'hostpid-pod',
     violation: 'spec.hostPID: true',
     status: ADMISSION_REJECTION_STATUS,
     reason: ADMISSION_REJECTION_REASON,
+    statusLabel: V2_OBSERVATIONS.hostPidPodStatus,
+    admittedLabel: V2_OBSERVATIONS.hostPidPodAdmitted,
   },
 ];
 
@@ -317,6 +345,7 @@ const VERDICT_EXPLANATIONS: Record<ControlVerdict, string> = {
 const FAIL_POINTERS = {
   findings: ' See the reported findings.',
   warnChannel: ' See the warning channel check below.',
+  measurements: ' See the required measurements below.',
   none: ' The server reported no further detail.',
 } as const;
 
@@ -324,31 +353,66 @@ const FAIL_POINTERS = {
  * Chooses the pointer that matches what is actually on screen.
  *
  * Ordered by specificity of the evidence rendered: a findings list first, then
- * the warning-channel region, then an explicit admission that neither exists.
+ * the warning-channel region, then the required-measurements table, then an
+ * explicit admission that none of the three exists.
+ *
+ * The measurements arm was added with the evidence gate. A failure can now be
+ * substantiated by a CONTRADICTED measurement and by nothing else — a rejection
+ * that came back 404, say, on a payload reporting no findings — and without this
+ * arm such a failure told the reader "the server reported no further detail"
+ * while the table naming the contradiction sat immediately below it.
  */
-function failPointer(findingCount: number, warnChannelEmpty: boolean): string {
+function failPointer(
+  findingCount: number,
+  warnChannelEmpty: boolean,
+  measurementViolated: boolean,
+): string {
   if (findingCount > 0) {
     return FAIL_POINTERS.findings;
   }
   if (warnChannelEmpty) {
     return FAIL_POINTERS.warnChannel;
   }
+  if (measurementViolated) {
+    return FAIL_POINTERS.measurements;
+  }
   return FAIL_POINTERS.none;
 }
 
 /**
+ * Announced instead of {@link VERDICT_EXPLANATIONS.unknown} when the server
+ * claimed a pass the evidence did not substantiate.
+ *
+ * A separate sentence because "no trustworthy evidence was obtained" would be
+ * untrue here: evidence arrived, and some of it was proven. What is being said
+ * is narrower and more useful — the pass is WITHHELD, and the table below names
+ * exactly which measurement is missing.
+ */
+const PASS_WITHHELD_EXPLANATION =
+  'The server reported a pass, but at least one required measurement was not proven, so the ' +
+  'pass is withheld and no verdict is claimed. See the required measurements below.';
+
+/**
  * The full announced sentence for a verdict.
  *
- * Only the failure arm is elaborated, because it is the only one that refers the
- * reader elsewhere.
+ * The failure arm and the withheld-pass arm are elaborated, because they are the
+ * two that refer the reader elsewhere.
  */
 function explainVerdict(
   verdict: ControlVerdict,
   findingCount: number,
   warnChannelEmpty: boolean,
+  passWithheld: boolean,
+  measurementViolated: boolean,
 ): string {
   if (verdict === 'fail') {
-    return VERDICT_EXPLANATIONS.fail + failPointer(findingCount, warnChannelEmpty);
+    return (
+      VERDICT_EXPLANATIONS.fail +
+      failPointer(findingCount, warnChannelEmpty, measurementViolated)
+    );
+  }
+  if (verdict === 'unknown' && passWithheld) {
+    return PASS_WITHHELD_EXPLANATION;
   }
   return VERDICT_EXPLANATIONS[verdict];
 }
@@ -394,23 +458,439 @@ function formatObservationValue(value: ControlObservation['value']): string {
   return value;
 }
 
+/** Rendered in the observed column when the payload carried no such measurement. */
+const NOT_REPORTED = 'not reported';
+
+/** Rendered when one identity is carried by more than one observation. */
+const REPORTED_MORE_THAN_ONCE = 'reported more than once';
+
+/**
+ * Presents the observed value of one measurement, or why there is none.
+ *
+ * `readNullable` is used rather than a typed reader so that the observed column
+ * shows what actually arrived — including a `null`, which is a claim rather than
+ * an absence — while the row's VERDICT is decided separately by a reader that
+ * refuses to coerce. A duplicated identity is reported as such instead of being
+ * silently resolved to whichever copy came first.
+ */
+function describeObserved(
+  observations: readonly ControlObservation[] | undefined,
+  label: string,
+): string {
+  const found = readNullable(observations, label);
+  if (found.state === 'reported') {
+    return formatObservationValue(found.value);
+  }
+  return found.state === 'conflict' ? REPORTED_MORE_THAN_ONCE : NOT_REPORTED;
+}
+
+/** What the evidence says about one pod the enforced level had to reject. */
+type RejectionOutcome =
+  /** Rejected with exactly 403. The control worked. */
+  | { readonly kind: 'rejected' }
+  /** Admitted. The enforced level let a violating pod through. */
+  | { readonly kind: 'admitted' }
+  /** Rejected, but not with 403 — so not an admission decision. */
+  | { readonly kind: 'wrong-status'; readonly status: number }
+  /** Reported as `null`: no admission decision was reached at all. */
+  | { readonly kind: 'no-decision' }
+  /** Present but unusable: duplicated, or carried at the wrong wire type. */
+  | { readonly kind: 'unreadable'; readonly reason: string }
+  /** Absent from the payload entirely. */
+  | { readonly kind: 'not-measured' };
+
+/**
+ * Reads one required rejection out of the evidence.
+ *
+ * The order of interrogation is deliberate and mirrors the oracle. It asks first
+ * whether the pod was ADMITTED, because an admission is the V2 failure and must
+ * be reported as such even when a status was also recorded; only then does it
+ * require the status to be exactly 403.
+ *
+ * `admitted: false` alone is NOT accepted as proof. The oracle asserts
+ * `!apierrors.IsForbidden(err)` (`podsecurity_test.go` L407, L419), so ANY
+ * non-Forbidden outcome — including a 404 from a missing namespace, and
+ * including a rejection by some other plugin — is a failure of this control
+ * rather than a quieter kind of success. A pod that was not admitted but has no
+ * recorded 403 therefore leaves the row unproven instead of passing it.
+ */
+function assessRejection(
+  observations: readonly ControlObservation[] | undefined,
+  rejection: EnforcementRejection,
+): RejectionOutcome {
+  const admitted = readBoolean(observations, rejection.admittedLabel);
+  if (admitted.state === 'reported') {
+    if (admitted.value) {
+      return { kind: 'admitted' };
+    }
+  } else if (admitted.state === 'conflict') {
+    return { kind: 'unreadable', reason: admitted.reason };
+  } else if (admitted.state === 'wrong-type') {
+    const raw = readNullable(observations, rejection.admittedLabel);
+    if (raw.state === 'reported' && raw.value === null) {
+      return { kind: 'no-decision' };
+    }
+    return { kind: 'unreadable', reason: admitted.reason };
+  }
+
+  const status = readNumber(observations, rejection.statusLabel);
+  if (status.state === 'reported') {
+    return status.value === ADMISSION_REJECTION_STATUS
+      ? { kind: 'rejected' }
+      : { kind: 'wrong-status', status: status.value };
+  }
+  if (status.state === 'conflict') {
+    return { kind: 'unreadable', reason: status.reason };
+  }
+  if (status.state === 'wrong-type') {
+    const raw = readNullable(observations, rejection.statusLabel);
+    if (raw.state === 'reported' && raw.value === null) {
+      return { kind: 'no-decision' };
+    }
+    return { kind: 'unreadable', reason: status.reason };
+  }
+  return { kind: 'not-measured' };
+}
+
+/** The verdict each {@link RejectionOutcome} justifies. */
+function verdictForRejection(outcome: RejectionOutcome): ControlVerdict {
+  if (outcome.kind === 'rejected') {
+    return 'pass';
+  }
+  if (outcome.kind === 'admitted' || outcome.kind === 'wrong-status') {
+    return 'fail';
+  }
+  return 'unknown';
+}
+
+/** How each {@link RejectionOutcome} is worded in the measurements table. */
+function describeRejection(outcome: RejectionOutcome, rejection: EnforcementRejection): string {
+  switch (outcome.kind) {
+    case 'rejected':
+      return `rejected with ${String(ADMISSION_REJECTION_STATUS)} ${ADMISSION_REJECTION_REASON}`;
+    case 'admitted':
+      return `ADMITTED: the enforced level let ${rejection.pod} through`;
+    case 'wrong-status':
+      return (
+        `rejected with ${String(outcome.status)} rather than ` +
+        `${String(ADMISSION_REJECTION_STATUS)}, so this is not an admission decision`
+      );
+    case 'no-decision':
+      return 'reported as null: no admission decision was reached';
+    case 'unreadable':
+      return outcome.reason;
+    default:
+      return 'the admission outcome was not measured';
+  }
+}
+
+/** One measurement the control's verdict rests on. */
+interface RequiredMeasurement {
+  /** Stable list key, also emitted as `data-measurement`. */
+  readonly id: string;
+  /** Row header: what had to be true. */
+  readonly requirement: string;
+  /** The required value, in the same terms as `observed`. */
+  readonly required: string;
+  /** What the payload carried, presented but never reinterpreted. */
+  readonly observed: string;
+  /** How the comparison went, in words. */
+  readonly detail: string;
+  /** The verdict this single measurement justifies. */
+  readonly verdict: ControlVerdict;
+}
+
+/** How each measurement verdict is worded. */
+const MEASUREMENT_RESULT: Record<ControlVerdict, string> = {
+  pass: 'proven',
+  fail: 'violated',
+  warn: 'proven with a caveat',
+  unknown: 'not proven',
+};
+
+/** The three level values the two namespace labels must carry. */
+const ENFORCE_LEVEL = 'baseline';
+const WARN_LEVEL = 'restricted';
+
+/** Wording for a namespace-label measurement. */
+function describeLabel(verdict: ControlVerdict, label: string, expected: string): string {
+  if (verdict === 'pass') {
+    return `the namespace carries ${label}=${expected}`;
+  }
+  if (verdict === 'fail') {
+    return `the namespace does not carry ${label}=${expected}, so a different level applied`;
+  }
+  return `the ${label} label was not measured, so the level that applied is unknown`;
+}
+
+/**
+ * Builds the eight measurements a V2 pass must rest on.
+ *
+ * WHY EIGHT, AND WHY ALL OF THEM (this is finding #51's whole substance).
+ * `TestPodSecurityEnforceBaselineRejectsPrivileged` is ONE test function making
+ * four accumulating assertions plus two aborting setup requirements, and its
+ * single verdict covers all of them. The three measured paths are therefore the
+ * privileged rejection, the hostPID rejection and the admitted-with-warning
+ * path — and each of the three needs its own precondition to mean anything:
+ *
+ *   * The two rejections are only PodSecurity decisions because the namespace
+ *     carries `enforce=baseline` and because its `default` ServiceAccount
+ *     existed first (`podsecurity_test.go` L367-L387). Without the
+ *     ServiceAccount the create fails with a NON-Forbidden error before the
+ *     PodSecurity plugin runs, so a 403 would be proving something else.
+ *   * The admission is only meaningful because the namespace carries
+ *     `warn=restricted`, and it is only a pass because a warning came back:
+ *     "expected at least one Pod Security warning under warn=restricted, got
+ *     none" (L451-L455).
+ *
+ * The dry-run posture is rendered as ordinary evidence rather than gating the
+ * verdict: it keeps the shared etcd clean and is not a property of the control.
+ */
+function buildRequiredMeasurements(
+  observations: readonly ControlObservation[] | undefined,
+  warnings: readonly string[],
+): readonly RequiredMeasurement[] {
+  const enforceLabelId = v2NamespaceLabelObservation(ENFORCE_NAMESPACE, ENFORCE_LABEL);
+  const warnLabelId = v2NamespaceLabelObservation(WARN_NAMESPACE, WARN_LABEL);
+  const enforceLabelVerdict = requireString(observations, enforceLabelId, ENFORCE_LEVEL);
+  const warnLabelVerdict = requireString(observations, warnLabelId, WARN_LEVEL);
+  // NEVER `fail`, and this asymmetry is deliberate rather than an oversight. An
+  // unmet precondition does not mean the control is broken; it means the control
+  // was never exercised, because the create failed with a NON-Forbidden error
+  // before the PodSecurity plugin ran (`podsecurity_test.go` L367-L374). Failing
+  // it would blame Pod Security for a missing ServiceAccount — the wrong
+  // component — while `unknown` says exactly what is true: nothing was proven
+  // either way. The recorded indeterminate payload asserts precisely this.
+  const precondition = readBoolean(
+    observations,
+    V2_OBSERVATIONS.defaultServiceAccountPrecondition,
+  );
+  const preconditionMet = precondition.state === 'reported' && precondition.value;
+  const preconditionVerdict: ControlVerdict = preconditionMet ? 'pass' : 'unknown';
+  const admittedVerdict = requireBoolean(observations, V2_OBSERVATIONS.warnPodAdmitted, true);
+  const warnStatusVerdict = requireNull(observations, V2_OBSERVATIONS.warnPodStatus);
+
+  return [
+    {
+      id: 'enforce-namespace-label',
+      requirement: `Namespace ${ENFORCE_NAMESPACE} is labelled ${ENFORCE_LABEL}`,
+      required: ENFORCE_LEVEL,
+      observed: describeObserved(observations, enforceLabelId),
+      detail: describeLabel(enforceLabelVerdict, ENFORCE_LABEL, ENFORCE_LEVEL),
+      verdict: enforceLabelVerdict,
+    },
+    {
+      id: 'default-serviceaccount-precondition',
+      requirement: 'The namespace default ServiceAccount existed before the pods',
+      required: 'true',
+      observed: describeObserved(observations, V2_OBSERVATIONS.defaultServiceAccountPrecondition),
+      detail: preconditionMet
+        ? 'the rejections below cannot be a masked ServiceAccount error'
+        : precondition.state === 'reported'
+          ? 'reported as false: the ServiceAccount was absent, so any rejection came from ' +
+            'the ServiceAccount plugin before PodSecurity ran and proves nothing either way'
+          : 'not reported: without it, a rejection may be a ServiceAccount error rather ' +
+            'than a PodSecurity decision',
+      verdict: preconditionVerdict,
+    },
+    ...ENFORCEMENT_REJECTIONS.map((rejection): RequiredMeasurement => {
+      const outcome = assessRejection(observations, rejection);
+      return {
+        id: `rejection-${rejection.pod}`,
+        requirement: `Pod ${rejection.pod} (${rejection.violation}) is rejected`,
+        required: `${String(ADMISSION_REJECTION_STATUS)} ${ADMISSION_REJECTION_REASON}`,
+        observed: describeObserved(observations, rejection.statusLabel),
+        detail: describeRejection(outcome, rejection),
+        verdict: verdictForRejection(outcome),
+      };
+    }),
+    {
+      id: 'warn-namespace-label',
+      requirement: `Namespace ${WARN_NAMESPACE} is labelled ${WARN_LABEL}`,
+      required: WARN_LEVEL,
+      observed: describeObserved(observations, warnLabelId),
+      detail: describeLabel(warnLabelVerdict, WARN_LABEL, WARN_LEVEL),
+      verdict: warnLabelVerdict,
+    },
+    {
+      id: 'warn-pod-admitted',
+      requirement: `Pod ${WARN_POD} is ADMITTED under ${WARN_LABEL}=${WARN_LEVEL}`,
+      required: 'true',
+      observed: describeObserved(observations, V2_OBSERVATIONS.warnPodAdmitted),
+      detail:
+        admittedVerdict === 'pass'
+          ? 'admitted, because the enforced level is left at the cluster default privileged'
+          : admittedVerdict === 'fail'
+            ? 'not admitted: a warned level must permit the pod, not reject it'
+            : 'the admission outcome under the warned level was not measured',
+      verdict: admittedVerdict,
+    },
+    {
+      id: 'warn-pod-no-rejection-status',
+      requirement: `Pod ${WARN_POD} carries no rejection status`,
+      required: 'null',
+      observed: describeObserved(observations, V2_OBSERVATIONS.warnPodStatus),
+      detail:
+        warnStatusVerdict === 'pass'
+          ? 'null, which is what an admitted pod reports'
+          : warnStatusVerdict === 'fail'
+            ? 'a rejection status was reported, so the pod was not admitted'
+            : 'no rejection status was reported either way',
+      verdict: warnStatusVerdict,
+    },
+    buildWarningMeasurement(observations, warnings),
+  ];
+}
+
+/**
+ * Builds the warning-count measurement.
+ *
+ * TWO ways to fail, and both matter. A recorded count below one is the oracle's
+ * own failure (`podsecurity_test.go` L451-L455). A recorded count of one or more
+ * alongside an EMPTY warning channel is an inconsistent report: the panel would
+ * otherwise claim the warned level objected while rendering no warning at all,
+ * which is the same false pass in a subtler dress.
+ */
+function buildWarningMeasurement(
+  observations: readonly ControlObservation[] | undefined,
+  warnings: readonly string[],
+): RequiredMeasurement {
+  const base = {
+    id: 'warning-surfaced',
+    requirement: `At least one warning is surfaced under ${WARN_LABEL}=${WARN_LEVEL}`,
+    required: 'at least 1',
+    observed: describeObserved(observations, V2_OBSERVATIONS.warningsRecorded),
+  };
+  const count = readNumber(observations, V2_OBSERVATIONS.warningsRecorded);
+  if (count.state !== 'reported') {
+    return { ...base, detail: count.reason, verdict: verdictForAbsence(count.state) };
+  }
+  if (count.value < 1) {
+    return {
+      ...base,
+      detail: 'no warning was recorded, so the warned level admitted the pod in silence',
+      verdict: 'fail',
+    };
+  }
+  if (warnings.length === 0) {
+    return {
+      ...base,
+      detail:
+        'a warning count was recorded but the warning channel is empty, so the report is ' +
+        'inconsistent and the count cannot be trusted',
+      verdict: 'fail',
+    };
+  }
+  return { ...base, detail: 'the warned level objected as required', verdict: 'pass' };
+}
+
+/**
+ * Combines the reported verdict with the evidence, the findings and the warning
+ * channel.
+ *
+ * INVARIANT LOCKED, and this is the correction finding #51 required: a PASS MUST
+ * BE EARNED. When the server claims `pass` but the required measurements are not
+ * all proven, the pass is withheld and `unknown` is rendered — never `fail`,
+ * because unproven is not the same as broken (AAP §0.11.1: absent evidence is
+ * not a pass, and it is not a defect either).
+ *
+ * Three floors apply whatever the server said, and each only ever moves the
+ * verdict in the strict direction:
+ *
+ *   1. Any reported finding is a `fail`. A payload cannot claim `pass` while
+ *      also reporting something wrong.
+ *   2. Any CONTRADICTED measurement is a `fail` — an admitted violating pod, a
+ *      rejection that was not a 403, a namespace at the wrong level, a warned
+ *      level that rejected, or a silent warning channel.
+ *   3. A `warn` verdict with an empty warning list is a `fail`, mirroring the
+ *      oracle's own message at L454.
+ *
+ * A `warn` verdict whose enforce-half measurements are merely UNMEASURED stays
+ * `warn`: the warned namespace is a narrower scenario that never claimed the
+ * enforce half, and `warn` is not a pass, so nothing is over-claimed. Its
+ * unproven rows are still rendered as unproven in the measurements table.
+ */
+function resolvePodSecurityVerdict(
+  reported: ControlVerdict,
+  evidence: ControlVerdict,
+  findingCount: number,
+  warnChannelEmpty: boolean,
+): ControlVerdict {
+  if (reported === 'fail' || findingCount > 0 || warnChannelEmpty || evidence === 'fail') {
+    return 'fail';
+  }
+  if (reported === 'unknown') {
+    return 'unknown';
+  }
+  if (reported === 'warn') {
+    return 'warn';
+  }
+  return evidence === 'pass' ? 'pass' : 'unknown';
+}
+
+/** Everything the resolved body renders, derived once from the payload. */
+interface PodSecurityAssessment {
+  /** The verdict actually rendered. */
+  readonly verdict: ControlVerdict;
+  /** A `warn` verdict arrived with an empty warning list. */
+  readonly warnChannelEmpty: boolean;
+  /** The server claimed `pass` and the evidence did not substantiate it. */
+  readonly passWithheld: boolean;
+  /** At least one measurement was CONTRADICTED, not merely unproven. */
+  readonly measurementViolated: boolean;
+  /** The measurements the verdict rests on, always all of them. */
+  readonly measurements: readonly RequiredMeasurement[];
+}
+
 /**
  * The verdict actually rendered, together with why it may differ from the
  * server's.
  *
  * Invariant locked (AAP §0.11.1, "never weaken a boundary condition to make a
- * test pass"): a `warn` verdict carrying an EMPTY warning list is downgraded to
- * `fail`. The oracle requires at least one warning under `warn=restricted`
- * (`podsecurity_test.go` L452-456), so silence there is a failure of the control
- * and not a quieter kind of success. This is the only place the rendered verdict
- * departs from the reported one, and it only ever moves in the strict direction.
+ * test pass"): the rendered verdict is the strictest of what the server said,
+ * what the required measurements prove, whether any finding was reported and
+ * whether the warning channel is consistent. It only ever moves in the strict
+ * direction, and a reported `pass` is rendered only when every required
+ * measurement is proven.
  */
-function resolveVerdict(status: ControlStatus): {
-  readonly verdict: ControlVerdict;
-  readonly warnChannelEmpty: boolean;
-} {
+function assessPodSecurity(status: ControlStatus): PodSecurityAssessment {
+  const observations = status.evidence?.observations;
+  const measurements = buildRequiredMeasurements(observations, status.warnings);
   const warnChannelEmpty = status.verdict === 'warn' && status.warnings.length === 0;
-  return { verdict: warnChannelEmpty ? 'fail' : status.verdict, warnChannelEmpty };
+  const evidence = strictestVerdict(measurements.map((measurement) => measurement.verdict));
+  const verdict = resolvePodSecurityVerdict(
+    status.verdict,
+    evidence,
+    status.findings.length,
+    warnChannelEmpty,
+  );
+  return {
+    verdict,
+    warnChannelEmpty,
+    passWithheld: status.verdict === 'pass' && verdict !== 'pass',
+    measurementViolated: measurements.some((measurement) => measurement.verdict === 'fail'),
+    measurements,
+  };
+}
+
+/**
+ * The panel's own conservative verdict for V2, as one call over one payload.
+ *
+ * Exported so the aggregate dashboard counts, filters and summarises the SAME
+ * verdict this panel renders, rather than the raw `status.verdict` the server
+ * sent. A dashboard counting the raw verdict would report a pass beside a panel
+ * rendering UNKNOWN, and the two would disagree with no single place to look.
+ *
+ * @param control - the payload for V2, or `undefined` when it was not reported.
+ * @returns the verdict this panel renders.
+ */
+export function resolvePodSecurityEffectiveVerdict(
+  control: ControlStatus | undefined,
+): ControlVerdict {
+  if (control === undefined) {
+    return 'unknown';
+  }
+  return strictestVerdict([assessPodSecurity(control).verdict]);
 }
 
 /** Props of {@link LabelledRegion}. */
@@ -462,23 +942,21 @@ interface PanelFrameProps {
 function PanelFrame({ refresh, requirementIds, children }: PanelFrameProps): ReactNode {
   const titleId = useId();
 
-  const handleRefresh = (): void => {
-    if (refresh === undefined) {
-      // Pre-resolved form: the caller supplied a status directly and did not
-      // supply a handler, so there is nothing to re-issue. The control stays
-      // present and operable rather than disappearing, because its absence in
-      // one form and presence in another would be the inconsistency.
-      return;
-    }
-    refresh();
-  };
-
+  // The control stays PRESENT in every state, so its presence never depends on how the
+  // panel was fed, but when nothing can be re-requested it is natively `disabled` with a
+  // title that says why. An enabled button whose handler returns immediately looks
+  // operable and is not, which is worse than an honest disabled one.
   return (
     <section aria-labelledby={titleId}>
       <h2 id={titleId}>{PANEL_TITLE}</h2>
       <p>{PANEL_DESCRIPTION}</p>
       <p>{`Requirements covered: ${requirementIds.join(', ')}`}</p>
-      <button type="button" onClick={handleRefresh}>
+      <button
+        type="button"
+        onClick={refresh}
+        disabled={refresh === undefined}
+        title={refresh === undefined ? REFRESH_UNAVAILABLE_TITLE : undefined}
+      >
         {REFRESH_LABEL}
       </button>
       {children}
@@ -612,6 +1090,58 @@ function LabelVocabulary(): ReactNode {
   );
 }
 
+/**
+ * The measurements the verdict rests on, every one of them, whatever its result.
+ *
+ * Rendered unconditionally and in full — the accumulate-and-continue semantics
+ * of the oracle's `t.Errorf` (AAP §0.11.1, "preserve assertion semantics across
+ * languages"). A panel that showed only the failed rows would leave a reader
+ * unable to tell an unproven measurement from an absent one, and it is exactly
+ * that distinction that decides between a withheld pass and a failure.
+ */
+function RequiredMeasurementsRegion({
+  measurements,
+}: {
+  readonly measurements: readonly RequiredMeasurement[];
+}): ReactNode {
+  const title = 'Required measurements';
+  return (
+    <LabelledRegion title={title}>
+      <p>
+        {'A pass is claimed only when every measurement below is proven. An unproven ' +
+          'measurement withholds the pass; a violated one fails the control.'}
+      </p>
+      <table>
+        <caption>{title}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Requirement</th>
+            <th scope="col">Required</th>
+            <th scope="col">Observed</th>
+            <th scope="col">Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {measurements.map((measurement) => (
+            <tr
+              key={measurement.id}
+              data-measurement={measurement.id}
+              data-result={measurement.verdict}
+            >
+              <th scope="row">{measurement.requirement}</th>
+              <td>{measurement.required}</td>
+              <td>{measurement.observed}</td>
+              <td>
+                {`${measurement.detail} \u2014 ${MEASUREMENT_RESULT[measurement.verdict]}`}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </LabelledRegion>
+  );
+}
+
 /** Measured facts backing the verdict, tabulated verbatim. */
 function ObservationsRegion({
   observations,
@@ -727,7 +1257,8 @@ function PostureRequestFailure({ error }: { readonly error: ControlStatusError }
  * exists to protect.
  */
 function ControlBody({ status }: { readonly status: ControlStatus }): ReactNode {
-  const { verdict, warnChannelEmpty } = resolveVerdict(status);
+  const assessment = assessPodSecurity(status);
+  const { verdict, warnChannelEmpty, passWithheld, measurements } = assessment;
   const observations = status.evidence?.observations;
   const hasObservations = observations !== undefined && observations.length > 0;
 
@@ -735,7 +1266,13 @@ function ControlBody({ status }: { readonly status: ControlStatus }): ReactNode 
     <>
       <h3>{VERDICT_HEADINGS[verdict]}</h3>
       <p role="status">
-        {explainVerdict(verdict, status.findings.length, warnChannelEmpty)}
+        {explainVerdict(
+          verdict,
+          status.findings.length,
+          warnChannelEmpty,
+          passWithheld,
+          assessment.measurementViolated,
+        )}
       </p>
       <p>{status.summary}</p>
       {status.detail === undefined ? null : <p>{status.detail}</p>}
@@ -747,6 +1284,7 @@ function ControlBody({ status }: { readonly status: ControlStatus }): ReactNode 
       )}
 
       <EnforcementRejections />
+      <RequiredMeasurementsRegion measurements={measurements} />
 
       {/* A warned level that admitted the pod and said nothing has lost the
           control, so that case reports the failure instead of an empty list. */}
@@ -764,15 +1302,19 @@ function ControlBody({ status }: { readonly status: ControlStatus }): ReactNode 
 interface ConnectedProps {
   /** See {@link PodSecurityPanelProps.onRefresh}. */
   readonly onRefresh?: (() => void) | undefined;
+  /** See {@link PodSecurityPanelProps.canRefresh}. */
+  readonly canRefresh?: boolean | undefined;
 }
 
 /** Renders a status the caller already holds. */
 function ResolvedPodSecurityPanel({
   status,
   onRefresh,
+  canRefresh = true,
 }: ConnectedProps & { readonly status: ControlStatus }): ReactNode {
+  const refresh = resolveRefreshHandler(onRefresh, undefined, canRefresh);
   return (
-    <PanelFrame refresh={onRefresh} requirementIds={status.requirementIds ?? COVERED_REQUIREMENT_IDS}>
+    <PanelFrame refresh={refresh} requirementIds={status.requirementIds ?? COVERED_REQUIREMENT_IDS}>
       <ControlBody status={status} />
     </PanelFrame>
   );
@@ -788,10 +1330,12 @@ function ResolvedPodSecurityPanel({
 function ResultPodSecurityPanel({
   result,
   onRefresh,
+  canRefresh = true,
 }: ConnectedProps & { readonly result: UseControlStatusResult }): ReactNode {
   // An explicit handler REPLACES the panel's own, rather than running alongside
-  // it, so a click can never issue two requests.
-  const refresh = onRefresh ?? result.refresh;
+  // it, so a click can never issue two requests, and an unavailable refresh
+  // resolves to `undefined` so the affordance is disabled rather than inert.
+  const refresh = resolveRefreshHandler(onRefresh, result.refresh, canRefresh);
 
   if (result.status === 'loading') {
     return (
@@ -826,9 +1370,11 @@ function ResultPodSecurityPanel({
 }
 
 /** Reads the control's posture itself. */
-function ConnectedPodSecurityPanel({ onRefresh }: ConnectedProps): ReactNode {
+function ConnectedPodSecurityPanel({ onRefresh, canRefresh }: ConnectedProps): ReactNode {
   const result = useControlStatus(CONTROL_ID);
-  return <ResultPodSecurityPanel result={result} onRefresh={onRefresh} />;
+  return (
+    <ResultPodSecurityPanel result={result} onRefresh={onRefresh} canRefresh={canRefresh} />
+  );
 }
 
 /** Props of {@link PodSecurityPanel}. Every member is optional. */
@@ -849,6 +1395,14 @@ export interface PodSecurityPanelProps {
    * pre-resolved form, where the panel owns no request of its own.
    */
   readonly onRefresh?: (() => void) | undefined;
+  /**
+   * Whether refreshing can re-request anything at all.
+   *
+   * `false` disables this panel's refresh affordance and explains why, which is how an
+   * aggregate surface that was handed its posture directly keeps every control's button
+   * consistent with its own. Defaults to `true`, so a panel used on its own is unaffected.
+   */
+  readonly canRefresh?: boolean | undefined;
 }
 
 /**
@@ -885,13 +1439,15 @@ export default function PodSecurityPanel({
   status,
   result,
   onRefresh,
+  canRefresh = true,
 }: PodSecurityPanelProps): ReactNode {
   if (status !== undefined) {
-    return <ResolvedPodSecurityPanel status={status} onRefresh={onRefresh} />;
+    return (
+      <ResolvedPodSecurityPanel status={status} onRefresh={onRefresh} canRefresh={canRefresh} />
+    );
   }
   if (result !== undefined) {
-    return <ResultPodSecurityPanel result={result} onRefresh={onRefresh} />;
+    return <ResultPodSecurityPanel result={result} onRefresh={onRefresh} canRefresh={canRefresh} />;
   }
-  return <ConnectedPodSecurityPanel onRefresh={onRefresh} />;
+  return <ConnectedPodSecurityPanel onRefresh={onRefresh} canRefresh={canRefresh} />;
 }
-

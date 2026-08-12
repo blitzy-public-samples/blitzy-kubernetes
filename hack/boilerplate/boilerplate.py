@@ -140,17 +140,71 @@ skipped_names = [
     "test/e2e/generated/bindata.go",
     "hack/boilerplate/test",
     "staging/src/k8s.io/kubectl/pkg/generated/bindata.go",
-    # generated dependency and cache dirs of the python/ and web/ test trees
+]
+
+# Generated dependency trees of the python/ and web/ test tiers, matched as
+# ANCHORED repository-relative path prefixes rather than as substrings.
+#
+# These are deliberately NOT in skipped_names: that list is tested with
+# `x in pathname`, so an entry there also excludes any ordinary source file whose
+# path merely CONTAINS the string - "web/node_modules-notes/main.go", or a checkout
+# living under a directory of that name - and silently drops it from the licence
+# gate. A skip that is wider than the tree it names weakens the gate, so these
+# match only the trees themselves and everything beneath them.
+skipped_prefixes = [
     "web/node_modules",
     "python/.venv",
+]
+
+# Generated cache directories, matched as whole path COMPONENTS wherever they
+# appear, for the same reason: as a substring, "__pycache__" would also exclude a
+# file named "__pycache__helper.py" or anything under a directory whose name merely
+# starts with it.
+skipped_dirs = [
     "__pycache__",
 ]
+
+
+def relative_parts(pathname):
+    """Split pathname into components relative to args.rootdir.
+
+    A relative pathname is interpreted against args.rootdir, matching what
+    normalize_files() does when it joins the two together.
+    """
+    candidate = pathname
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(args.rootdir, candidate)
+    relative = os.path.relpath(os.path.abspath(candidate), os.path.abspath(args.rootdir))
+    return relative.replace(os.sep, "/").split("/")
+
+
+def is_skipped(pathname):
+    """Return True when pathname is excluded from the boilerplate check.
+
+    The three rules are kept apart on purpose. skipped_names is matched as a
+    substring, unchanged, because that is what its existing entries have always
+    meant - "vendor" and "testdata" are intended to match at any depth and under
+    any spelling. The two newer lists are matched exactly, so a generated tree is
+    excluded without also excluding ordinary sources that happen to share a name.
+    """
+    if any(x in pathname for x in skipped_names):
+        return True
+
+    parts = relative_parts(pathname)
+    if any(part in skipped_dirs for part in parts):
+        return True
+
+    relative = "/".join(parts)
+    for prefix in skipped_prefixes:
+        if relative == prefix or relative.startswith(prefix + "/"):
+            return True
+    return False
 
 
 def normalize_files(files):
     newfiles = []
     for pathname in files:
-        if any(x in pathname for x in skipped_names):
+        if is_skipped(pathname):
             continue
         newfiles.append(pathname)
     for i, pathname in enumerate(newfiles):
@@ -176,6 +230,19 @@ def get_files(extensions):
                 # dirs that start with __ are ignored
                 if dname.startswith("__"):
                     dirs.remove(dname)
+            # Prune the generated trees named by skipped_prefixes and
+            # skipped_dirs. normalize_files() would exclude their contents anyway,
+            # so this is the same performance improvement as above: web/node_modules
+            # alone holds tens of thousands of files when it is materialised in
+            # place rather than symlinked out of the tree. Assigning to the slice
+            # is what os.walk() honours, and it avoids mutating the list while
+            # iterating over it.
+            dirs[:] = [
+                dname
+                for dname in dirs
+                if dname not in skipped_dirs
+                and not is_skipped(os.path.join(root, dname))
+            ]
 
             for name in walkfiles:
                 pathname = os.path.join(root, name)

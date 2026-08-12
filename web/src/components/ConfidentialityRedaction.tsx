@@ -188,6 +188,32 @@ function isPresentPayload(payload: AuditPayload | undefined): payload is AuditPa
 }
 
 /**
+ * Whether a body was RECORDED at all, whatever shape it arrived in.
+ *
+ * Deliberately weaker than {@link isPresentPayload}, and the difference is the whole
+ * point of having both. The declared type says a body is an object, but the Go side
+ * of this control does not agree: `test/utils/audit.go` L151-156 flattens
+ * `ResponseObject` to a BOOLEAN for its struct comparison, and the Go guard at
+ * audit_test.go L1044 then tests `e.Resource == "secrets" && e.ResponseObject` — a
+ * boolean test. A payload that reaches this component in that flattened form, or as
+ * any other non-object, is still a body the API server recorded.
+ *
+ * Reading only `isPresentPayload` for the guard would therefore UNDER-report: a
+ * `responseObject: true` on a `secrets` event would render "No body recorded" and be
+ * counted as nothing withheld, which is the summary asserting that no body existed
+ * when one did. That is a quieter version of the same failure as rendering the body.
+ *
+ * `null` is excluded because a JSON `null` is the wire's way of saying there is no
+ * object, and `undefined` because the field was absent.
+ *
+ * @param payload a request or response body from the wire, possibly absent
+ * @returns `true` when the wire carried anything other than absence
+ */
+function isRecordedPayload(payload: AuditPayload | undefined): boolean {
+  return payload !== undefined && payload !== null;
+}
+
+/**
  * Whether this event's response body must be withheld from the document.
  *
  * This is the whole guard, in one place, mirroring the Go condition
@@ -205,7 +231,7 @@ function isPresentPayload(payload: AuditPayload | undefined): payload is AuditPa
  * @returns `true` when the event names the sensitive resource AND carries a response body
  */
 export function mustWithholdResponseBody(event: AuditEvent): boolean {
-  return isSensitiveResourceEvent(event) && isPresentPayload(event.responseObject);
+  return isSensitiveResourceEvent(event) && isRecordedPayload(event.responseObject);
 }
 
 /**
@@ -313,8 +339,13 @@ function describeRedactionSummary(
  * unprovable, which is the same failure as not redacting at all.
  */
 function renderRequestBodyCell(event: AuditEvent): ReactElement {
-  if (!isPresentPayload(event.requestObject)) {
+  if (!isRecordedPayload(event.requestObject)) {
     return <td>{NO_BODY_RECORDED_TEXT}</td>;
+  }
+  if (!isPresentPayload(event.requestObject)) {
+    // Recorded, but not an inspectable object — the Go-flattened form, or any other
+    // non-object. Its presence is reported and its content is not invented.
+    return <td>{UNSERIALIZABLE_BODY_TEXT}</td>;
   }
   return (
     <td>
@@ -340,7 +371,10 @@ function renderRequestBodyCell(event: AuditEvent): ReactElement {
  */
 function renderResponseBodyCell(event: AuditEvent): ReactElement {
   if (isSensitiveResourceEvent(event)) {
-    if (isPresentPayload(event.responseObject)) {
+    // Presence is read with the WEAKER predicate on purpose: a flattened
+    // `responseObject: true` is a recorded body under the Go guard's own boolean
+    // test, so it must be withheld and counted rather than reported as absent.
+    if (isRecordedPayload(event.responseObject)) {
       return (
         <td>
           <p
@@ -355,8 +389,11 @@ function renderResponseBodyCell(event: AuditEvent): ReactElement {
     return <td>{NO_BODY_RECORDED_TEXT}</td>;
   }
 
-  if (!isPresentPayload(event.responseObject)) {
+  if (!isRecordedPayload(event.responseObject)) {
     return <td>{NO_BODY_RECORDED_TEXT}</td>;
+  }
+  if (!isPresentPayload(event.responseObject)) {
+    return <td>{UNSERIALIZABLE_BODY_TEXT}</td>;
   }
   return (
     <td>

@@ -108,6 +108,7 @@ import {
   INTERNAL_SERVER_ERROR_STATUS,
   NOT_FOUND_STATUS,
   SERVER_ERROR_CONTROL_STATUS_ERROR,
+  V1_FULL_WILDCARD_ATTRIBUTES,
   V1_PERMITTED_WILDCARD_GROUP,
   V1_PERMITTED_WILDCARD_ROLE,
   V1_PERMITTED_WILDCARD_SUBJECT_KIND,
@@ -116,8 +117,10 @@ import {
   V2_PODS,
   V2_RESTRICTED_WARNINGS,
   V4_AUDIENCES,
+  V4_NAMESPACE,
   V4_OBSERVED_EXPIRY,
   V4_REQUESTED_TTL_SECONDS,
+  V4_SERVICE_ACCOUNT_NAME,
   V7_PRINCIPALS,
   controlStatusFixture,
   controlStatusListFixture,
@@ -871,8 +874,45 @@ function asRecord(value: unknown): JsonRecord | undefined {
 }
 
 /**
- * Narrows an unknown JSON value to a list of strings, keeping order and
- * duplicates.
+ * Names the JSON type of a value, for a rejection message.
+ *
+ * Reports the TYPE and never the value, so a malformed body cannot be echoed
+ * back into a diagnostic. `null` and `array` are named separately from `object`
+ * because JavaScript reports all three as `'object'` and the distinction is
+ * exactly what these validators exist to enforce.
+ *
+ * @param value - any parsed JSON value.
+ * @returns one of `absent`, `null`, `array`, `object`, `string`, `number`,
+ *   `boolean`.
+ */
+function describeJsonType(value: unknown): string {
+  if (value === undefined) {
+    return 'absent';
+  }
+  if (value === null) {
+    return 'null';
+  }
+  if (Array.isArray(value)) {
+    return 'array';
+  }
+  return typeof value;
+}
+
+/**
+ * The outcome of reading one field: either a value or the reason it is not one.
+ *
+ * A discriminated union rather than `T | undefined`, because "absent" and
+ * "present but the wrong shape" must reach DIFFERENT responses. Collapsing them
+ * is the defect class this whole section replaces: a filter or a `?? fallback`
+ * turns a malformed request into a well-formed one and answers it with the
+ * recorded outcome, which is the one response a contract replay must never give.
+ */
+type FieldRead<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly problem: string };
+
+/**
+ * Reads a list of strings, keeping order and duplicates, rejecting anything else.
  *
  * `Array.isArray` alone widens its argument to a list of `any`, which would
  * disable checking for every element read afterwards; re-typing through
@@ -881,27 +921,247 @@ function asRecord(value: unknown): JsonRecord | undefined {
  * (F-004-RQ-001) -- a token additionally bound to a second audience is a
  * different, weaker credential.
  *
+ * Invariant locked: a non-string MEMBER rejects the whole field. Filtering it
+ * out -- which is what this helper used to do -- silently converted
+ * `audiences: [123]` into `[]` and then into the recorded compliant audience
+ * list, so a malformed request received the answer reserved for the recorded
+ * one. Every member is validated and the first offender is named by index and
+ * by type.
+ *
  * @param value - any parsed JSON value.
- * @returns the strings it contained, possibly empty.
+ * @param fieldPath - dotted path of the field, for the rejection message.
+ * @param options.requireNonEmpty - reject an empty list.
+ * @param options.requireNonEmptyMembers - reject an empty-string member.
+ * @returns the strings, or the reason the field is unreadable.
  */
-function asStringList(value: unknown): readonly string[] {
+function readStringList(
+  value: unknown,
+  fieldPath: string,
+  options: {
+    readonly requireNonEmpty?: boolean;
+    readonly requireNonEmptyMembers?: boolean;
+  } = {},
+): FieldRead<readonly string[]> {
   if (!Array.isArray(value)) {
-    return [];
+    return {
+      ok: false,
+      problem: `${fieldPath} expected an array of strings, got ${describeJsonType(value)}`,
+    };
   }
   const items: readonly unknown[] = value;
-  return items.filter((item): item is string => typeof item === 'string');
+  const values: string[] = [];
+  for (const [index, item] of items.entries()) {
+    if (typeof item !== 'string') {
+      return {
+        ok: false,
+        problem:
+          `${fieldPath}[${index}] expected a string, got ${describeJsonType(item)}; ` +
+          'a malformed member rejects the whole list rather than being dropped',
+      };
+    }
+    if (options.requireNonEmptyMembers === true && item === '') {
+      return { ok: false, problem: `${fieldPath}[${index}] is the empty string` };
+    }
+    values.push(item);
+  }
+  if (options.requireNonEmpty === true && values.length === 0) {
+    return { ok: false, problem: `${fieldPath} is empty` };
+  }
+  return { ok: true, value: values };
 }
 
 /**
- * Reads a string field, or `undefined` when it is absent or not a string.
+ * Reads a required non-empty string field, rejecting absence and every other type.
  *
  * @param source - the parsed object.
  * @param key - the field name.
- * @returns the string, or `undefined`.
+ * @param fieldPath - dotted path of the field, for the rejection message.
+ * @returns the string, or the reason the field is unreadable.
  */
-function readString(source: JsonRecord, key: string): string | undefined {
+function readRequiredString(
+  source: JsonRecord,
+  key: string,
+  fieldPath: string,
+): FieldRead<string> {
   const value = source[key];
-  return typeof value === 'string' ? value : undefined;
+  if (typeof value !== 'string') {
+    return {
+      ok: false,
+      problem: `${fieldPath} expected a string, got ${describeJsonType(value)}`,
+    };
+  }
+  if (value === '') {
+    return { ok: false, problem: `${fieldPath} is the empty string` };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Reads a required positive-integer field, rejecting every near-miss.
+ *
+ * Rejects a numeric STRING, a fraction, zero, a negative, `NaN` and `Infinity`.
+ * A quoted `"3600"` is the near-miss that matters most here: it looks right in a
+ * request body, and coercing it would let a client that serialises its TTL as
+ * text receive the response reserved for one that sends a number.
+ *
+ * @param source - the parsed object.
+ * @param key - the field name.
+ * @param fieldPath - dotted path of the field, for the rejection message.
+ * @returns the integer, or the reason the field is unreadable.
+ */
+function readRequiredPositiveInteger(
+  source: JsonRecord,
+  key: string,
+  fieldPath: string,
+): FieldRead<number> {
+  const value = source[key];
+  if (typeof value !== 'number') {
+    return {
+      ok: false,
+      problem: `${fieldPath} expected a number, got ${describeJsonType(value)}`,
+    };
+  }
+  if (!Number.isInteger(value) || value < 1) {
+    return { ok: false, problem: `${fieldPath} expected a positive integer` };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Requires a field to be absent, or present and exactly `null`.
+ *
+ * Kept distinct from "absent" because the two are different claims on the wire
+ * and only one of them is recorded. Used for `boundObjectRef`, where a PRESENT
+ * object would make the issued token bound to a Pod or a Secret -- a different,
+ * narrower credential whose recorded claim shape says the opposite
+ * (F-004-RQ-002: `kubernetes.io.pod` and `kubernetes.io.secret` are both null).
+ *
+ * @param source - the parsed object.
+ * @param key - the field name.
+ * @param fieldPath - dotted path of the field, for the rejection message.
+ * @param consequence - why a present value is a different request.
+ * @returns the rejection reason, or `undefined` when acceptable.
+ */
+function requireAbsentOrNull(
+  source: JsonRecord,
+  key: string,
+  fieldPath: string,
+  consequence: string,
+): string | undefined {
+  const value = source[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return `${fieldPath} must be absent or null, got ${describeJsonType(value)}: ${consequence}`;
+}
+
+/**
+ * Requires a document to declare exactly the expected `apiVersion` and `kind`.
+ *
+ * Invariant locked: a body is answered only when it IS the document the endpoint
+ * replays. A `ConfigMap` posted to the Pod endpoint, or a `SubjectAccessReview`
+ * declaring `authorization.k8s.io/v1beta1`, is a different document; answering
+ * either with the recorded outcome would let a spec prove a control against a
+ * shape the API server never accepted. The real API server rejects both, and
+ * both branches are named separately so a CI reader sees which one fired.
+ *
+ * @param body - the parsed request body.
+ * @param expected.apiVersion - the exact `apiVersion` the endpoint replays.
+ * @param expected.kind - the exact `kind` the endpoint replays.
+ * @returns the rejection reason, or `undefined` when the identity matches.
+ */
+function requireDocumentIdentity(
+  body: JsonRecord,
+  expected: { readonly apiVersion: string; readonly kind: string },
+): string | undefined {
+  const apiVersion = body['apiVersion'];
+  if (apiVersion !== expected.apiVersion) {
+    return (
+      `apiVersion must be ${JSON.stringify(expected.apiVersion)}, got ` +
+      (typeof apiVersion === 'string'
+        ? JSON.stringify(apiVersion)
+        : describeJsonType(apiVersion))
+    );
+  }
+  const kind = body['kind'];
+  if (kind !== expected.kind) {
+    return (
+      `kind must be ${JSON.stringify(expected.kind)}, got ` +
+      (typeof kind === 'string' ? JSON.stringify(kind) : describeJsonType(kind))
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Reads a request body as a JSON object, naming what arrived instead.
+ *
+ * `request.json()` throws on a body that is not JSON at all, so that case is
+ * caught and reported rather than surfacing as an unhandled rejection inside
+ * MSW -- where it would appear as a transport failure and be indistinguishable
+ * from the server being unreachable.
+ *
+ * @param request - the intercepted request.
+ * @returns the object, or the reason it is not one.
+ */
+async function readJsonObjectBody(request: Request): Promise<FieldRead<JsonRecord>> {
+  let parsed: unknown;
+  try {
+    parsed = await request.json();
+  } catch {
+    return { ok: false, problem: 'the request body is not valid JSON' };
+  }
+  const record = asRecord(parsed);
+  if (record === undefined) {
+    return {
+      ok: false,
+      problem: `the request body expected a JSON object, got ${describeJsonType(parsed)}`,
+    };
+  }
+  return { ok: true, value: record };
+}
+
+/**
+ * The `dryRun` query parameter value the recorded creates carry.
+ *
+ * `metav1.CreateOptions{DryRun: []string{"All"}}` -- which every recorded V2
+ * create uses (`podsecurity_test.go` L391-L392) -- serialises as `?dryRun=All`.
+ * `"All"` is the only value the API server accepts, and the recorded posture
+ * payload carries it as an observation (`createOptions.dryRun` = `All`), so it
+ * is a recorded value rather than a chosen one.
+ */
+const DRY_RUN_ALL = 'All';
+
+/**
+ * Requires the request to carry exactly `?dryRun=All`.
+ *
+ * Invariant locked (AAP §0.10.2, `metav1.CreateOptions{DryRun:["All"]}` --
+ * "Validate without persisting"): a create WITHOUT it is a semantically
+ * different request. It runs the same admission chain but PERSISTS the object,
+ * which is why the oracle sets it and why the recorded outcome does not belong
+ * to a request that omits it. Repeating the parameter is rejected too: a second
+ * value means a second dry-run strategy was requested, and the API server
+ * accepts only one.
+ *
+ * @param request - the intercepted request.
+ * @returns the rejection reason, or `undefined` when exactly `All` was requested.
+ */
+function requireDryRunAll(request: Request): string | undefined {
+  const requested = new URL(request.url).searchParams.getAll('dryRun');
+  if (requested.length === 0) {
+    return (
+      'the create must carry ?dryRun=All: the recorded outcome was measured ' +
+      'under DryRun ["All"], which runs the full admission chain and persists ' +
+      'nothing, so a create that would persist has no recorded outcome'
+    );
+  }
+  if (requested.length > 1 || requested[0] !== DRY_RUN_ALL) {
+    return (
+      `?dryRun must be exactly one ${JSON.stringify(DRY_RUN_ALL)}, got ` +
+      JSON.stringify(requested)
+    );
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +1210,126 @@ export interface SubjectAccessReviewStatus {
 }
 
 /**
+ * The `resourceAttributes` members that NARROW a review.
+ *
+ * Enumerated from `authorizationv1.ResourceAttributes`. Each one restricts the
+ * review to a namespace, an object, a version, a subresource or a selected set,
+ * so a review carrying any of them is asking a NARROWER question than the
+ * recorded one -- and a narrower question that comes back `allowed: false`
+ * proves nothing about the full wildcard. Every member is `omitempty` in Go, so
+ * the recorded request serialises without them and an empty string is treated as
+ * equivalent to absent.
+ */
+const NARROWING_RESOURCE_ATTRIBUTES = [
+  'namespace',
+  'name',
+  'version',
+  'subresource',
+  'fieldSelector',
+  'labelSelector',
+] as const;
+
+/**
+ * Validates that a posted review asks EXACTLY the recorded question.
+ *
+ * Invariant locked (F-001-RQ-001, F-001-RQ-002): the review must be the
+ * all-verbs / all-groups / all-resources review both recorded identities are
+ * evaluated against (`rbac_test.go` L1225 and L1243), and it must name the
+ * identity it is asking about. Three failure modes are closed here, and each one
+ * previously produced a plausible-looking decision:
+ *
+ *   * a NARROWER review -- say `verb: 'get'` -- answered with the wildcard rule,
+ *     so `allowed: false` would be read as "the identity holds no wildcard" when
+ *     it only ever meant "the identity cannot get";
+ *   * an ANONYMOUS review, with no `user`, answered from its groups alone;
+ *   * a MALFORMED `groups` list, whose non-string members were dropped, turning
+ *     `['system:masters', 7]` into a readable list and `[7]` into "no groups at
+ *     all" -- which reads as a denial.
+ *
+ * @param body - the parsed request body.
+ * @returns the rejection reason, or `undefined` with the validated identity.
+ */
+function validateSubjectAccessReview(
+  body: JsonRecord,
+):
+  | { readonly ok: true; readonly spec: JsonRecord; readonly groups: readonly string[] }
+  | { readonly ok: false; readonly problem: string } {
+  const identity = requireDocumentIdentity(body, {
+    apiVersion: 'authorization.k8s.io/v1',
+    kind: 'SubjectAccessReview',
+  });
+  if (identity !== undefined) {
+    return { ok: false, problem: identity };
+  }
+  const spec = asRecord(body['spec']);
+  if (spec === undefined) {
+    return {
+      ok: false,
+      problem: `spec expected a JSON object, got ${describeJsonType(body['spec'])}`,
+    };
+  }
+  if (spec['nonResourceAttributes'] !== undefined) {
+    return {
+      ok: false,
+      problem:
+        'spec.nonResourceAttributes must be absent: the recorded review is a ' +
+        'RESOURCE review over all verbs, all API groups and all resources, and a ' +
+        'non-resource review asks a different question',
+    };
+  }
+  const attributes = asRecord(spec['resourceAttributes']);
+  if (attributes === undefined) {
+    return {
+      ok: false,
+      problem:
+        'spec.resourceAttributes expected a JSON object, got ' +
+        describeJsonType(spec['resourceAttributes']),
+    };
+  }
+  for (const [key, required] of Object.entries(V1_FULL_WILDCARD_ATTRIBUTES)) {
+    if (attributes[key] !== required) {
+      return {
+        ok: false,
+        problem:
+          `spec.resourceAttributes.${key} must be ${JSON.stringify(required)}, got ` +
+          (typeof attributes[key] === 'string'
+            ? JSON.stringify(attributes[key])
+            : describeJsonType(attributes[key])) +
+          '; only the full wildcard review has a recorded outcome',
+      };
+    }
+  }
+  for (const key of NARROWING_RESOURCE_ATTRIBUTES) {
+    const narrowing = attributes[key];
+    if (narrowing !== undefined && narrowing !== '') {
+      return {
+        ok: false,
+        problem:
+          `spec.resourceAttributes.${key} must be absent: it narrows the review, ` +
+          'and a narrower review that is refused says nothing about the full wildcard',
+      };
+    }
+  }
+  const user = readRequiredString(spec, 'user', 'spec.user');
+  if (!user.ok) {
+    return {
+      ok: false,
+      problem: `${user.problem}; a review must name the identity it is asking about`,
+    };
+  }
+  if (spec['groups'] === undefined) {
+    return { ok: true, spec, groups: [] };
+  }
+  const groups = readStringList(spec['groups'], 'spec.groups', {
+    requireNonEmptyMembers: true,
+  });
+  if (!groups.ok) {
+    return { ok: false, problem: groups.problem };
+  }
+  return { ok: true, spec, groups: groups.value };
+}
+
+/**
  * Serves an evaluated `SubjectAccessReview`.
  *
  * The decision rule is the recorded one and nothing more: an identity resolves
@@ -957,13 +1337,17 @@ export interface SubjectAccessReviewStatus {
  * {@link V1_PERMITTED_WILDCARD_GROUP}. That is the whole of V1 -- the rule
  * covering all verbs, all API groups and all resources lives only in the
  * {@link V1_PERMITTED_WILDCARD_ROLE} ClusterRole, bound only to that group, as a
- * {@link V1_PERMITTED_WILDCARD_SUBJECT_KIND} subject.
+ * {@link V1_PERMITTED_WILDCARD_SUBJECT_KIND} subject. Both recorded branches stay
+ * reachable, because the decision is read from the posted identity rather than
+ * hard-coded: post the recorded non-privileged subject and the answer is a
+ * denial, post the recorded `system:masters` subject and it is an allowance.
  *
  * The posted `spec` is echoed back verbatim, which is what the API server does
  * and which lets a spec confirm the review it asked for is the review that was
- * answered. A body that is not a readable review is answered with `400 Bad
- * Request` rather than with a plausible-looking decision: for an authorization
- * endpoint, guessing would be the worst possible response.
+ * answered. Anything that is not the recorded review -- a different document, a
+ * narrowed question, an anonymous subject, a malformed group list -- is answered
+ * `400 Bad Request` rather than with a plausible-looking decision: for an
+ * authorization endpoint, guessing would be the worst possible response.
  *
  * @returns the handler.
  */
@@ -971,15 +1355,21 @@ function subjectAccessReviewHandler(): RequestHandler {
   return http.post<Record<string, never>, JsonRecord>(
     SUBJECT_ACCESS_REVIEW_PATH,
     async ({ request }) => {
-      const body = await request.json();
-      const spec = asRecord(body['spec']);
-      if (spec === undefined) {
+      const parsed = await readJsonObjectBody(request);
+      if (!parsed.ok) {
         return badRequestStatus(
-          'SubjectAccessReview in version "v1" cannot be handled: no spec was ' +
-            'submitted, so least-privilege RBAC (F-001-RQ-002) cannot be evaluated',
+          `SubjectAccessReview in version "v1" cannot be handled: ${parsed.problem}, ` +
+            'so least-privilege RBAC (F-001-RQ-002) cannot be evaluated',
         );
       }
-      const groups = asStringList(spec['groups']);
+      const review = validateSubjectAccessReview(parsed.value);
+      if (!review.ok) {
+        return badRequestStatus(
+          `SubjectAccessReview in version "v1" cannot be handled: ${review.problem} ` +
+            '(F-001-RQ-002)',
+        );
+      }
+      const { spec, groups } = review;
       const allowed = groups.includes(V1_PERMITTED_WILDCARD_GROUP);
       const status: SubjectAccessReviewStatus = {
         allowed,
@@ -1016,9 +1406,14 @@ function subjectAccessReviewHandler(): RequestHandler {
 // (L411-L421) -- both asserted through `apierrors.IsForbidden`, i.e. HTTP 403 --
 // while `psa-warn-restricted` ADMITS `warn-pod` (L439-L449) and simultaneously
 // surfaces at least one warning (L451-L455). All three creates use
-// `DryRun: ["All"]`, which runs the full admission chain and persists nothing;
-// the recorded outcome is the same either way, so the `dryRun` query parameter
-// does not change the response served here.
+// `DryRun: ["All"]`, which runs the full admission chain and persists nothing.
+//
+// `?dryRun=All` IS THEREFORE REQUIRED HERE, not merely tolerated. A create
+// without it runs the same admission chain but PERSISTS the pod, which is a
+// different request from the one that was measured -- and the recorded posture
+// payload carries `createOptions.dryRun` = `All` as evidence precisely because
+// the dry-run posture is part of what was observed. A create that would persist
+// is answered `400 Bad Request` rather than with the recorded decision.
 //
 // The 403 message is composed with the API server's own formats, not
 // approximated: `apierrors.NewForbidden` renders
@@ -1038,6 +1433,83 @@ export const PODS_PATH = '/api/v1/namespaces/:namespace/pods';
 const PODS_QUALIFIED_RESOURCE = 'pods';
 
 /**
+ * Validates that a posted Pod is the document whose outcome was recorded.
+ *
+ * Invariant locked (F-002-RQ-001, F-002-RQ-003): the recorded 403 and the
+ * recorded admit-with-warning belong to a real Pod created in a real labelled
+ * namespace. Four failure modes are closed, and each one previously received the
+ * recorded decision:
+ *
+ *   * a document that is not a Pod at all -- a `ConfigMap`, or a Pod declaring a
+ *     version the API server never served;
+ *   * a Pod with no readable `metadata.name`, which fell through to the
+ *     unrecorded-pod branch and reported the empty string as the pod's name;
+ *   * a Pod whose `metadata.namespace` CONTRADICTS the URL. The enforcing labels
+ *     live on the namespace, so a mismatched pair would be admitted under one
+ *     policy and reported under another;
+ *   * a Pod with no containers. PodSecurity evaluates the pod-level fields and
+ *     every container, so an empty pod is not the recorded document -- and
+ *     `privileged` and `hostPID`, the two recorded violations, are read from a
+ *     container and from the pod respectively.
+ *
+ * @param body - the parsed request body.
+ * @param pathNamespace - the namespace from the URL.
+ * @returns the validated `metadata.name`, or the reason the body is unusable.
+ */
+function validatePodCreate(
+  body: JsonRecord,
+  pathNamespace: string,
+): FieldRead<string> {
+  const identity = requireDocumentIdentity(body, { apiVersion: 'v1', kind: 'Pod' });
+  if (identity !== undefined) {
+    return { ok: false, problem: identity };
+  }
+  const metadata = asRecord(body['metadata']);
+  if (metadata === undefined) {
+    return {
+      ok: false,
+      problem: `metadata expected a JSON object, got ${describeJsonType(body['metadata'])}`,
+    };
+  }
+  const name = readRequiredString(metadata, 'name', 'metadata.name');
+  if (!name.ok) {
+    return name;
+  }
+  const declaredNamespace = metadata['namespace'];
+  if (declaredNamespace !== undefined && declaredNamespace !== pathNamespace) {
+    return {
+      ok: false,
+      problem:
+        `metadata.namespace must match the namespace on the URL ` +
+        `(${JSON.stringify(pathNamespace)}), got ` +
+        (typeof declaredNamespace === 'string'
+          ? JSON.stringify(declaredNamespace)
+          : describeJsonType(declaredNamespace)) +
+        '; the enforcing labels live on the namespace, so a mismatched pair would ' +
+        'be admitted under one policy and reported under another',
+    };
+  }
+  const spec = asRecord(body['spec']);
+  if (spec === undefined) {
+    return {
+      ok: false,
+      problem: `spec expected a JSON object, got ${describeJsonType(body['spec'])}`,
+    };
+  }
+  const containers = spec['containers'];
+  if (!Array.isArray(containers) || (containers as readonly unknown[]).length === 0) {
+    return {
+      ok: false,
+      problem:
+        `spec.containers expected a non-empty array, got ${describeJsonType(containers)}; ` +
+        'PodSecurity evaluates the pod-level fields AND every container, so a pod ' +
+        'with no containers is not the document whose outcome was recorded',
+    };
+  }
+  return { ok: true, value: name.value };
+}
+
+/**
  * Serves the recorded admission outcome for a Pod create.
  *
  * Invariant locked: the outcome comes from the recorded {@link V2_PODS} table,
@@ -1048,10 +1520,14 @@ const PODS_QUALIFIED_RESOURCE = 'pods';
  * unrecorded pod has no recorded outcome, so answering it with an invented
  * verdict is precisely what this file exists to prevent.
  *
+ * `?dryRun=All` is REQUIRED, checked before the recorded table is consulted, for
+ * the reason {@link requireDryRunAll} records: every recorded create ran under
+ * `DryRun: ["All"]`, and a create that would persist is a different request.
+ *
  * The admitted response echoes the posted document, which is what a successful
- * (including dry-run) create returns, and attaches one `Warning` header per
- * recorded warning. That is the `warn` outcome as the protocol carries it:
- * neither a clean pass nor a failure.
+ * dry-run create returns, and attaches one `Warning` header per recorded
+ * warning. That is the `warn` outcome as the protocol carries it: neither a clean
+ * pass nor a failure.
  *
  * @returns the handler.
  */
@@ -1059,16 +1535,33 @@ function podAdmissionHandler(): RequestHandler {
   return http.post<{ namespace: string }, JsonRecord>(
     PODS_PATH,
     async ({ request, params }) => {
-      const body = await request.json();
-      const metadata = asRecord(body['metadata']);
-      const name = metadata === undefined ? undefined : readString(metadata, 'name');
+      const parsed = await readJsonObjectBody(request);
+      if (!parsed.ok) {
+        return badRequestStatus(
+          `Pod in version "v1" cannot be handled: ${parsed.problem} (F-002-RQ-001)`,
+        );
+      }
+      const dryRun = requireDryRunAll(request);
+      if (dryRun !== undefined) {
+        return badRequestStatus(
+          `Pod in version "v1" cannot be handled: ${dryRun} (F-002-RQ-001)`,
+        );
+      }
+      const validated = validatePodCreate(parsed.value, params.namespace);
+      if (!validated.ok) {
+        return badRequestStatus(
+          `Pod in version "v1" cannot be handled: ${validated.problem} (F-002-RQ-001)`,
+        );
+      }
+      const body = parsed.value;
+      const name = validated.value;
       const recorded = V2_PODS.find(
         (pod) => pod.name === name && pod.namespace === params.namespace,
       );
       if (recorded === undefined) {
         return badRequestStatus(
           `Pod in version "v1" cannot be handled: no recorded Pod Security ` +
-            `outcome exists for ${JSON.stringify(name ?? '')} in namespace ` +
+            `outcome exists for ${JSON.stringify(name)} in namespace ` +
             `${JSON.stringify(params.namespace)}; the recorded pods are ` +
             `${V2_PODS.map((pod) => `${pod.namespace}/${pod.name}`).join(', ')} ` +
             `(F-002-RQ-001)`,
@@ -1135,16 +1628,111 @@ export const SERVICE_ACCOUNT_TOKEN_PATH =
  */
 export const REDACTED_PROJECTED_TOKEN = 'REDACTED_PROJECTED_TOKEN';
 
+/** Qualified resource of a ServiceAccount: core group, so the bare plural. */
+const SERVICE_ACCOUNTS_QUALIFIED_RESOURCE = 'serviceaccounts';
+
+/**
+ * Validates that a posted `TokenRequest` is the request whose outcome was
+ * recorded.
+ *
+ * Invariant locked (F-004-RQ-001, F-004-RQ-002): NOTHING IS DEFAULTED. This is
+ * the sharpest edge in the file, because the previous shape defaulted a
+ * malformed request to the compliant recorded values -- `audiences: [123]`
+ * became `["api"]` and `expirationSeconds: "3600"` became `3600` -- so a client
+ * that asked for the wrong thing was told it had asked for the right thing. A
+ * mock that answers a malformed audience request with the compliant audience is
+ * worse than no mock: it makes the audience-binding assertion unfalsifiable.
+ *
+ * Absence is rejected as firmly as malformation, and for the same reason rather
+ * than out of strictness for its own sake. A TokenRequest with no `audiences`
+ * yields a token valid for the API server's DEFAULT audiences, and one with no
+ * `expirationSeconds` yields the server's default TTL -- both different, weaker
+ * credentials than the recorded one, and both outside the +-60 s window
+ * (AAP §0.10.2) that only means something when the requested TTL is known. The
+ * recorded request always carries both, so neither has a recorded outcome when
+ * omitted. Each rejection names the recorded value, so a reader learns what to
+ * post rather than only that something was wrong.
+ *
+ * @param body - the parsed request body.
+ * @returns the validated audience list and TTL, or the reason the body is
+ *   unusable.
+ */
+function validateTokenRequest(
+  body: JsonRecord,
+): FieldRead<{ readonly audiences: readonly string[]; readonly expirationSeconds: number }> {
+  const identity = requireDocumentIdentity(body, {
+    apiVersion: 'authentication.k8s.io/v1',
+    kind: 'TokenRequest',
+  });
+  if (identity !== undefined) {
+    return { ok: false, problem: identity };
+  }
+  const spec = asRecord(body['spec']);
+  if (spec === undefined) {
+    return {
+      ok: false,
+      problem: `spec expected a JSON object, got ${describeJsonType(body['spec'])}`,
+    };
+  }
+  const audiences = readStringList(spec['audiences'], 'spec.audiences', {
+    requireNonEmpty: true,
+    requireNonEmptyMembers: true,
+  });
+  if (!audiences.ok) {
+    return {
+      ok: false,
+      problem:
+        `${audiences.problem}; the recorded request carries ` +
+        `${JSON.stringify(V4_AUDIENCES)} and nothing is defaulted, because a token ` +
+        'bound to different audiences is a different credential',
+    };
+  }
+  const expirationSeconds = readRequiredPositiveInteger(
+    spec,
+    'expirationSeconds',
+    'spec.expirationSeconds',
+  );
+  if (!expirationSeconds.ok) {
+    return {
+      ok: false,
+      problem:
+        `${expirationSeconds.problem}; the recorded request carries ` +
+        `${String(V4_REQUESTED_TTL_SECONDS)}, and the +-60 s expiry window is ` +
+        'meaningless unless the requested TTL is known',
+    };
+  }
+  const bound = requireAbsentOrNull(
+    spec,
+    'boundObjectRef',
+    'spec.boundObjectRef',
+    'the recorded request binds no object, which is exactly why the ' +
+      'kubernetes.io.pod and kubernetes.io.secret claims are recorded as null',
+  );
+  if (bound !== undefined) {
+    return { ok: false, problem: bound };
+  }
+  return {
+    ok: true,
+    value: { audiences: audiences.value, expirationSeconds: expirationSeconds.value },
+  };
+}
+
 /**
  * Serves an issued `TokenRequest`.
  *
  * The response echoes the posted `audiences` and `expirationSeconds` verbatim
  * -- unsorted, un-deduplicated and unclamped -- because the returned spec is an
  * echo on the wire and because for an audience list both contents and
- * cardinality are meaningful. When the request omits them, the recorded values
- * are served. `boundObjectRef` is `null`, which is the recorded state: the
- * oracle's request binds no object, which is exactly why the `kubernetes.io.pod`
- * and `kubernetes.io.secret` claims are asserted to be `null` (L1523-L1525).
+ * cardinality are meaningful. Nothing is defaulted and nothing is coerced: see
+ * {@link validateTokenRequest} for why a request that omits or malforms either
+ * field is answered `400 Bad Request` instead. `boundObjectRef` is `null`, which
+ * is the recorded state: the oracle's request binds no object, which is exactly
+ * why the `kubernetes.io.pod` and `kubernetes.io.secret` claims are asserted to
+ * be `null` (L1523-L1525).
+ *
+ * The addressed ServiceAccount is validated before the body is read, because the
+ * token subresource is reached THROUGH an account: a request naming any other
+ * account is answered `404 Not Found`, never a token.
  *
  * @param expirationTimestamp - the RFC 3339 expiry to serve. Defaults to the
  *   recorded compliant value; pass a recorded regression expiry to exercise the
@@ -1156,22 +1744,40 @@ export function serviceAccountTokenHandler(
 ): RequestHandler {
   return http.post<{ namespace: string; name: string }, JsonRecord>(
     SERVICE_ACCOUNT_TOKEN_PATH,
-    async ({ request }) => {
-      const body = await request.json();
-      const spec = asRecord(body['spec']);
-      const requestedAudiences = spec === undefined ? [] : asStringList(spec['audiences']);
-      const requestedTtl = spec === undefined ? undefined : spec['expirationSeconds'];
+    async ({ request, params }) => {
+      if (
+        params.namespace !== V4_NAMESPACE ||
+        params.name !== V4_SERVICE_ACCOUNT_NAME
+      ) {
+        // The subresource is addressed THROUGH the ServiceAccount, so a request
+        // naming an account that does not exist cannot reach token issuance at
+        // all. 404 rather than 400 because the request itself is well formed --
+        // and rather than a token, because issuing one for an arbitrary identity
+        // is the opposite of what F-004-RQ-001 constrains.
+        return notFoundStatus(SERVICE_ACCOUNTS_QUALIFIED_RESOURCE, params.name);
+      }
+      const parsed = await readJsonObjectBody(request);
+      if (!parsed.ok) {
+        return badRequestStatus(
+          `TokenRequest in version "v1" cannot be handled: ${parsed.problem} ` +
+            '(F-004-RQ-001)',
+        );
+      }
+      const validated = validateTokenRequest(parsed.value);
+      if (!validated.ok) {
+        return badRequestStatus(
+          `TokenRequest in version "v1" cannot be handled: ${validated.problem} ` +
+            '(F-004-RQ-001)',
+        );
+      }
       return HttpResponse.json(
         {
           kind: 'TokenRequest',
           apiVersion: 'authentication.k8s.io/v1',
           metadata: {},
           spec: {
-            audiences: requestedAudiences.length === 0 ? V4_AUDIENCES : requestedAudiences,
-            expirationSeconds:
-              typeof requestedTtl === 'number' && Number.isFinite(requestedTtl)
-                ? requestedTtl
-                : V4_REQUESTED_TTL_SECONDS,
+            audiences: validated.value.audiences,
+            expirationSeconds: validated.value.expirationSeconds,
             boundObjectRef: null,
           },
           status: { token: REDACTED_PROJECTED_TOKEN, expirationTimestamp },
@@ -1260,6 +1866,54 @@ const NODES_QUALIFIED_RESOURCE = 'nodes';
 const SECRETS_QUALIFIED_RESOURCE = 'secrets';
 
 /**
+ * Validates that a posted Node status update is the operation whose outcome was
+ * recorded.
+ *
+ * Invariant locked (F-007-RQ-002): the URL names the object the authorization
+ * decision is made ABOUT, so the body must agree with it. The previous shape
+ * echoed any JSON object back as a successful update, which meant an arbitrary
+ * document -- or a Node document naming a DIFFERENT node from the URL -- was
+ * served the acting node's recorded allowance. The real API server rejects that
+ * mismatch with `400 Bad Request` in the same words reproduced below, and it
+ * matters more here than in most places: a body/URL mismatch is precisely how a
+ * cross-node write would be smuggled past a check that only reads the URL.
+ *
+ * @param body - the parsed request body.
+ * @param pathName - the node name from the URL.
+ * @returns the rejection reason, or `undefined` when the update is well formed.
+ */
+function validateNodeStatusUpdate(body: JsonRecord, pathName: string): string | undefined {
+  const identity = requireDocumentIdentity(body, { apiVersion: 'v1', kind: 'Node' });
+  if (identity !== undefined) {
+    return identity;
+  }
+  const metadata = asRecord(body['metadata']);
+  if (metadata === undefined) {
+    return `metadata expected a JSON object, got ${describeJsonType(body['metadata'])}`;
+  }
+  const name = readRequiredString(metadata, 'name', 'metadata.name');
+  if (!name.ok) {
+    return name.problem;
+  }
+  if (name.value !== pathName) {
+    return (
+      `the name of the object (${JSON.stringify(name.value)}) does not match the ` +
+      `name on the URL (${JSON.stringify(pathName)}); the URL names the object the ` +
+      'authorization decision is made about, so a mismatched pair has no recorded ' +
+      'outcome'
+    );
+  }
+  if (asRecord(body['status']) === undefined) {
+    return (
+      `status expected a JSON object, got ${describeJsonType(body['status'])}; ` +
+      'this is the status subresource, and an update carrying no status is not the ' +
+      'operation whose outcome was recorded'
+    );
+  }
+  return undefined;
+}
+
+/**
  * Serves the recorded outcome of a Node status update by the acting node.
  *
  * Invariant locked: the acting node's OWN Node succeeds and the other node's
@@ -1267,7 +1921,9 @@ const SECRETS_QUALIFIED_RESOURCE = 'secrets';
  * F-007-RQ-002: a NotFound means the request never reached an authorization
  * decision, so it proves nothing about node isolation, which is why the oracle
  * creates node2 first. A target outside the recorded pair is answered `400 Bad
- * Request` rather than with a guessed decision.
+ * Request` rather than with a guessed decision, and so is a body that is not a
+ * well-formed status update for the node the URL names -- see
+ * {@link validateNodeStatusUpdate}.
  *
  * @returns the handler.
  */
@@ -1275,7 +1931,19 @@ function nodeStatusHandler(): RequestHandler {
   return http.put<{ name: string }, JsonRecord>(
     NODE_STATUS_PATH,
     async ({ request, params }) => {
-      const body = await request.json();
+      const parsed = await readJsonObjectBody(request);
+      if (!parsed.ok) {
+        return badRequestStatus(
+          `Node in version "v1" cannot be handled: ${parsed.problem} (F-007-RQ-002)`,
+        );
+      }
+      const problem = validateNodeStatusUpdate(parsed.value, params.name);
+      if (problem !== undefined) {
+        return badRequestStatus(
+          `Node in version "v1" cannot be handled: ${problem} (F-007-RQ-002)`,
+        );
+      }
+      const body = parsed.value;
       if (params.name === V7_ACTING_NODE_NAME) {
         return HttpResponse.json(body);
       }
@@ -1308,11 +1976,32 @@ function nodeStatusHandler(): RequestHandler {
  * `V7_NODE_RESTRICTION_NOT_FOUND` posture payload, which carries a finding
  * rather than a verdict of `pass`.
  *
+ * The body is validated exactly as {@link nodeStatusHandler} validates it, so
+ * this variant differs from the recorded handler in ONE respect only -- the
+ * outcome it serves. A shim that accepted anything would let a spec reach the
+ * 404 with a malformed request and conclude that a NotFound had been rendered as
+ * a failure, when a 400 would have produced the same visible result.
+ *
  * @returns the handler, for `server.use(...)`.
  */
 export function crossNodeNotFoundHandler(): RequestHandler {
-  return http.put(NODE_STATUS_PATH, () =>
-    notFoundStatus(NODES_QUALIFIED_RESOURCE, V7_CROSS_NODE_TARGET_NAME),
+  return http.put<{ name: string }, JsonRecord>(
+    NODE_STATUS_PATH,
+    async ({ request, params }) => {
+      const parsed = await readJsonObjectBody(request);
+      if (!parsed.ok) {
+        return badRequestStatus(
+          `Node in version "v1" cannot be handled: ${parsed.problem} (F-007-RQ-002)`,
+        );
+      }
+      const problem = validateNodeStatusUpdate(parsed.value, params.name);
+      if (problem !== undefined) {
+        return badRequestStatus(
+          `Node in version "v1" cannot be handled: ${problem} (F-007-RQ-002)`,
+        );
+      }
+      return notFoundStatus(NODES_QUALIFIED_RESOURCE, V7_CROSS_NODE_TARGET_NAME);
+    },
   );
 }
 
@@ -1518,8 +2207,25 @@ function integrationEncryptionConfigYamlHandler(): RequestHandler {
  * recorded data. Constructing it starts no server, opens no socket, reads no
  * clock and mutates nothing outside itself, so importing this module has no
  * observable effect beyond binding names.
+ *
+ * FROZEN, AND READONLY IN THE TYPE SYSTEM. Both halves are load-bearing, and
+ * neither substitutes for the other. Module scope is shared by every importer in
+ * a spec file, so a mutable exported array is shared mutable state: one
+ * `handlers.push(...)` or `handlers.length = 0` in any spec -- or in any helper a
+ * spec calls -- would change what every LATER spec in that file intercepts,
+ * turning a real failure into a pass with no edit visible at the failure site.
+ * `readonly RequestHandler[]` makes such a call a `tsc --noEmit` error, and
+ * `Object.freeze` makes it throw at runtime under the strict mode ES modules
+ * always run in, so neither a typecheck bypass nor a plain-JavaScript caller can
+ * get past it.
+ *
+ * CONSUMERS SPREAD IT. `web/src/test/msw/server.ts` calls
+ * `setupServer(...handlers)`, which copies into the server's own list, so
+ * `server.use(...)` and `server.resetHandlers()` mutate that copy and never this
+ * value. Any future consumer needing a mutable list must likewise spread into a
+ * fresh array -- `[...handlers, extra]` -- rather than mutate this one.
  */
-export const handlers: RequestHandler[] = [
+export const handlers: readonly RequestHandler[] = Object.freeze([
   // The eight per-control endpoints, then the collection the dashboard reads.
   ...CONTROL_IDS.map((controlId) =>
     controlStatusHandler(controlId, controlStatusFixture(controlId)),
@@ -1538,5 +2244,5 @@ export const handlers: RequestHandler[] = [
   mutatingWebhookConfigurationHandler(),
   deploymentEncryptionConfigHandler(),
   integrationEncryptionConfigYamlHandler(),
-];
+]);
 

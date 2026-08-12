@@ -67,6 +67,24 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+# WHETHER THE CALLER IS AN AUTOMATED RUN, captured BEFORE any library is sourced.
+# hack/lib/node.sh exports CI=true unconditionally so that Vitest can never
+# start a watcher, so ${CI} inside this script says nothing
+# about how it was invoked and cannot be used to tell an interactive developer
+# from CI. The inherited value is therefore recorded here, once, while it still
+# means that. BUILD_NUMBER and PROW_JOB_ID are consulted too: pytest 9 itself
+# treats CI or BUILD_NUMBER, set to a NON-EMPTY value, as "in CI" (AAP §0.2.2.1),
+# and PROW_JOB_ID is what this repository's external test-infra sets.
+KUBE_WEB_CALLER_CI="${CI:-}"
+if [[ -z "${KUBE_WEB_CALLER_CI}" ]]; then
+  KUBE_WEB_CALLER_CI="${BUILD_NUMBER:-}"
+fi
+if [[ -z "${KUBE_WEB_CALLER_CI}" ]]; then
+  KUBE_WEB_CALLER_CI="${PROW_JOB_ID:-}"
+fi
+readonly KUBE_WEB_CALLER_CI
+
+
 KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/../..
 source "${KUBE_ROOT}/hack/lib/init.sh"
 # init.sh sources util, logging, version, golang and etcd, but deliberately not
@@ -103,9 +121,17 @@ KUBE_WEB_COVER_REPORT_DIR=${KUBE_WEB_COVER_REPORT_DIR:-}
 # Vitest --maxWorkers: a worker count or a percentage such as 50%. Empty means
 # no --maxWorkers is passed at all, leaving Vitest's own default in place.
 KUBE_WEB_MAX_WORKERS=${KUBE_WEB_MAX_WORKERS:-}
-# Extra arguments for vitest, expanded with eval below so that embedded quoted
-# strings survive, exactly as KUBE_TEST_ARGS is at hack/make-rules/test.sh:142.
+# Extra arguments for vitest. Tokenised below by kube::test::web::split_args,
+# which honours embedded quoted strings WITHOUT evaluating them; see the note
+# above that function for why `eval` is deliberately not used here even though
+# hack/make-rules/test.sh:143 spells the equivalent that way.
 KUBE_VITEST_ARGS=${KUBE_VITEST_ARGS:-}
+# Whether a run that finds NO specs may be reported as a pass. Default 'n': an
+# empty tier is a test-gate failure, because "the suite passed" and "the suite
+# was deleted" must never look the same to CI. Set to 'y' ONLY as a deliberate,
+# temporary local migration exemption; it is refused when ${CI} is set and it
+# never applies once a target is named.
+KUBE_WEB_ALLOW_NO_TESTS=${KUBE_WEB_ALLOW_NO_TESTS:-n}
 # Create a junit-style XML test report in this directory if set.
 KUBE_JUNIT_REPORT_DIR=${KUBE_JUNIT_REPORT_DIR:-}
 # If KUBE_JUNIT_REPORT_DIR is unset, and ARTIFACTS is set, then have them match.
@@ -158,7 +184,10 @@ ENVIRONMENT
 KUBE_WEB_COVER             'y' collects V8 coverage; default n
 KUBE_WEB_COVER_REPORT_DIR  where to write it; web/coverage/ if unset
 KUBE_WEB_MAX_WORKERS       as -w
-KUBE_VITEST_ARGS           extra vitest arguments, eval-expanded
+KUBE_VITEST_ARGS           extra vitest arguments, quote-aware split and
+                           never shell-evaluated
+KUBE_WEB_ALLOW_NO_TESTS    'y' excuses an EMPTY tier locally; default n, and
+                           refused when CI is set or a target is given
 KUBE_JUNIT_REPORT_DIR      write web.xml here; auto-matches ARTIFACTS
 KUBE_VERBOSE               verbosity of the progress output
 NODE_BIN, NPM_BIN          the node and npm to provision with
@@ -247,13 +276,135 @@ fi
 # as one of its callers).
 kube::node::dirs
 
-# Use eval to preserve embedded quoted strings.
+# The terminator line kube::test::web::split_args writes after the tokens, and
+# the reason its VALUE is irrelevant: the caller drops the last line positionally
+# rather than matching on it, so a token that happens to equal this string is
+# still carried correctly. It is checked only to prove the stream is complete.
+readonly KUBE_ARGS_SENTINEL='--- end of arguments ---'
+
+# kube::test::web::split_args splits $1 into one argument per line on stdout,
+# honouring single quotes, double quotes and backslash escapes, and EVALUATING
+# NOTHING. On return the tokens have been printed, or an actionable message has
+# been written and the status is non-zero because a quote was left unterminated.
 #
+# WHY NOT `eval`. hack/make-rules/test.sh:143 spells this as
+# `eval "testargs=(${KUBE_TEST_ARGS:-})"`, and that is precisely the shape this
+# function exists to avoid: `eval` hands the value of an ENVIRONMENT VARIABLE to
+# the shell parser, so `KUBE_VITEST_ARGS='$(rm -rf ~)'` executes, `>file`
+# redirects and `;` chains - none of which is an argument to Vitest. This
+# tokeniser reproduces the ONE property that spelling was there for (an embedded
+# quoted string such as -t 'renders the pass affordance' arrives as a single
+# argument) and gives up every other shell behaviour on purpose: command
+# substitution, parameter expansion, globbing, redirection and word chaining are
+# inert here and their characters reach Vitest as typed.
+kube::test::web::split_args() {
+  local text=${1:-}
+  local -a tokens=()
+  local token=""
+  local started=false
+  local quote=""
+  local index char
+
+  for (( index = 0; index < ${#text}; index++ )); do
+    char=${text:index:1}
+    if [[ -n "${quote}" ]]; then
+      # Inside quotes: only the matching quote closes, and only a double-quoted
+      # backslash escapes, exactly as bash treats them.
+      if [[ "${char}" == "${quote}" ]]; then
+        quote=""
+      elif [[ "${char}" == $'\\' && "${quote}" == '"' && $((index + 1)) -lt ${#text} ]]; then
+        (( index += 1 ))
+        token+=${text:index:1}
+      else
+        token+=${char}
+      fi
+      continue
+    fi
+    case "${char}" in
+      "'" | '"')
+        quote=${char}
+        started=true
+        ;;
+      $'\\')
+        if [[ $((index + 1)) -lt ${#text} ]]; then
+          (( index += 1 ))
+          token+=${text:index:1}
+          started=true
+        fi
+        ;;
+      ' ' | $'\t' | $'\n' | $'\r')
+        if ${started}; then
+          tokens+=("${token}")
+          token=""
+          started=false
+        fi
+        ;;
+      *)
+        token+=${char}
+        started=true
+        ;;
+    esac
+  done
+
+  if [[ -n "${quote}" ]]; then
+    kube::log::usage \
+      "ERROR: KUBE_VITEST_ARGS ends inside an unterminated ${quote} quote, so its arguments" \
+      "cannot be split unambiguously. Nothing was run and nothing was guessed." \
+      "Close the quote, for example: KUBE_VITEST_ARGS=\"-t 'renders the pass affordance'\""
+    return 1
+  fi
+  if ${started}; then
+    tokens+=("${token}")
+  fi
+
+  # THE CARRIER: a COUNT line, then one token per line, then a fixed sentinel.
+  # Both framing lines are load-bearing, because the caller reads this through a
+  # command substitution, which strips TRAILING newlines:
+  #   * the sentinel keeps a trailing EMPTY token from vanishing, so
+  #     KUBE_VITEST_ARGS="-k ''" still arrives as two arguments rather than a lone -k;
+  #   * the count detects a token containing a newline, the one case in which a
+  #     line-per-token carrier would otherwise be ambiguous.
+  local element
+  printf '%s\n' "${#tokens[@]}"
+  for element in ${tokens[@]+"${tokens[@]}"}; do
+    printf '%s\n' "${element}"
+  done
+  printf '%s\n' "${KUBE_ARGS_SENTINEL}"
+  return 0
+}
+
 # KUBE_VITEST_ARGS contains arguments for vitest (like --silent or
 # --coverage.reporter=text) and is passed before the targets, which is where
 # Vitest's own CLI documents its options.
+#
+# Collected through a command substitution rather than a process substitution so
+# that a rejected value FAILS THE RUN: `mapfile < <(...)` cannot see the child's
+# exit status, and silently dropping a malformed argument list would leave a
+# caller believing their filter was applied.
 vitestargs=()
-eval "vitestargs=(${KUBE_VITEST_ARGS:-})"
+if [[ -n "${KUBE_VITEST_ARGS:-}" ]]; then
+  vitest_arg_stream=$(kube::test::web::split_args "${KUBE_VITEST_ARGS}") || exit 1
+  mapfile -t vitest_arg_lines <<<"${vitest_arg_stream}"
+  vitest_arg_want=${vitest_arg_lines[0]}
+  vitest_arg_last=$(( ${#vitest_arg_lines[@]} - 1 ))
+  if [[ "${vitest_arg_lines[vitest_arg_last]}" != "${KUBE_ARGS_SENTINEL}" ]]; then
+    kube::log::usage \
+      "ERROR: the KUBE_VITEST_ARGS argument stream was truncated before its terminator." \
+      "Nothing was run and nothing was guessed. This is a bug in $0."
+    exit 1
+  fi
+  for (( vitest_arg_i = 1; vitest_arg_i < vitest_arg_last; vitest_arg_i++ )); do
+    vitestargs+=("${vitest_arg_lines[vitest_arg_i]}")
+  done
+  if [[ "${#vitestargs[@]}" -ne "${vitest_arg_want}" ]]; then
+    kube::log::usage \
+      "ERROR: KUBE_VITEST_ARGS split into ${#vitestargs[@]} arguments but ${vitest_arg_want} were expected," \
+      "which happens when one of them contains a newline. Nothing was run and nothing was guessed." \
+      "Remove the newline: Vitest arguments are single-line values."
+    exit 1
+  fi
+  unset vitest_arg_stream vitest_arg_lines vitest_arg_want vitest_arg_last vitest_arg_i
+fi
 
 # kube::test::web::resolve_target echoes the Vitest target $1, rewritten to an
 # absolute path when - and only when - that is needed for it to still mean the
@@ -503,27 +654,47 @@ runTests() {
     worker_args+=("--maxWorkers=${KUBE_WEB_MAX_WORKERS}")
   fi
 
-  # The tier is populated file by file during the migration, so an EMPTY tier is
-  # reported loudly and treated as a pass, exactly as the Python runner treats
-  # pytest's "no tests collected". Vitest exits 1 on an empty run otherwise, and
-  # that would fail `make test-web` for a tier that has nothing to say yet.
+  # AN EMPTY TIER IS A FAILURE, AND THAT IS THE POINT. Vitest exits 1 when it
+  # finds no spec files, and that verdict is deliberately left standing:
+  # --passWithNoTests would make "every spec was deleted" indistinguishable from
+  # "every spec passed", so `make test-web` would stay green over a suite that no
+  # longer exists. Protecting against exactly that loss is why this runner exists
+  # (the Python runner treats pytest's exit 5 the same way).
   #
-  # The exemption is withheld the moment the caller names a target: a mistyped
-  # filter must still fail rather than be excused as an empty tier. That is the
-  # difference between graceful degradation and a suite that can never fail.
+  # The migration exemption is explicit, narrow and refused in CI: it requires
+  # KUBE_WEB_ALLOW_NO_TESTS=y, no target, and ${CI} unset - the same three
+  # conditions the Python runner applies, so the two tiers cannot drift.
   local -a no_tests_args=()
   local spec_count
   spec_count=$(kube::test::web::spec_count)
   if [[ "${spec_count}" -eq 0 ]]; then
-    if [[ $# -eq 0 ]]; then
-      kube::log::status \
-        "WARNING: no Vitest specs found under ${KUBE_WEB_DIR}/src (migration in progress)" \
-        "Expected files matching src/**/*.test.{ts,tsx}, the include pattern in ${KUBE_WEB_DIR}/vitest.config.ts."
-      no_tests_args+=("--passWithNoTests")
-    else
+    if [[ $# -gt 0 ]]; then
       kube::log::status \
         "WARNING: no Vitest specs exist under ${KUBE_WEB_DIR}/src, but targets were given" \
         "The run will report no test files found, which is a genuine failure rather than an empty tier."
+    elif [[ -n "${KUBE_VITEST_ARGS:-}" ]]; then
+      kube::log::usage \
+        "ERROR: no Vitest specs exist under ${KUBE_WEB_DIR}/src, and KUBE_VITEST_ARGS was set" \
+        "(${KUBE_VITEST_ARGS}), so this run made a deliberate selection that can match nothing." \
+        "That is the same class of mistake as a mistyped target, and the empty-tier exemption is" \
+        "deliberately withheld from it."
+      return 1
+    elif [[ ${KUBE_WEB_ALLOW_NO_TESTS} =~ ^[yY]$ ]] && [[ -z "${KUBE_WEB_CALLER_CI}" ]]; then
+      kube::log::status \
+        "WARNING: no Vitest specs found under ${KUBE_WEB_DIR}/src, and" \
+        "KUBE_WEB_ALLOW_NO_TESTS=${KUBE_WEB_ALLOW_NO_TESTS} is excusing it (migration in progress)." \
+        "Expected files matching src/**/*.test.{ts,tsx}, the include pattern in ${KUBE_WEB_DIR}/vitest.config.ts." \
+        "This exemption is local-only: it is ignored when a target is given, and refused when the caller's" \
+        "\${CI}, \${BUILD_NUMBER} or \${PROW_JOB_ID} is set."
+      no_tests_args+=("--passWithNoTests")
+    else
+      kube::log::usage \
+        "ERROR: no Vitest specs exist under ${KUBE_WEB_DIR}/src, so this gate has nothing to run and FAILS." \
+        "A run that collects nothing cannot tell a passing suite from a deleted or renamed one." \
+        "Expected files matching src/**/*.test.{ts,tsx}, the include pattern in ${KUBE_WEB_DIR}/vitest.config.ts." \
+        "While the tier is still being populated file by file, a LOCAL run may pass" \
+        "KUBE_WEB_ALLOW_NO_TESTS=y to accept an empty tier; CI never accepts one."
+      return 1
     fi
   elif [[ ! -f "${KUBE_WEB_DIR}/src/setupTests.ts" ]]; then
     # web/vitest.config.ts declares setupFiles: ['./src/setupTests.ts'], and a

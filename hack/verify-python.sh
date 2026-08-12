@@ -226,10 +226,10 @@ fi
 
 # manifest_pin prints the version python/requirements-test.txt pins for the
 # distribution ${1}. On return that version has been printed, or nothing has
-# been printed because the manifest does not exist or does not pin it - neither
-# of which is an error here, only an absence of evidence. The pattern is anchored
-# at the start of a line so the prose in that file's comments cannot match, and
-# only the first pin is reported because pip honours only the first.
+# been printed because the manifest does not exist or does not pin it. The
+# pattern is anchored at the start of a line so the prose in that file's comments
+# cannot match, and only the first pin is reported because pip honours only the
+# first.
 manifest_pin() {
   local distribution=$1
   local pinned
@@ -241,6 +241,36 @@ manifest_pin() {
     "${KUBE_PYTHON_REQUIREMENTS}")"
   awk 'NR == 1 { print }' <<<"${pinned}"
 }
+
+# THE CONFIGURATION THIS GATE SPEAKS FOR MUST EXIST.
+#
+# Everything below is reached only when there is at least one Python input to
+# check (the empty-tier case has already exited 0 above), and from that point on
+# an absent python/pyproject.toml is a HARD FAILURE rather than a silent
+# fallback. Both tools would otherwise run on their own defaults: ruff would
+# apply its default rule selection instead of the [tool.ruff.lint] tables, and
+# mypy would run without the strict settings, the mypy_path, the
+# namespace_packages and the explicit_package_bases that make this tier
+# typecheckable at all - so the gate would approve code against rules nobody
+# chose. The pinned manifest is required for the same reason: it is what
+# hack/lib/python.sh installs, so without it there is no pinned tool to speak
+# for, and the version assertion below would have nothing to compare against.
+if [[ ! -f "${KUBE_PYTHON_DIR}/pyproject.toml" ]]; then
+  kube::log::usage \
+    "ERROR: ${#targets[@]} Python path(s) exist under ${KUBE_PYTHON_DIR}, but ${KUBE_PYTHON_DIR}/pyproject.toml is missing." \
+    "ruff and mypy take their WHOLE configuration from that file, so running them without it would" \
+    "check this tier against default rule sets rather than the ones it declares - an approval that means nothing." \
+    "Restore python/pyproject.toml from version control before running this gate."
+  exit 1
+fi
+
+if [[ ! -f "${KUBE_PYTHON_REQUIREMENTS}" ]]; then
+  kube::log::usage \
+    "ERROR: ${#targets[@]} Python path(s) exist under ${KUBE_PYTHON_DIR}, but ${KUBE_PYTHON_REQUIREMENTS} is missing." \
+    "That manifest is what hack/lib/python.sh installs, so there is no pinned ruff or mypy for this gate to speak for." \
+    "Restore python/requirements-test.txt from version control before running this gate."
+  exit 1
+fi
 
 # Track every gate that fails, and the aggregate status, so that both gates run
 # and one report names all of the problems - the hack/verify-shellcheck.sh
@@ -266,7 +296,17 @@ for pin in "ruff:${RUFF_VERSION}" "mypy:${MYPY_VERSION}"; do
   distribution="${pin%%:*}"
   expected="${pin##*:}"
   pinned="$(manifest_pin "${distribution}")"
-  if [[ -n "${pinned}" && "${pinned}" != "${expected}" ]]; then
+  if [[ -z "${pinned}" ]]; then
+    # The manifest exists (checked above) but pins nothing for this tool, so
+    # nothing enforces which version gets installed. Fatal for the same reason a
+    # mismatch is: the gate would speak for whatever pip happened to resolve.
+    kube::log::usage \
+      "ERROR: ${KUBE_PYTHON_REQUIREMENTS} pins no version for ${distribution}, so this gate cannot" \
+      "speak for a known version of it. Add '${distribution}==${expected}' to that manifest, which is" \
+      "the single source of truth for what hack/lib/python.sh installs."
+    failed_gates+=("${distribution}-version-pin")
+    res=1
+  elif [[ "${pinned}" != "${expected}" ]]; then
     kube::log::usage \
       "ERROR: ${distribution} is pinned at ${pinned} in ${KUBE_PYTHON_REQUIREMENTS}," \
       "but hack/verify-python.sh expects ${expected}, so this gate no longer speaks for" \
@@ -321,12 +361,20 @@ tool_version() {
 }
 
 # assert_gate_available reports whether the gate ${1}, pinned at ${2}, can run,
-# having been given its installed version as ${3}. On return the status says so;
-# an absent gate has produced an ERROR:-prefixed explanation and a gate whose
-# version has drifted from the pin has produced a WARNING and is still declared
-# usable. This is hack/verify-shellcheck.sh L78-86's detect-then-decide shape:
-# findings from a near version are far more use than no findings at all, and the
-# warning keeps the drift visible instead of silent.
+# having been given its installed version as ${3}. On return the status says so,
+# and an absent gate or a version that has drifted from the pin has produced an
+# ERROR:-prefixed explanation naming the fix.
+#
+# AN EXACT-VERSION MISMATCH IS FATAL, NOT A WARNING. hack/verify-shellcheck.sh
+# L78-86 can afford a detect-then-decide posture because it reports findings from
+# whatever shellcheck it finds; this gate cannot, because its verdict is what
+# `make verify` reports. A near version enforces a near rule set - ruff and mypy
+# both add, remove and re-scope diagnostics between patch releases - so approving
+# on one means approving code that the PINNED tool may reject, which is a gate
+# that speaks for a tool nobody installed. The pinned version is installed by
+# hack/lib/python.sh from ${KUBE_PYTHON_REQUIREMENTS}, so a mismatch means the
+# environment is stale rather than that the developer is unlucky, and rebuilding
+# it is a one-line fix rather than a reason to lower the bar.
 assert_gate_available() {
   local gate=$1
   local pinned=$2
@@ -342,9 +390,11 @@ assert_gate_available() {
 
   if [[ "${installed}" != "${pinned}" ]]; then
     kube::log::usage \
-      "WARNING: using ${gate} ${installed}, but ${pinned} is pinned in ${KUBE_PYTHON_REQUIREMENTS}." \
-      "Findings below may differ from the ones this gate speaks for. Rebuild with:" \
-      "rm -rf ${KUBE_PYTHON_VENV_DIR} && hack/verify-python.sh"
+      "ERROR: ${gate} ${installed} is installed, but ${pinned} is pinned in ${KUBE_PYTHON_REQUIREMENTS}," \
+      "so this gate would speak for a tool that is not the one this tier pins." \
+      "Findings from a different version are not interchangeable: neither approval nor rejection carries over." \
+      "Rebuild the environment with: rm -rf ${KUBE_PYTHON_VENV_DIR} && hack/verify-python.sh"
+    return 1
   fi
   return 0
 }

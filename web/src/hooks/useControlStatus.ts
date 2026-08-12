@@ -457,8 +457,13 @@ export function controlStatusPath(controlId?: ControlId): string {
  * Defined here so that every panel reads its own control the same way instead
  * of re-implementing the lookup. Returns `undefined` when the payload does not
  * mention the control, which a panel must render as an empty or unknown state —
- * never as a pass. If a payload mentions a control more than once, the first
- * occurrence wins and the ordering the server chose is respected.
+ * never as a pass.
+ *
+ * A DUPLICATE CANNOT REACH THIS FUNCTION. {@link parsePayload} refuses a payload that
+ * reports a control more than once, so the `find` below is total: at most one entry can
+ * match. That ordering is deliberate — resolving a contradiction here, by taking the
+ * first occurrence, would make the rendered verdict depend on the order the server
+ * serialised its entries in. The refusal happens where the contradiction is visible.
  *
  * @param controls - the `controls` member of a successful result.
  * @param controlId - the control to look for.
@@ -500,6 +505,53 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Thrown by a reader that found a member of the WRONG TYPE, rather than an absent one.
+ *
+ * Invariant locked: a malformed member fails the whole read. The readers below used to
+ * degrade instead -- filtering an invalid array element out, skipping a malformed
+ * finding, returning an empty list where an unreadable one was found -- and every one of
+ * those degradations produces the same class of defect: a payload the client could not
+ * understand rendered as a payload with nothing to report. For a security-posture view
+ * that is the worst available outcome, because the missing evidence is invisible.
+ *
+ * The concrete case that motivated it: `audiences: ['api', 42]` was filtered to
+ * `['api']`, which then SATISFIED the V4 assertion that the audience is exactly
+ * `['api']`. A token bound to two audiences, one of which the client could not read, was
+ * reported as correctly single-audience. Rejecting the field means the panel reports that
+ * it cannot tell -- which is the truth.
+ *
+ * An exception rather than a `Result` return, because these readers nest four deep
+ * (payload -> control -> evidence -> observation) and threading a failure through every
+ * level would obscure the parsing itself. It is caught in exactly one place,
+ * {@link parsePayload}, and converted into the same `payload` error a syntactically bad
+ * body produces, so nothing escapes into React's render path.
+ */
+class PayloadShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PayloadShapeError';
+  }
+}
+
+/**
+ * Names the JSON type of a value WITHOUT disclosing the value.
+ *
+ * A control payload can carry a subject name, a rendered command line or a claim value,
+ * so a shape complaint has no business quoting what it is complaining about. `null` is
+ * reported as `null` rather than as `object`, because `typeof null === 'object'` is the
+ * classic misreport and the null-versus-absent distinction is load-bearing here.
+ */
+function describeJsonType(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+  if (Array.isArray(value)) {
+    return 'array';
+  }
+  return typeof value;
+}
+
+/**
  * Narrows an unknown JSON value to a read-only list of unknowns.
  *
  * `Array.isArray` alone widens its argument to a list of `any`, which would
@@ -532,16 +584,54 @@ function readFiniteNumber(source: Record<string, unknown>, key: string): number 
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-/** Reads a list of strings, keeping order and duplicates, or `undefined`. */
+/**
+ * Reads a list of strings, keeping order and duplicates, or `undefined` when absent.
+ *
+ * Invariant locked: the list is accepted WHOLE or not at all. A single non-string member
+ * rejects the entire payload rather than being filtered out.
+ *
+ * This is not defensiveness for its own sake -- filtering here was a security defect.
+ * `audiences` is read by the V4 panel, which asserts that a token's audience is EXACTLY
+ * `['api']`; a payload reporting `['api', 42]` describes a token bound to two audiences,
+ * and dropping the unreadable one produced `['api']`, which satisfied the assertion. The
+ * panel then rendered PASS for a token that is not audience-bound. `requirementIds` is
+ * read the same way, where a dropped member silently shrinks the set of requirements a
+ * finding claims to cover.
+ *
+ * A member of the wrong type is also NOT the same as an empty list: `audiences: []` is a
+ * token bound to no audience at all, which is a reportable finding, whereas
+ * `audiences: [42]` is a payload this client cannot interpret. Collapsing the second into
+ * the first would report a defect the server never described.
+ *
+ * @throws PayloadShapeError when the member is a list containing a non-string.
+ */
 function readStringArray(
   source: Record<string, unknown>,
   key: string,
 ): readonly string[] | undefined {
-  const items = asArray(source[key]);
-  if (items === undefined) {
+  const raw = source[key];
+  if (raw === undefined || raw === null) {
     return undefined;
   }
-  return items.filter((item): item is string => typeof item === 'string');
+  const items = asArray(raw);
+  if (items === undefined) {
+    throw new PayloadShapeError(
+      `"${key}" is a ${describeJsonType(raw)}, but the contract declares a list of ` +
+        'strings. Reading a scalar as a one-element list would invent a value the server ' +
+        'did not report.',
+    );
+  }
+  for (const [index, item] of items.entries()) {
+    if (typeof item !== 'string') {
+      throw new PayloadShapeError(
+        `"${key}[${String(index)}]" is a ${describeJsonType(item)}, not a string. The ` +
+          'whole list is rejected rather than the member being dropped: a shortened list ' +
+          'is indistinguishable from a complete one once rendered, and for "audiences" a ' +
+          'dropped member turns a multi-audience token into an apparently bound one.',
+      );
+    }
+  }
+  return items as readonly string[];
 }
 
 
@@ -571,12 +661,17 @@ function parseVerdict(value: unknown): ControlVerdict {
  * @returns the finding, or `undefined` when the entry carries nothing
  *   renderable at all.
  */
-function parseFinding(value: unknown): ControlFinding | undefined {
+function parseFinding(value: unknown, index: number): ControlFinding {
   if (typeof value === 'string') {
     return { message: value };
   }
   if (!isRecord(value)) {
-    return undefined;
+    throw new PayloadShapeError(
+      `"findings[${String(index)}]" is a ${describeJsonType(value)}; a finding is either ` +
+        'a string message or an object carrying one. It is rejected rather than skipped ' +
+        'because a finding is a REPORTED DEFECT: dropping it removes the one piece of ' +
+        'evidence that would have stopped the control rendering as a pass.',
+    );
   }
   return {
     message: readString(value, 'message') ?? UNREADABLE_FINDING,
@@ -588,23 +683,33 @@ function parseFinding(value: unknown): ControlFinding | undefined {
 /**
  * Reads every finding, in order.
  *
- * Invariant locked: findings accumulate. A malformed entry is skipped, never
- * treated as the end of the list, because the Go oracle's `t.Errorf` semantics
- * require that all of the remaining offenders still be reported
- * (`rbac_test.go` L1274-1278, L1286-1297).
+ * Invariant locked: findings ACCUMULATE and none is ever lost. The Go oracle's `t.Errorf`
+ * semantics require that every offender be reported in one run (`rbac_test.go` L1274-1278,
+ * L1286-1297), so the list is read whole rather than truncated at the first surprise.
+ *
+ * A malformed ENTRY is now a payload error rather than a skipped one, and the difference
+ * is the point. A finding is a reported DEFECT; it is the evidence that stops a control
+ * rendering as a pass. Silently dropping one produced the exact inversion the accumulate
+ * semantics exist to prevent -- a control with three findings, one of them unreadable,
+ * rendered two -- and a control whose ONLY finding was unreadable rendered as clean.
+ *
+ * An absent `findings` member is still absent, not an error: a control with nothing to
+ * report legitimately omits it. Only a member that IS present and cannot be read fails.
+ *
+ * @throws PayloadShapeError when `findings` is present but not a list, or contains an
+ *   entry that is neither a string nor an object.
  */
 function parseFindings(value: unknown): readonly ControlFinding[] {
-  const items = asArray(value);
-  if (items === undefined) {
+  if (value === undefined || value === null) {
     return NO_FINDINGS;
   }
-  const findings: ControlFinding[] = [];
-  for (const item of items) {
-    const finding = parseFinding(item);
-    if (finding !== undefined) {
-      findings.push(finding);
-    }
+  const items = asArray(value);
+  if (items === undefined) {
+    throw new PayloadShapeError(
+      `"findings" is a ${describeJsonType(value)}, but the contract declares a list.`,
+    );
   }
+  const findings: ControlFinding[] = items.map((item, index) => parseFinding(item, index));
   return findings.length === 0 ? NO_FINDINGS : findings;
 }
 
@@ -616,22 +721,39 @@ function parseFindings(value: unknown): readonly ControlFinding[] {
  * structured warning is not silently dropped.
  */
 function parseWarnings(value: unknown): readonly string[] {
-  const items = asArray(value);
-  if (items === undefined) {
+  if (value === undefined || value === null) {
     return NO_WARNINGS;
   }
+  const items = asArray(value);
+  if (items === undefined) {
+    throw new PayloadShapeError(
+      `"warnings" is a ${describeJsonType(value)}, but the contract declares a list.`,
+    );
+  }
   const warnings: string[] = [];
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     if (typeof item === 'string') {
       warnings.push(item);
       continue;
     }
     if (isRecord(item)) {
       const message = readString(item, 'message');
-      if (message !== undefined) {
-        warnings.push(message);
+      if (message === undefined) {
+        throw new PayloadShapeError(
+          `"warnings[${String(index)}]" is an object with no string "message", so the ` +
+            'warning cannot be rendered. It is rejected rather than dropped because the ' +
+            'V2 control turns on a warning being PRESENT: under warn=restricted the pod ' +
+            'is admitted, and only the warning distinguishes a working Pod Security ' +
+            'plugin from an absent one. A dropped warning inverts that verdict.',
+        );
       }
+      warnings.push(message);
+      continue;
     }
+    throw new PayloadShapeError(
+      `"warnings[${String(index)}]" is a ${describeJsonType(item)}; a warning is either a ` +
+        'string or an object carrying a string "message".',
+    );
   }
   return warnings.length === 0 ? NO_WARNINGS : warnings;
 }
@@ -645,28 +767,62 @@ function parseWarnings(value: unknown): readonly string[] {
  * (`svcaccttoken_test.go` L1524-1525).
  */
 function parseObservations(value: unknown): readonly ControlObservation[] | undefined {
-  const items = asArray(value);
-  if (items === undefined) {
+  if (value === undefined || value === null) {
     return undefined;
   }
+  const items = asArray(value);
+  if (items === undefined) {
+    throw new PayloadShapeError(
+      `"observations" is a ${describeJsonType(value)}, but the contract declares a list.`,
+    );
+  }
   const observations: ControlObservation[] = [];
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
+    const at = `"observations[${String(index)}]"`;
     if (!isRecord(item)) {
-      continue;
+      throw new PayloadShapeError(
+        `${at} is a ${describeJsonType(item)}; an observation is an object carrying a ` +
+          'string "label" and a "value".',
+      );
     }
     const label = readString(item, 'label');
-    if (label === undefined || !('value' in item)) {
-      continue;
+    if (label === undefined) {
+      throw new PayloadShapeError(
+        `${at} has no string "label", so the measurement it carries cannot be identified. ` +
+          'A measured fact whose identity is unknown is unusable evidence, and dropping it ' +
+          'would leave the panel unable to distinguish "not measured" from ' +
+          '"measured but unreadable" -- the two demand different verdicts.',
+      );
+    }
+    if (!('value' in item)) {
+      throw new PayloadShapeError(
+        `${at} (labelled "${label}") carries no "value" member. "Reported as null" and ` +
+          '"not reported" are different claims and the V4 control turns on the difference ' +
+          `(svcaccttoken_test.go L1524-1525), so an observation with no value at all is ` +
+          'rejected rather than being read as either one.',
+      );
     }
     const measured = item['value'];
     if (
-      measured === null ||
-      typeof measured === 'string' ||
-      typeof measured === 'number' ||
-      typeof measured === 'boolean'
+      measured !== null &&
+      typeof measured !== 'string' &&
+      typeof measured !== 'number' &&
+      typeof measured !== 'boolean'
     ) {
-      observations.push({ label, value: measured });
+      throw new PayloadShapeError(
+        `${at} (labelled "${label}") has a value of type ${describeJsonType(measured)}; ` +
+          'a measurement is a string, a finite number, a boolean or null. It is rejected ' +
+          'rather than dropped because a MISSING observation reads as "the control did ' +
+          'not measure this", which is a claim the server never made.',
+      );
     }
+    if (typeof measured === 'number' && !Number.isFinite(measured)) {
+      throw new PayloadShapeError(
+        `${at} (labelled "${label}") is a non-finite number, which compares absurdly ` +
+          'against every bound the panels assert.',
+      );
+    }
+    observations.push({ label, value: measured });
   }
   return observations;
 }
@@ -804,8 +960,28 @@ function parsePayload(body: unknown, path: string): PayloadOutcome {
     };
   }
   const controls: ControlStatus[] = [];
+  // Records the FIRST index each control was seen at, so a duplicate report can name
+  // both positions rather than only the second.
+  const seenAt = new Map<ControlId, number>();
   for (const [index, entry] of entries.entries()) {
-    const control = parseControlStatus(entry);
+    let control: ControlStatus | undefined;
+    try {
+      control = parseControlStatus(entry);
+    } catch (error) {
+      if (!(error instanceof PayloadShapeError)) {
+        // Not a shape complaint: an unexpected fault has no business being reported as a
+        // malformed payload, so it propagates to the caller's own failure handling.
+        throw error;
+      }
+      return {
+        ok: false,
+        message:
+          `Entry ${index} of the response from ${path} is malformed: ${error.message} ` +
+          'The response is refused rather than partially rendered, because a control ' +
+          'this client could not read is indistinguishable, once rendered, from a ' +
+          'control with nothing to report.',
+      };
+    }
     if (control === undefined) {
       return {
         ok: false,
@@ -815,6 +991,24 @@ function parsePayload(body: unknown, path: string): PayloadOutcome {
           'be trusted to describe them.',
       };
     }
+    const firstIndex = seenAt.get(control.controlId);
+    if (firstIndex !== undefined) {
+      // A DUPLICATE IS A CONTRADICTION, NOT A CHOICE. Two entries for one control tell
+      // the reader two things about it, and `selectControlStatus` takes the first -- so
+      // which one is believed depends on the order the server serialised them in. A
+      // payload reporting V3 as `fail` and then again as `pass` used to render PASS.
+      // Refusing is the only answer that neither invents agreement nor picks a winner by
+      // list position.
+      return {
+        ok: false,
+        message:
+          `The response from ${path} reports control ${control.controlId} more than ` +
+          `once, at entries ${firstIndex} and ${index}. Which one is authoritative ` +
+          'cannot be determined, and resolving it by list order would make the rendered ' +
+          'verdict depend on serialisation order rather than on evidence.',
+      };
+    }
+    seenAt.set(control.controlId, index);
     controls.push(control);
   }
   return { ok: true, controls };
@@ -1076,4 +1270,3 @@ export function useControlStatus(controlId?: ControlId): UseControlStatusResult 
     return { status: 'loading', refresh };
   }, [snapshot, refresh]);
 }
-

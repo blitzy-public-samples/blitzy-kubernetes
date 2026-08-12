@@ -101,6 +101,16 @@ limitations under the License.
 import { useId, useState, type ChangeEvent, type ReactElement } from 'react';
 
 import {
+  readBoolean,
+  readNumber,
+  readString,
+  selectObservation,
+  strictestVerdict,
+  type EffectiveVerdict,
+} from '../domain/evidence';
+import { V8_OBSERVATIONS } from '../domain/observationIds';
+import { ETCD_PLAINTEXT_ENDPOINT, ETCD_TLS_ENDPOINT } from '../domain/securityConstants';
+import {
   selectControlStatus,
   useControlStatus,
   type ControlFinding,
@@ -110,6 +120,7 @@ import {
   type ControlVerdict,
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
+import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
 
 /**
  * The control this panel reports on.
@@ -285,8 +296,13 @@ const PLAINTEXT_FALLBACK_WARNING =
   'ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, ' +
   'mTLS between etcd server and kube-apiserver is not enabled.';
 
-/** The plaintext endpoint both fallback scenarios configure (L42). */
-const PLAINTEXT_ENDPOINT = 'http://127.0.0.1:2379';
+/**
+ * The plaintext endpoint both fallback scenarios configure (L42).
+ *
+ * Read from the shared domain module rather than written a second time, so the
+ * literal has ONE definition site across the tier (AAP §0.5.5).
+ */
+const PLAINTEXT_ENDPOINT = ETCD_PLAINTEXT_ENDPOINT;
 
 /** What the deployment does once the fallback branch has run. */
 const PLAINTEXT_OUTCOME =
@@ -319,8 +335,8 @@ export const ETCD_TRANSPORT_SCENARIOS: readonly EtcdTransportScenario[] = [
     verdictReason:
       'The API-server-to-etcd transport is mutually authenticated over https, ' +
       'which is the required posture.',
-    endpoint: 'https://127.0.0.1:2379',
-    etcdServersFlag: '--etcd-servers=https://127.0.0.1:2379',
+    endpoint: ETCD_TLS_ENDPOINT,
+    etcdServersFlag: `--etcd-servers=${ETCD_TLS_ENDPOINT}`,
     tlsFlags: ETCD_MTLS_FLAGS,
     operatorMessage: null,
     exitCode: null,
@@ -379,7 +395,7 @@ export const ETCD_TRANSPORT_SCENARIOS: readonly EtcdTransportScenario[] = [
       'The transport is plaintext. The opt-out is documented for local and ' +
       'development use, so this is neither a clean pass nor a control failure.',
     endpoint: PLAINTEXT_ENDPOINT,
-    etcdServersFlag: '--etcd-servers=http://127.0.0.1:2379',
+    etcdServersFlag: `--etcd-servers=${PLAINTEXT_ENDPOINT}`,
     tlsFlags: [],
     operatorMessage: PLAINTEXT_FALLBACK_WARNING,
     exitCode: null,
@@ -402,7 +418,7 @@ export const ETCD_TRANSPORT_SCENARIOS: readonly EtcdTransportScenario[] = [
       'The same plaintext transport as the explicit opt-out, reached without ' +
       'anyone opting in. A plaintext endpoint is never a clean pass.',
     endpoint: PLAINTEXT_ENDPOINT,
-    etcdServersFlag: '--etcd-servers=http://127.0.0.1:2379',
+    etcdServersFlag: `--etcd-servers=${PLAINTEXT_ENDPOINT}`,
     tlsFlags: [],
     operatorMessage: PLAINTEXT_FALLBACK_WARNING,
     exitCode: null,
@@ -485,15 +501,15 @@ const VERDICT_DESCRIPTION: Record<ControlVerdict, string> = {
 };
 
 /**
- * Substituted for `refresh` when a caller hands this panel a pre-resolved
- * {@link ControlStatus} and no `onRefresh` handler.
+ * Occupies the required `refresh` member when a caller hands this panel a
+ * pre-resolved {@link ControlStatus}.
  *
  * It intentionally performs no work, and that is the correct behaviour rather
  * than a gap: a pre-resolved status did not come from a request this panel
- * issued, so there is nothing for it to re-issue. The re-request button stays
- * present and keyboard-operable in that state — never disabled, so an
- * interaction test can always reach it — and a caller that wants the click to
- * mean something passes `onRefresh`.
+ * issued, so there is nothing for it to re-issue. It is also never the handler
+ * the button calls — that branch resolves refresh availability from the caller's
+ * own handler, so with no handler the button is DISABLED and carries a title
+ * saying why, rather than looking operable and doing nothing.
  */
 const NO_REFRESH_AVAILABLE = (): void => undefined;
 
@@ -520,6 +536,431 @@ function formatObservationValue(value: ControlObservation['value']): string {
   return typeof value === 'string' ? value : String(value);
 }
 
+/** The scheme prefix a mutually authenticated etcd endpoint carries. */
+const TLS_SCHEME = 'https://';
+
+/** The scheme prefix a plaintext etcd endpoint carries. Never a pass. */
+const PLAINTEXT_SCHEME = 'http://';
+
+/** Shared empty list, so a payload with no observations allocates nothing. */
+const NO_OBSERVATIONS: readonly ControlObservation[] = Object.freeze([]);
+
+/**
+ * Which branch of `configure-etcd-params` the reported evidence describes.
+ *
+ * The three input branches of the shell are `all`, `none` and `partial`
+ * credentials, and the `none` branch splits on the opt-out, so four reachable
+ * outcomes plus `indeterminate` for evidence that does not identify a branch at
+ * all. Named after the outcome rather than the input, because the outcome is what
+ * a reader has to act on.
+ */
+type EtcdBranch =
+  | 'mutual-tls'
+  | 'fail-closed'
+  | 'permitted-plaintext'
+  | 'partial-credentials'
+  | 'indeterminate';
+
+/**
+ * One measured fact the V8 verdict rests on, and what became of it.
+ *
+ * `indeterminate` and `violated` are kept apart deliberately: the first is a gap in
+ * the report and withholds a pass, the second is a finding and forces a failure.
+ */
+interface EtcdMeasurement {
+  /** The observation identity, so a row cites exactly what it read. */
+  readonly identity: string;
+  /** What the measurement establishes, in a reader's words. */
+  readonly title: string;
+  /** The outcome. */
+  readonly result: 'satisfied' | 'violated' | 'indeterminate';
+  /** Why, in one sentence. */
+  readonly detail: string;
+}
+
+/** Everything the panel derives from one payload's evidence. */
+interface EtcdTransportEvidence {
+  /** See {@link EtcdBranch}. */
+  readonly branch: EtcdBranch;
+  /** One row per measurement the branch requires. */
+  readonly measurements: readonly EtcdMeasurement[];
+  /** The verdict the evidence alone supports. */
+  readonly verdict: EffectiveVerdict;
+}
+
+/** Builds one measurement row. */
+function measurement(
+  identity: string,
+  title: string,
+  result: EtcdMeasurement['result'],
+  detail: string,
+): EtcdMeasurement {
+  return { identity, title, result, detail };
+}
+
+/**
+ * Requires an observation to be a string beginning with `expected`.
+ *
+ * Reported `null` is a positive statement that no endpoint was configured, which is
+ * correct on the two aborting branches and a violation on the mutual-TLS branch, so
+ * it is distinguished from silence rather than folded into it.
+ */
+function requireEndpointScheme(
+  observations: readonly ControlObservation[],
+  expected: string,
+  title: string,
+): EtcdMeasurement {
+  const identity = V8_OBSERVATIONS.etcdServers;
+  const found = selectObservation(observations, identity);
+  if (found.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', found.reason);
+  }
+  if (found.value.value === null) {
+    return measurement(
+      identity,
+      title,
+      'violated',
+      'No endpoint was configured, so no mutually authenticated transport exists.',
+    );
+  }
+  const endpoint = readString(observations, identity);
+  if (endpoint.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', endpoint.reason);
+  }
+  if (endpoint.value.startsWith(expected)) {
+    return measurement(
+      identity,
+      title,
+      'satisfied',
+      `The endpoint is addressed over ${expected.replace('://', '')}.`,
+    );
+  }
+  return measurement(
+    identity,
+    title,
+    'violated',
+    endpoint.value.startsWith(PLAINTEXT_SCHEME)
+      ? 'The endpoint is plaintext, so the transport is neither authenticated nor encrypted.'
+      : 'The endpoint does not use the required scheme.',
+  );
+}
+
+/** Requires the endpoint to be absent, which is what an aborting branch produces. */
+function requireNoEndpoint(observations: readonly ControlObservation[]): EtcdMeasurement {
+  const identity = V8_OBSERVATIONS.etcdServers;
+  const title = 'no etcd endpoint was configured';
+  const found = selectObservation(observations, identity);
+  if (found.state === 'unreported') {
+    return measurement(
+      identity,
+      title,
+      'satisfied',
+      'No endpoint was reported, which is consistent with a branch that aborts before ' +
+        'configuring one.',
+    );
+  }
+  if (found.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', found.reason);
+  }
+  if (found.value.value === null) {
+    return measurement(identity, title, 'satisfied', 'The endpoint is explicitly absent.');
+  }
+  return measurement(
+    identity,
+    title,
+    'violated',
+    'An endpoint was configured on a branch that must abort before configuring one, so the ' +
+      'deployment continued instead of failing closed.',
+  );
+}
+
+/** Requires one of the three mutual-TLS flags to carry a path. */
+function requireTlsFlag(
+  observations: readonly ControlObservation[],
+  identity: string,
+): EtcdMeasurement {
+  const title = `${identity} is supplied`;
+  const found = selectObservation(observations, identity);
+  if (found.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', found.reason);
+  }
+  if (found.value.value === null) {
+    return measurement(
+      identity,
+      title,
+      'violated',
+      'The flag was reported as absent, so the transport is missing one of the three ' +
+        'credentials mutual TLS requires.',
+    );
+  }
+  const path = readString(observations, identity);
+  if (path.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', path.reason);
+  }
+  return path.value.length > 0
+    ? measurement(identity, title, 'satisfied', 'The flag carries a path.')
+    : measurement(
+        identity,
+        title,
+        'violated',
+        'The flag was reported empty, which configures no credential at all.',
+      );
+}
+
+/**
+ * Requires the reported exit code to be exactly `expected`.
+ *
+ * THE PARTIAL-CREDENTIAL BRANCH IS THE SUBTLE ONE (AAP §0.10.2): a half-configured
+ * deployment must exit 1 unconditionally, and the opt-out is not even consulted
+ * there, so observing it continue is a distinct failure from observing plaintext
+ * with no credentials at all.
+ */
+function requireExitCode(
+  observations: readonly ControlObservation[],
+  expected: number,
+  title: string,
+): EtcdMeasurement {
+  const identity = V8_OBSERVATIONS.exitCode;
+  const observed = readNumber(observations, identity);
+  if (observed.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', observed.reason);
+  }
+  if (observed.value === expected) {
+    return measurement(
+      identity,
+      title,
+      'satisfied',
+      `configure-etcd-params exited ${String(expected)}, as the branch requires.`,
+    );
+  }
+  return measurement(
+    identity,
+    title,
+    'violated',
+    `configure-etcd-params exited ${String(observed.value)} where ${String(expected)} is ` +
+      'required, so the boot did not behave as the control demands.',
+  );
+}
+
+/** Requires the reported outcome word to be exactly `expected`. */
+function requireOutcome(
+  observations: readonly ControlObservation[],
+  expected: string,
+): EtcdMeasurement {
+  const identity = V8_OBSERVATIONS.outcome;
+  const title = `the reported outcome is ${expected}`;
+  const found = selectObservation(observations, identity);
+  if (found.state === 'unreported') {
+    return measurement(identity, title, 'satisfied', 'The outcome was not reported separately.');
+  }
+  const observed = readString(observations, identity);
+  if (observed.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', observed.reason);
+  }
+  return observed.value === expected
+    ? measurement(identity, title, 'satisfied', `The outcome is ${expected}.`)
+    : measurement(
+        identity,
+        title,
+        'violated',
+        `The outcome is ${observed.value}, not ${expected}.`,
+      );
+}
+
+/**
+ * Reads which branch the evidence describes.
+ *
+ * `credentials supplied` is the discriminator, exactly as the shell's own `if` chain
+ * is, and only the three words the shell can produce are recognised. Anything else —
+ * a fourth word, a boolean, a duplicate, silence — is `indeterminate`, because a
+ * branch this panel cannot name is one whose requirements it cannot check.
+ */
+function readBranch(observations: readonly ControlObservation[]): EtcdBranch {
+  const credentials = readString(observations, V8_OBSERVATIONS.credentialsSupplied);
+  if (credentials.state !== 'reported') {
+    return 'indeterminate';
+  }
+  if (credentials.value === 'all') {
+    return 'mutual-tls';
+  }
+  if (credentials.value === 'partial') {
+    return 'partial-credentials';
+  }
+  if (credentials.value !== 'none') {
+    return 'indeterminate';
+  }
+  const permitted = readBoolean(observations, V8_OBSERVATIONS.insecureFallbackPermitted);
+  if (permitted.state !== 'reported') {
+    return 'indeterminate';
+  }
+  return permitted.value ? 'permitted-plaintext' : 'fail-closed';
+}
+
+/**
+ * Derives the V8 evidence verdict from the branch the payload describes.
+ *
+ * INVARIANT LOCKED, and it is the rule the whole panel is built around: A PLAINTEXT
+ * ETCD ENDPOINT IS NEVER A PASS. The four branches and what each requires:
+ *
+ *   * `mutual-tls` — an `https` endpoint AND all three credential flags. This is the
+ *     required posture, and it is the only branch that can be a pass on the strength
+ *     of a configured endpoint.
+ *   * `fail-closed` — exit 1, no endpoint, outcome `fail-closed`. A PASS for the
+ *     control: refusing to start is F-008-RQ-003 working, not a regression. Exit 0
+ *     here is a VIOLATION — it is the silent downgrade the control exists to
+ *     prevent.
+ *   * `partial-credentials` — exit 1 and no endpoint. Exit 0 is a violation, and no
+ *     opt-out reaches this branch, so it is never a partial pass.
+ *   * `permitted-plaintext` — WARN at best. The operator asked for it, so it is not a
+ *     control failure, but the transport genuinely is unauthenticated and a warning
+ *     is the strongest thing that can honestly be said.
+ *
+ * A plaintext endpoint observed on any OTHER branch is a failure, checked after the
+ * branch requirements so that no branch can quietly permit one.
+ */
+function buildEtcdEvidence(observations: readonly ControlObservation[]): EtcdTransportEvidence {
+  const branch = readBranch(observations);
+  const readable = selectObservation(observations, V8_OBSERVATIONS.renderedCommandReadable);
+  const measurements: EtcdMeasurement[] = [];
+
+  if (readable.state !== 'unreported') {
+    const flag = readBoolean(observations, V8_OBSERVATIONS.renderedCommandReadable);
+    measurements.push(
+      flag.state !== 'reported'
+        ? measurement(
+            V8_OBSERVATIONS.renderedCommandReadable,
+            'the rendered API server command was legible',
+            'indeterminate',
+            flag.reason,
+          )
+        : measurement(
+            V8_OBSERVATIONS.renderedCommandReadable,
+            'the rendered API server command was legible',
+            flag.value ? 'satisfied' : 'indeterminate',
+            flag.value
+              ? 'The command was read, so the etcd flags below were observed rather than assumed.'
+              : 'The command was not readable, so no etcd flag was observed and the transport ' +
+                'is unknown rather than assumed to be mutually authenticated.',
+          ),
+    );
+  }
+
+  if (branch === 'mutual-tls') {
+    measurements.push(
+      requireEndpointScheme(observations, TLS_SCHEME, `etcd is addressed over ${TLS_SCHEME}`),
+      requireTlsFlag(observations, V8_OBSERVATIONS.etcdCaFile),
+      requireTlsFlag(observations, V8_OBSERVATIONS.etcdCertFile),
+      requireTlsFlag(observations, V8_OBSERVATIONS.etcdKeyFile),
+      requireExitCode(observations, 0, 'the API server was allowed to start'),
+    );
+  } else if (branch === 'fail-closed') {
+    measurements.push(
+      requireExitCode(observations, 1, 'the boot aborted rather than downgrading'),
+      requireNoEndpoint(observations),
+      requireOutcome(observations, 'fail-closed'),
+    );
+  } else if (branch === 'partial-credentials') {
+    measurements.push(
+      requireExitCode(observations, 1, 'a half-configured deployment aborted the boot'),
+      requireNoEndpoint(observations),
+    );
+  } else if (branch === 'permitted-plaintext') {
+    measurements.push(
+      requireEndpointScheme(
+        observations,
+        PLAINTEXT_SCHEME,
+        'the explicitly permitted plaintext endpoint was configured',
+      ),
+      requireOutcome(observations, 'plaintext-loopback'),
+    );
+  } else {
+    measurements.push(
+      measurement(
+        V8_OBSERVATIONS.credentialsSupplied,
+        'the branch configure-etcd-params took is identified',
+        'indeterminate',
+        'The evidence does not identify which branch ran, so the requirements of a branch ' +
+          'cannot be checked and no posture is confirmed.',
+      ),
+    );
+  }
+
+  const violated = measurements.some((entry) => entry.result === 'violated');
+  const allSatisfied = measurements.every((entry) => entry.result === 'satisfied');
+  let verdict: EffectiveVerdict;
+  if (violated) {
+    verdict = 'fail';
+  } else if (branch === 'permitted-plaintext') {
+    // Never a pass: the transport is unauthenticated even though it was asked for.
+    verdict = allSatisfied ? 'warn' : 'unknown';
+  } else {
+    verdict = allSatisfied ? 'pass' : 'unknown';
+  }
+
+  // No separate "and a plaintext endpoint is never a pass" override is applied here,
+  // and none is needed: every branch that can reach `pass` requires either an `https`
+  // endpoint (`mutual-tls`) or the ABSENCE of one (`fail-closed`, `partial-credentials`),
+  // so a plaintext endpoint is already a violation on each of them. An extra guard would
+  // be an unreachable branch, which is worse than no guard because it cannot be tested.
+  return { branch, measurements, verdict };
+}
+
+/**
+ * The verdict this panel renders, which is not always the verdict the check
+ * reported.
+ *
+ * INVARIANT LOCKED — A PASS MUST BE EARNED, and every rule only ever moves the
+ * outcome in the safe direction:
+ *
+ *   1. A plaintext endpoint on a branch that must not produce one, a missing TLS
+ *      flag, a partial credential set that did not exit 1, or a finding the check
+ *      attached — each is a FAILURE, whatever verdict arrived.
+ *   2. A reported pass is downgraded to UNKNOWN when the branch cannot be identified
+ *      or its requirements were not all demonstrated. A payload reporting `pass` and
+ *      nothing else has shown nothing.
+ *   3. The explicitly permitted plaintext branch is a WARNING at best and can never
+ *      be a pass, because the transport really is unauthenticated.
+ *   4. Otherwise the STRICTEST of the reported verdict and the evidence verdict
+ *      stands.
+ *
+ * Exported because the aggregate dashboard must count, filter and summarise the SAME
+ * verdict this panel renders.
+ *
+ * @param control - the payload for this control, exactly as the hook parsed it.
+ * @returns the verdict the panel renders for that payload.
+ */
+export function resolveEtcdTransportEffectiveVerdict(control: ControlStatus): EffectiveVerdict {
+  const evidence = buildEtcdEvidence(control.evidence?.observations ?? NO_OBSERVATIONS);
+  if (control.verdict === 'fail' || evidence.verdict === 'fail' || control.findings.length > 0) {
+    return 'fail';
+  }
+  if (control.verdict === 'pass') {
+    return evidence.verdict;
+  }
+  return strictestVerdict([control.verdict, evidence.verdict]);
+}
+
+/** How each measurement result opens its sentence. */
+const MEASUREMENT_RESULT_WORDS: Record<EtcdMeasurement['result'], string> = {
+  satisfied: 'Established:',
+  violated: 'Violated:',
+  indeterminate: 'Not established:',
+};
+
+/** Accessible name of the region holding the branch measurements. */
+const BRANCH_EVIDENCE_LABEL = 'What this etcd transport verdict rests on';
+
+/** How each branch is named in the rendered evidence region. */
+const BRANCH_WORDS: Record<EtcdBranch, string> = {
+  'mutual-tls': `all six credentials supplied, so etcd is addressed at ${ETCD_TLS_ENDPOINT}`,
+  'fail-closed': 'credentials absent and the insecure fallback not permitted, so the boot aborts',
+  'permitted-plaintext':
+    'the insecure fallback explicitly permitted, so etcd is addressed at ' +
+    ETCD_PLAINTEXT_ENDPOINT,
+  'partial-credentials': 'credentials only partially supplied, which must abort the boot',
+  indeterminate: 'not identified by the reported evidence',
+};
+
 /** Props of {@link EtcdTransportPanel}. */
 export interface EtcdTransportPanelProps {
   /**
@@ -535,10 +976,20 @@ export interface EtcdTransportPanelProps {
    */
   readonly status?: ControlStatus;
   /**
-   * Invoked by the re-request button instead of the hook's own `refresh`. When
-   * omitted, the button calls whichever `refresh` the current state carries.
+   * Invoked by the re-request button INSTEAD of the hook's own `refresh`, never
+   * alongside it, so one press is one request. When omitted, the button calls
+   * whichever `refresh` the current state carries; when neither can re-request
+   * anything the button is disabled and carries a title saying why.
    */
   readonly onRefresh?: () => void;
+  /**
+   * Whether refreshing can re-request anything at all.
+   *
+   * `false` disables this panel's refresh affordance and explains why, which is how an
+   * aggregate surface that was handed its posture directly keeps every control's button
+   * consistent with its own. Defaults to `true`, so a panel used on its own is unaffected.
+   */
+  readonly canRefresh?: boolean;
   /**
    * Show only this scenario initially instead of all five. The `<select>`
    * remains usable, so this is an initial value and not a lock.
@@ -552,6 +1003,8 @@ interface EtcdTransportPanelViewProps {
   readonly result: UseControlStatusResult;
   /** See {@link EtcdTransportPanelProps.onRefresh}. */
   readonly onRefresh?: () => void;
+  /** See {@link EtcdTransportPanelProps.canRefresh}. */
+  readonly canRefresh?: boolean;
   /** See {@link EtcdTransportPanelProps.scenario}. */
   readonly scenario?: EtcdTransportScenarioId;
 }
@@ -620,15 +1073,37 @@ function PostureError({ error }: { readonly error: ControlStatusError }): ReactE
  */
 function PostureDetail({ control }: { readonly control: ControlStatus }): ReactElement {
   const observations = control.evidence?.observations;
+  const evidence = buildEtcdEvidence(observations ?? NO_OBSERVATIONS);
+  const verdict = resolveEtcdTransportEffectiveVerdict(control);
   return (
-    <div
-      className="etcd-transport-panel__posture"
-      data-state="reported"
-      data-verdict={control.verdict}
-    >
+    <div className="etcd-transport-panel__posture" data-state="reported" data-verdict={verdict}>
       <p className="etcd-transport-panel__verdict">
-        Verdict: <strong>{control.verdict}</strong> — {VERDICT_DESCRIPTION[control.verdict]}
+        Verdict: <strong>{verdict}</strong> — {VERDICT_DESCRIPTION[verdict]}
       </p>
+      {verdict === control.verdict ? null : (
+        <p className="etcd-transport-panel__disagreement" data-disagreement={verdict}>
+          {`The check reported ${control.verdict} for this control; the branch evidence below ` +
+            `supports ${verdict}, and the weaker of the two is the verdict shown. A plaintext ` +
+            'etcd endpoint is never a pass, partial credentials must abort the boot, and ' +
+            'silence about a required flag is not evidence that it was supplied.'}
+        </p>
+      )}
+      <section
+        className="etcd-transport-panel__evidence-region"
+        aria-label={BRANCH_EVIDENCE_LABEL}
+        data-region="branch-evidence"
+        data-branch={evidence.branch}
+      >
+        <p>{`Branch: ${BRANCH_WORDS[evidence.branch]}.`}</p>
+        <dl className="etcd-transport-panel__measurements">
+          {evidence.measurements.map((entry) => (
+            <div key={entry.identity} data-measurement={entry.identity} data-result={entry.result}>
+              <dt>{entry.title}</dt>
+              <dd>{`${MEASUREMENT_RESULT_WORDS[entry.result]} ${entry.detail}`}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
       <p className="etcd-transport-panel__summary">{control.summary}</p>
       {control.detail !== undefined ? <p>{control.detail}</p> : null}
       {control.requirementIds !== undefined && control.requirementIds.length > 0 ? (
@@ -813,8 +1288,12 @@ function ScenarioArticle({ scenario }: { readonly scenario: EtcdTransportScenari
 function EtcdTransportPanelView({
   result,
   onRefresh,
+  canRefresh = true,
   scenario,
 }: EtcdTransportPanelViewProps): ReactElement {
+  // ONE refresh channel, resolved once and used for BOTH the click handler and the
+  // disabled state, so the two can never disagree.
+  const refresh = resolveRefreshHandler(onRefresh, result.refresh, canRefresh);
   const idPrefix = useId();
   const panelHeadingId = `${idPrefix}-panel`;
   const postureHeadingId = `${idPrefix}-posture`;
@@ -863,7 +1342,9 @@ function EtcdTransportPanelView({
         <button
           className="etcd-transport-panel__refresh"
           type="button"
-          onClick={onRefresh ?? result.refresh}
+          onClick={refresh}
+          disabled={refresh === undefined}
+          title={refresh === undefined ? REFRESH_UNAVAILABLE_TITLE : undefined}
         >
           Re-read etcd transport posture
         </button>
@@ -931,10 +1412,18 @@ function EtcdTransportPanelView({
  */
 function ConnectedEtcdTransportPanel({
   onRefresh,
+  canRefresh,
   scenario,
 }: Omit<EtcdTransportPanelViewProps, 'result'>): ReactElement {
   const result = useControlStatus(ETCD_TRANSPORT_CONTROL_ID);
-  return <EtcdTransportPanelView result={result} onRefresh={onRefresh} scenario={scenario} />;
+  return (
+    <EtcdTransportPanelView
+      result={result}
+      onRefresh={onRefresh}
+      canRefresh={canRefresh}
+      scenario={scenario}
+    />
+  );
 }
 
 /**
@@ -970,10 +1459,18 @@ export default function EtcdTransportPanel({
   result,
   status,
   onRefresh,
+  canRefresh = true,
   scenario,
 }: EtcdTransportPanelProps): ReactElement {
   if (result !== undefined) {
-    return <EtcdTransportPanelView result={result} onRefresh={onRefresh} scenario={scenario} />;
+    return (
+      <EtcdTransportPanelView
+        result={result}
+        onRefresh={onRefresh}
+        canRefresh={canRefresh}
+        scenario={scenario}
+      />
+    );
   }
   if (status !== undefined) {
     // The successful arm, built around exactly the payload supplied. `isEmpty`
@@ -985,7 +1482,22 @@ export default function EtcdTransportPanel({
       isEmpty: false,
       refresh: NO_REFRESH_AVAILABLE,
     };
-    return <EtcdTransportPanelView result={resolved} onRefresh={onRefresh} scenario={scenario} />;
+    // A payload handed over directly owns no request, so ONLY an explicit handler
+    // can refresh it; without one the affordance is disabled and explained.
+    return (
+      <EtcdTransportPanelView
+        result={resolved}
+        onRefresh={onRefresh}
+        canRefresh={canRefresh && onRefresh !== undefined}
+        scenario={scenario}
+      />
+    );
   }
-  return <ConnectedEtcdTransportPanel onRefresh={onRefresh} scenario={scenario} />;
+  return (
+    <ConnectedEtcdTransportPanel
+      onRefresh={onRefresh}
+      canRefresh={canRefresh}
+      scenario={scenario}
+    />
+  );
 }

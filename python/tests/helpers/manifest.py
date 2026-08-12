@@ -165,6 +165,7 @@ from tests.helpers.bash import CONFIGURE_HELPER_SCRIPT, BashResult, must_invoke_
 
 __all__ = [
     "BASE_TEMPLATE_RELATIVE_PATH",
+    "CASE_OWNERSHIP_MARKER",
     "ENV_SCRIPT_FILE_NAME",
     "ETCD_TEMPLATE_RELATIVE_PATH",
     "ETCD_TEMPLATE_TARGET",
@@ -194,6 +195,7 @@ __all__ = [
     "parse_pod_manifest",
     "pod_manifest_template_dir",
     "run_as_user",
+    "validate_pod_document",
 ]
 
 # ---------------------------------------------------------------------------
@@ -241,6 +243,17 @@ KUBE_APISERVER_SCRIPT_NAMES: Final[tuple[str, str]] = (
 # configure_helper_test.go L58. Retained so a leaked directory is attributable
 # to this tier no matter which language created it.
 TEMP_DIR_PREFIX: Final[str] = "configure-helper-test"
+
+# The name of the marker file this harness writes into every KUBE_HOME it
+# prepares. Its presence is the PROOF :meth:`ManifestTestCase.tear_down` requires
+# before it removes anything, and its absence is what stops a directory this
+# harness never prepared from being deleted.
+#
+# A marker rather than a path prefix: the directory may be anywhere the caller's
+# `tmp_path` lives, so location proves nothing, whereas a file only this harness
+# writes proves authorship. It is deliberately visible rather than hidden, so an
+# engineer inspecting a retained failure directory can see who owns it.
+CASE_OWNERSHIP_MARKER: Final[str] = ".kube-manifest-case"
 
 # Go: configure_helper_test.go L64, and the directory
 # configure-kubeapiserver.sh:299 reads its input from. Held as path SEGMENTS
@@ -814,6 +827,220 @@ def _parse_container(value: object, *, field: str, source: str) -> Container:
     )
 
 
+# ---------------------------------------------------------------------------
+# STRICT WHOLE-DOCUMENT SCHEMA VALIDATION
+#
+# Ports the CHECK that Go's decode performs, not merely its happy path.
+# `runtime.DecodeInto(legacyscheme.Codecs.UniversalDecoder(), json, &c.pod)`
+# (configure_helper_test.go L152) walks the ENTIRE document against the typed
+# v1.Pod schema, so a field with the wrong JSON type fails the decode wherever it
+# sits - `spec.hostNetwork: "yes"`, `spec.priority: "2000001000"`,
+# `spec.containers[0].livenessProbe.timeoutSeconds: "15"` - and that is what
+# licenses the comment in TestKMSIntegration: "By this point, we can be sure that
+# kube-apiserver manifest is a valid POD" (apiserver_kms_test.go L198).
+#
+# The typed views below model only the fields the ported assertions read, so
+# checking them alone would leave most of the emitted artefact unchecked and let a
+# botched substitution through anywhere else in it. This validator closes that
+# gap by walking every field of the document against the schema the PINNED
+# `kubernetes` 34.1.0 client models carry.
+#
+# WHY NOT THE CLIENT'S OWN DESERIALISER - MEASURED, NOT ASSUMED. The generated
+# OpenAPI deserialiser COERCES instead of rejecting: fed `hostNetwork: "yes"` it
+# yields `True`, and fed `command: [1, 2]` it yields `["1", "2"]`. Handing the
+# document to it would therefore make this weaker than the hand-rolled parsing it
+# replaces, which is the opposite of the point. The client is used for its SCHEMA
+# - `openapi_types` and `attribute_map` on each model - and the type checking is
+# done here, strictly.
+#
+# UNKNOWN KEYS ARE IGNORED, DELIBERATELY. Go's decoder is used in NON-STRICT mode
+# here, which ignores a field the scheme does not know, so rejecting unknown keys
+# would be stricter than the oracle and would fail on a manifest carrying a field
+# newer than the pinned client's models. Every KNOWN key is checked; that is
+# decoder equivalence.
+# ---------------------------------------------------------------------------
+
+#: The model the generated manifest must validate against.
+_POD_MODEL_NAME: Final[str] = "V1Pod"
+
+#: How each OpenAPI primitive name maps onto the JSON types that satisfy it.
+#:
+#: `bool` is excluded from the numeric entries even though it is a subclass of
+#: `int` in Python, because Go's decoder rejects `true` for an int32 field - and
+#: silently accepting it is exactly the coercion this validator exists to refuse.
+#: `float` accepts an int because JSON writes 1 for 1.0 and Go accepts that too;
+#: the converse does NOT hold, and `int` rejects a float - see the note in
+#: :func:`_validate_against_schema`.
+#: `object` accepts anything: it is the OpenAPI spelling for a free-form value,
+#: which Go models as `runtime.RawExtension` or `map[string]interface{}` and does
+#: not type-check either.
+_PRIMITIVE_JSON_TYPES: Final[Mapping[str, tuple[type, ...]]] = MappingProxyType(
+    {
+        "str": (str,),
+        "bool": (bool,),
+        "int": (int,),
+        "float": (int, float),
+        "datetime": (str,),
+        "date": (str,),
+        "object": (object,),
+    }
+)
+
+
+def _describe_json_type(value: object) -> str:
+    """Name the JSON type of ``value`` the way a wire-shape message should read."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _pod_schema_model(name: str) -> object | None:
+    """Look up a pinned client model class by its OpenAPI name.
+
+    Returns ``None`` when the pinned client does not model it, which is treated as
+    "nothing more to check here" rather than as an error: an unmodelled type is
+    the same situation as an unknown key, and Go's non-strict decoder is equally
+    quiet about it.
+    """
+    import kubernetes.client.models as models
+
+    return getattr(models, name, None)
+
+
+def _validate_against_schema(
+    value: object,
+    type_name: str,
+    *,
+    field: str,
+    source: str,
+) -> None:
+    """Check ``value`` against the OpenAPI type ``type_name``, rejecting every mismatch.
+
+    Recursive over the three container spellings the generated models use --
+    ``list[X]``, ``dict(str, X)`` and a model name -- and terminal on the
+    primitives in :data:`_PRIMITIVE_JSON_TYPES`.
+
+    ``None`` is accepted at every level: a JSON null is the wire spelling of an
+    absent optional field, and Go's decoder leaves such a field at its zero value
+    rather than failing.
+
+    Raises:
+        ManifestHarnessError: on the FIRST mismatch, naming the field path, the
+            expected type and the type actually seen. First rather than all,
+            because a wrong type high in the document makes every finding below it
+            a consequence rather than an independent fact.
+    """
+    __tracebackhide__ = True
+    if value is None:
+        return
+
+    if type_name.startswith("list["):
+        inner = type_name[len("list[") : -1]
+        if not isinstance(value, list):
+            raise ManifestHarnessError(
+                f"generated manifest {source} has {field} as {_describe_json_type(value)}, but "
+                f"the v1.Pod schema declares an array of {inner}. Go's decoder rejects this "
+                "document, so the generator's substitutions corrupted it."
+            )
+        for index, item in enumerate(value):
+            _validate_against_schema(item, inner, field=f"{field}[{index}]", source=source)
+        return
+
+    if type_name.startswith("dict("):
+        inner = type_name[type_name.index(",") + 1 : -1].strip()
+        if not isinstance(value, dict):
+            raise ManifestHarnessError(
+                f"generated manifest {source} has {field} as {_describe_json_type(value)}, but "
+                f"the v1.Pod schema declares a map of string to {inner}."
+            )
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ManifestHarnessError(
+                    f"generated manifest {source} has a non-string key {key!r} in {field}."
+                )
+            _validate_against_schema(item, inner, field=f"{field}[{key!r}]", source=source)
+        return
+
+    accepted = _PRIMITIVE_JSON_TYPES.get(type_name)
+    if accepted is not None:
+        # bool is a subclass of int, so an explicit exclusion is required for the
+        # numeric types; see the _PRIMITIVE_JSON_TYPES note.
+        if type_name in ("int", "float") and isinstance(value, bool):
+            raise ManifestHarnessError(
+                f"generated manifest {source} has {field} as boolean, but the v1.Pod schema "
+                f"declares {type_name}. Go's decoder rejects a boolean for a numeric field."
+            )
+        # A float-spelled number is rejected for an int field, including an
+        # integral one such as 2000001000.0. That is Go's behaviour, not a
+        # tightening: encoding/json parses an integer field with strconv.ParseInt
+        # over the literal TEXT, so "2000001000.0" fails there too. json.loads
+        # preserves the same distinction - `1` decodes to int, `1.0` to float - so
+        # the check is exact rather than approximate.
+        if not isinstance(value, accepted):
+            raise ManifestHarnessError(
+                f"generated manifest {source} has {field} as {_describe_json_type(value)}, but "
+                f"the v1.Pod schema declares {type_name}. Go's decoder rejects this document, so "
+                "the generator's substitutions corrupted it."
+            )
+        return
+
+    model = _pod_schema_model(type_name)
+    openapi_types = getattr(model, "openapi_types", None)
+    attribute_map = getattr(model, "attribute_map", None)
+    if not isinstance(openapi_types, dict) or not isinstance(attribute_map, dict):
+        # Not modelled by the pinned client: nothing further to check, exactly as
+        # Go's non-strict decoder is quiet about what its scheme does not know.
+        return
+
+    if not isinstance(value, dict):
+        raise ManifestHarnessError(
+            f"generated manifest {source} has {field} as {_describe_json_type(value)}, but the "
+            f"v1.Pod schema declares the object type {type_name}."
+        )
+
+    # attribute_map is attribute -> wire key; the walk needs the inverse.
+    wire_to_attribute = {wire: attribute for attribute, wire in attribute_map.items()}
+    for wire_key, member in value.items():
+        attribute = wire_to_attribute.get(wire_key)
+        if attribute is None:
+            # An unknown key. Ignored - see the module comment above.
+            continue
+        member_type = openapi_types.get(attribute)
+        if not isinstance(member_type, str):
+            continue
+        child_field = f"{field}.{wire_key}" if field else wire_key
+        _validate_against_schema(member, member_type, field=child_field, source=source)
+
+
+def validate_pod_document(document: object, *, source: str = "<manifest>") -> None:
+    """Validate a decoded manifest document against the WHOLE pinned v1.Pod schema.
+
+    Public because it is useful without a bash run and without the typed views:
+    a test can hand it any decoded document and prove that this harness rejects a
+    malformed one, which is what makes the guarantee provable rather than asserted.
+
+    Args:
+        document: The decoded JSON document, normally from ``json.loads``.
+        source: Path or label to name in any failure message.
+
+    Raises:
+        ManifestHarnessError: if any modelled field anywhere in the document
+            carries the wrong JSON type.
+    """
+    __tracebackhide__ = True
+    _validate_against_schema(document, _POD_MODEL_NAME, field="", source=source)
+
+
 def parse_pod_manifest(text: str, *, source: str | os.PathLike[str] = "<manifest>") -> PodManifest:
     """Decode a generated static-pod manifest into the typed views above.
 
@@ -871,6 +1098,15 @@ def parse_pod_manifest(text: str, *, source: str | os.PathLike[str] = "<manifest
         ) from exc
 
     root = _require_mapping(document, field="the document", source=described)
+
+    # THE WHOLE DOCUMENT, BEFORE ANY OF IT IS PROJECTED. Go's decode checks every
+    # field of the artefact against the typed v1.Pod schema, so a wrong type in a
+    # field this module does not model - hostNetwork, priority, securityContext,
+    # either probe, resources - fails there. Validating first reproduces that:
+    # what follows narrows the document to the views the assertions read, and a
+    # narrowing cannot report a mismatch in a field it never looks at.
+    validate_pod_document(root, source=described)
+
     api_version = _require_str(root.get("apiVersion"), field="apiVersion", source=described)
     kind = _require_str(root.get("kind"), field="kind", source=described)
     if (api_version, kind) != ("v1", "Pod"):
@@ -1084,6 +1320,7 @@ class ManifestTestCase:
         self._pod: PodManifest | None = None
 
         try:
+            self._claim_kube_home()
             self._copy_from_template()
             self._copy_aux_from_template()
             self._create_manifest_dst_dir()
@@ -1100,6 +1337,42 @@ class ManifestTestCase:
             raise
 
     # -- setup, ported step by step from the Go constructor -------------------
+
+    def _claim_kube_home(self) -> None:
+        """Write the ownership marker that authorises :meth:`tear_down` to remove the tree.
+
+        The marker is what turns "this path was passed to me" into "this harness
+        prepared this directory". Without it, teardown would be removing a tree on
+        the strength of a caller-supplied path alone, which is how a mistyped or
+        symlinked argument becomes data loss.
+
+        Its content is diagnostic rather than functional: an engineer looking at a
+        retained failure directory can see which case built it and which manifest
+        and shell function it was for.
+
+        Raises:
+            ManifestHarnessError: if the marker cannot be written. This is FATAL
+                rather than best-effort: an unwritable KUBE_HOME cannot host the
+                generator either, and continuing would produce a case whose
+                teardown must then refuse to clean up.
+        """
+        __tracebackhide__ = True
+        marker = self._kube_home / CASE_OWNERSHIP_MARKER
+        try:
+            marker.write_text(
+                "# Written by python/tests/helpers/manifest.py (ManifestTestCase).\n"
+                "# Its presence authorises tear_down() to remove this directory.\n"
+                f"manifest={self._manifest}\n"
+                f"func_name={self._func_name}\n"
+                f"created_by_harness={self._created_kube_home}\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise ManifestHarnessError(
+                f"failed to write the ownership marker {marker}: {exc}. The harness will not "
+                "prepare a KUBE_HOME it cannot claim, because tear_down() proves ownership from "
+                "that marker before removing anything."
+            ) from exc
 
     def _resolve_kube_home(
         self,
@@ -1129,11 +1402,31 @@ class ManifestTestCase:
 
         if kube_home is not None:
             explicit = Path(kube_home)
+
+            # A SYMLINK IS REFUSED, NEVER FOLLOWED. `tear_down` removes the tree
+            # recursively, and resolving a caller-supplied link and then removing
+            # the result is exactly how a KUBE_HOME argument turns into the
+            # deletion of an arbitrary directory somewhere else on the machine.
+            # Nothing in the ported surface needs a symlinked KUBE_HOME - every
+            # real value is `tmp_path` or a subdirectory of it - so refusing costs
+            # nothing and closes the hazard at the only point where it can enter.
+            if explicit.is_symlink():
+                raise ManifestHarnessError(
+                    f"kube_home {explicit} is a symlink, which this harness refuses: tear_down "
+                    "removes the KUBE_HOME tree recursively, so following a link would delete "
+                    "whatever it points at. Pass a real directory - conventionally a "
+                    "subdirectory of pytest's tmp_path - or use base_dir= to have one created."
+                )
             if explicit.exists() and not explicit.is_dir():
                 raise ManifestHarnessError(
                     f"kube_home {explicit} exists and is not a directory, so it cannot hold the "
                     "case's KUBE_HOME tree."
                 )
+
+            # Recorded BEFORE the mkdir, because "did this harness bring the
+            # directory into existence" is the question tear_down needs answered
+            # and mkdir(exist_ok=True) erases the distinction.
+            created_here = not explicit.exists()
             try:
                 explicit.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
@@ -1141,10 +1434,12 @@ class ManifestTestCase:
                     f"failed to create KUBE_HOME at {explicit}: {exc}"
                 ) from exc
             self._reject_existing_case_tree(explicit)
-            # Not "created by us" even when the mkdir above made it: the caller
-            # named this path, so a failed setup leaves it for the caller (and
-            # for pytest's tmp_path retention) to deal with.
-            return explicit.resolve(), False
+
+            # `.resolve()` is safe here and only here: the final component has
+            # just been proved not to be a symlink, so all resolution does is
+            # canonicalise the parents - which is what makes the path stable if
+            # the test changes directory.
+            return explicit.resolve(), created_here
 
         parent: str | None = None
         if base_dir is not None:
@@ -1781,35 +2076,114 @@ class ManifestTestCase:
         return pod
 
     def tear_down(self) -> None:
-        """Remove the whole ``KUBE_HOME`` tree. The port of ``tearDown``.
+        """Remove what this harness created under ``KUBE_HOME``. The port of ``tearDown``.
 
         Ports ``tearDown`` (cluster/gce/gci/configure_helper_test.go L155-159),
         which is ``os.RemoveAll(c.kubeHome)`` and a ``t.Fatalf`` if that fails.
+        The observable outcome is the same - the case's tree is gone - but WHAT is
+        removed is proved rather than assumed, because Go's harness only ever gets
+        a ``MkdirTemp`` path of its own making while this one accepts a
+        caller-supplied ``kube_home=``.
+
+        THE OWNERSHIP RULE, and every branch of it matters:
+
+        * the tree must carry :data:`CASE_OWNERSHIP_MARKER`, which only
+          :meth:`_claim_kube_home` writes. No marker means this harness did not
+          prepare the directory, and it is left untouched with an explanation;
+        * the path must not be a symlink. ``_resolve_kube_home`` already refuses
+          one, so this is the second line of the same defence, covering a link
+          substituted for the directory after construction;
+        * when the harness CREATED the directory - ``base_dir=``, or a
+          ``kube_home=`` that did not exist - the whole tree goes, which is Go's
+          behaviour exactly;
+        * when the caller supplied a directory that ALREADY EXISTED, only the
+          entries this harness put in it are removed, and the directory itself is
+          left in place. That is the one deliberate departure from Go, and it is
+          the difference between cleaning up after yourself and deleting a
+          directory whose other contents you never inspected.
 
         Idempotent, exactly as ``os.RemoveAll`` is: removing an already-removed
         tree is not an error, so calling this after :func:`manifest_test_case`
         has already done so is harmless.
 
-        The case owns its ``KUBE_HOME`` and removes it unconditionally, including
-        one supplied through ``kube_home=``. A caller with other files to keep
-        should pass a subdirectory of ``tmp_path`` rather than ``tmp_path``
-        itself.
-
         Raises:
-            ManifestHarnessError: if the tree exists and cannot be removed. Not
-                silently ignored: an undeletable tree is a real problem -- a
-                leaked subprocess holding a file, most likely -- and every
-                subsequent run would inherit it.
+            ManifestHarnessError: if the tree exists and cannot be removed, or if
+                ownership cannot be proved. Neither is silently ignored: an
+                undeletable tree is a real problem -- a leaked subprocess holding a
+                file, most likely -- and an unprovable one means a path reached
+                this method that no test intended.
         """
         __tracebackhide__ = True
-        if not self._kube_home.exists():
+        if not self._kube_home.exists() and not self._kube_home.is_symlink():
             return
+
+        if self._kube_home.is_symlink():
+            raise ManifestHarnessError(
+                f"refusing to tear down KUBE_HOME {self._kube_home}: it is now a SYMLINK, so "
+                "removing it recursively would delete whatever it points at. It was a real "
+                "directory when the case was constructed, so something replaced it during the "
+                "test. Remove it by hand once you know what it points at."
+            )
+
+        marker = self._kube_home / CASE_OWNERSHIP_MARKER
+        if not marker.is_file():
+            raise ManifestHarnessError(
+                f"refusing to tear down KUBE_HOME {self._kube_home}: it carries no "
+                f"{CASE_OWNERSHIP_MARKER!r} marker, so this harness cannot prove it prepared "
+                "the directory and will not remove it recursively. Either the marker was "
+                "deleted during the test, or this object is pointed at a directory it never "
+                "set up."
+            )
+
         try:
-            shutil.rmtree(self._kube_home)
+            if self._created_kube_home:
+                shutil.rmtree(self._kube_home)
+            else:
+                # A pre-existing, caller-supplied directory: remove the case's own
+                # entries and leave the directory. The two layout roots are the
+                # only subdirectories this harness creates, and the env script and
+                # the marker are the only files.
+                for relative in (
+                    MANIFEST_SOURCES_RELATIVE_PATH[0],
+                    MANIFEST_DESTINATION_RELATIVE_PATH[0],
+                ):
+                    entry = self._kube_home / relative
+                    if entry.is_dir() and not entry.is_symlink():
+                        shutil.rmtree(entry)
+                env_script = self._kube_home / ENV_SCRIPT_FILE_NAME
+                if env_script.is_file():
+                    env_script.unlink()
+                marker.unlink()
         except OSError as exc:
             raise ManifestHarnessError(
                 f"failed to tear down KUBE_HOME {self._kube_home}: {exc}"
             ) from exc
+
+
+def _attach_note(error: BaseException, note: str) -> None:
+    """Attach ``note`` to ``error`` without replacing or re-raising it.
+
+    Prefers :meth:`BaseException.add_note` (PEP 678, Python 3.11+) and falls back
+    to writing ``__notes__`` directly, which is the very attribute ``add_note``
+    maintains and the traceback machinery reads. This tier's floor is Python 3.10,
+    so the newer method cannot simply be called.
+
+    Deliberately cannot raise: it is invoked from an ``except`` block whose job is
+    to let the ORIGINAL exception through untouched, so a failure here must not
+    become the failure the reader sees.
+    """
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+        return
+    notes = getattr(error, "__notes__", None)
+    if isinstance(notes, list):
+        notes.append(note)
+        return
+    # An exception object that refuses attribute assignment is exotic enough that
+    # losing the note is preferable to losing the finding.
+    with contextlib.suppress(Exception):
+        error.__notes__ = [note]  # type: ignore[attr-defined]
 
 
 @contextlib.contextmanager
@@ -1856,8 +2230,8 @@ def manifest_test_case(
     Raises:
         ManifestHarnessError: if setup fails, or if teardown fails after a body
             that SUCCEEDED. A teardown failure after a body that already raised
-            is suppressed, so that the finding the test made is what propagates
-            rather than the cleanup problem it caused.
+            does NOT replace the body's exception - see below - but it is not
+            discarded either: it is attached to it as a note.
     """
     case = ManifestTestCase(
         repo_root=repo_root,
@@ -1870,12 +2244,39 @@ def manifest_test_case(
     )
     try:
         yield case
-    except BaseException:
-        # Clean up as far as possible, then re-raise the ORIGINAL exception. A
-        # raise from this finally-path would replace the test's actual finding
-        # with a cleanup error, which is the one thing teardown must never do.
-        with contextlib.suppress(Exception):
+    except BaseException as body_error:
+        # THE PRIMARY ERROR WINS, BUT THE CLEANUP ERROR IS NOT LOST.
+        #
+        # Raising from here would replace the test's actual finding with a
+        # cleanup error, which is the one thing teardown must never do - a
+        # security assertion that failed has to be what the reader sees. But
+        # SWALLOWING the cleanup error is not acceptable either: an undeletable
+        # KUBE_HOME means a leaked subprocess is still holding a file, or that a
+        # generator run left something the test process cannot remove, and every
+        # later run inherits it. Reported as nothing at all, that leak is
+        # invisible until it breaks an unrelated test.
+        #
+        # An exception NOTE resolves both: the body's exception propagates
+        # unchanged and carries the teardown failure in its own traceback output,
+        # which pytest prints verbatim.
+        #
+        # PEP 678's add_note() arrived in Python 3.11 while this tier's floor is
+        # 3.10 (pytest 9's own floor, AAP §0.2.2.1), so the call is guarded rather
+        # than assumed. On 3.10 the note is appended to __notes__ directly - the
+        # same attribute add_note() writes, and the same attribute the traceback
+        # machinery reads on 3.11+ - so the message is preserved either way and
+        # only its rendering differs. Neither path can raise, so nothing here can
+        # displace the finding.
+        try:
             case.tear_down()
+        except Exception as cleanup_error:
+            note = (
+                "During teardown of the manifest case, cleanup ALSO failed and was not able to "
+                f"remove its KUBE_HOME: {cleanup_error}. The failure above is the test's own "
+                f"finding and is unchanged. The leaked tree is {case.kube_home}; a subprocess "
+                "still holding a file open there is the usual cause."
+            )
+            _attach_note(body_error, note)
         raise
     else:
         case.tear_down()

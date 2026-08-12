@@ -133,6 +133,13 @@ import {
   useControlStatus,
 } from '../hooks/useControlStatus';
 
+import {
+  REFRESH_UNAVAILABLE_TITLE as SHARED_REFRESH_UNAVAILABLE_TITLE,
+  resolveRefreshHandler,
+} from './refreshContract';
+import { readBoolean, strictestVerdict } from '../domain/evidence';
+import { V1_OBSERVATIONS } from '../domain/observationIds';
+
 /**
  * The control this panel reports on.
  *
@@ -249,18 +256,23 @@ export interface SubjectAccessReviewProbe {
   /** Behaviour on failure — see {@link RbacAssertionSeverity}. */
   readonly severity: RbacAssertionSeverity;
   /**
-   * The canonical `ControlObservation.label` this probe's decision is reported
-   * under. Exported through {@link SUBJECT_ACCESS_REVIEW_PROBES} so that the
-   * request handlers, the recorded fixtures and the paired spec all name the
-   * observation the same way, from one definition site.
+   * The EXACT `ControlObservation.label` this probe's decision is reported under,
+   * taken from {@link V1_OBSERVATIONS} so the fixture that records it and this panel
+   * cannot name it differently.
+   *
+   * WHY THIS IS NOW A DOMAIN CONSTANT AND WHY THE SECOND CHANNEL IS GONE. This field
+   * used to hold a label of the panel's own invention -- "SubjectAccessReview allowed:",
+   * the principal and the unrestricted triple -- while the recorded payload carried
+   * `denied subject: status.allowed` and `positive control: status.allowed`. The two
+   * vocabularies had NO overlap, so neither probe was ever found, the positive control
+   * was never confirmed, and the panel rendered UNKNOWN over a payload recording a clean
+   * PASS. A second, SUBSTRING channel existed to paper over exactly that mismatch, and
+   * it could not: no recorded label contains either principal, because the principals
+   * are the observation VALUES. Worse, a substring channel matches whatever happens to
+   * contain the token, so an unrelated boolean observation could have supplied a
+   * decision. Both sides now import one identity and comparison is `===`.
    */
   readonly observationLabel: string;
-  /**
-   * An unambiguous substring that identifies this probe inside a label the
-   * server chose for itself. See {@link readProbeDecision} for why a second
-   * recognition channel exists and why these two particular strings are safe.
-   */
-  readonly discriminator: string;
   /** What holding means, phrased as the outcome that must be true. */
   readonly description: string;
 }
@@ -281,8 +293,7 @@ export const NON_MASTER_DENIED_PROBE = {
   goLine: 1234,
   goCall: 't.Errorf',
   severity: 'accumulate',
-  observationLabel: 'SubjectAccessReview allowed: system:serviceaccount:default:default */*/*',
-  discriminator: 'system:serviceaccount:default:default',
+  observationLabel: V1_OBSERVATIONS.deniedSubjectAllowed,
   description:
     'a non-master identity requesting every verb on every resource in every API ' +
     'group is denied; an allowed decision here is a privilege-escalation finding',
@@ -307,8 +318,7 @@ export const SYSTEM_MASTERS_ALLOWED_PROBE = {
   goLine: 1252,
   goCall: 't.Fatalf',
   severity: 'abort',
-  observationLabel: 'SubjectAccessReview allowed: system:masters */*/*',
-  discriminator: SYSTEM_PRIVILEGED_GROUP,
+  observationLabel: V1_OBSERVATIONS.positiveControlAllowed,
   description:
     'the system:masters group is allowed every verb on every resource in every ' +
     'API group, proving the review machinery works and the ' +
@@ -338,8 +348,16 @@ export const SUBJECT_ACCESS_REVIEW_PROBES = [
  * "denied" means the check is broken, and "unreported" means nothing is known.
  * Treating silence as a decision is how a panel comes to render a pass it has no
  * evidence for.
+ *
+ * `'conflicting'` is the fourth outcome, and it exists because a payload can report the
+ * SAME decision twice with different answers, or report it at a type that is not a
+ * boolean. Both used to be resolved by taking the first match in list order, which makes
+ * an authorization verdict a function of serialisation order rather than of evidence.
+ * Neither is a decision, so neither may support a pass -- but both are distinct from
+ * silence, because a contradictory report is a broken report rather than a missing one,
+ * and the two call for different remedies.
  */
-export type ProbeDecision = 'allowed' | 'denied' | 'unreported';
+export type ProbeDecision = 'allowed' | 'denied' | 'unreported' | 'conflicting';
 
 /**
  * Why no payload for this control is available from an otherwise SUCCESSFUL
@@ -359,56 +377,42 @@ export type RbacWildcardEmptyReason = 'no-controls-reported' | 'control-absent';
 const NO_OBSERVATIONS: readonly ControlObservation[] = Object.freeze([]);
 
 /**
- * Decides whether an observation reports the given probe.
- *
- * Two channels, both exact — nothing is trimmed, case-folded or otherwise
- * coerced into matching, which is the same discipline `isControlId` applies in
- * `web/src/hooks/useControlStatus.ts` and for the same reason: a label this
- * panel cannot read is evidence it cannot trust.
- *
- *   1. The canonical label, which
- *      {@link SubjectAccessReviewProbe.observationLabel} publishes so that
- *      producers and consumers share one definition site.
- *   2. A label that contains the probe's discriminator verbatim, which lets the
- *      panel read an observation the server phrased in its own words. The two
- *      discriminators are chosen so they cannot collide with each other:
- *      `system:serviceaccount:default:default` names only the non-master
- *      identity, and `system:masters` names only the privileged group. Note that
- *      the positive control is discriminated by its GROUP and not by its user
- *      name `admin`, precisely because `admin` also occurs inside
- *      `cluster-admin`.
- */
-function observationReportsProbe(probe: SubjectAccessReviewProbe, label: string): boolean {
-  return label === probe.observationLabel || label.includes(probe.discriminator);
-}
-
-/**
  * Reads one probe's decision out of the evidence bag.
  *
- * Invariant locked: only a BOOLEAN observation counts as a decision.
- * `SubjectAccessReview.status.allowed` is a boolean on the wire, so a string, a
- * number or an explicit `null` under a matching label is unrecognised evidence
- * rather than a decision — and unrecognised evidence resolves to
- * `'unreported'`, never to `'allowed'` and never to a pass. Nothing here parses
- * `"true"`, treats a non-zero number as allowed, or otherwise coerces a value
- * into a verdict.
+ * EXACTLY ONE OBSERVATION, MATCHED EXACTLY, AT THE RIGHT TYPE. `readBoolean` from
+ * {@link ../domain/evidence} enforces all three, and each one closes a distinct way this
+ * function previously invented a decision:
+ *
+ *   * the label is compared with `===`, never with `includes`, so an unrelated
+ *     observation that merely happened to contain a token can no longer supply an
+ *     authorization decision;
+ *   * two observations under one label are a CONFLICT rather than "the first one". A
+ *     payload that reported `status.allowed` twice with different answers has said two
+ *     things, and resolving that by list order makes the verdict depend on serialisation;
+ *   * only a boolean counts. `SubjectAccessReview.status.allowed` is a boolean on the
+ *     wire, so a string, a number or an explicit `null` is a contract mismatch. Note that
+ *     `'false'` is TRUTHY in JavaScript, so a coercing reader would invert the very answer
+ *     it was asked for.
+ *
+ * A conflict and a wrong type both resolve to `'conflicting'`, and absence to
+ * `'unreported'`. None of the three is ever `'allowed'`, so none can support a pass.
  *
  * @param probe - the probe whose decision to read.
  * @param observations - the `evidence.observations` list, possibly empty.
- * @returns the decision, or `'unreported'` when none was found.
+ * @returns the decision. See {@link ProbeDecision}.
  */
 export function readProbeDecision(
   probe: SubjectAccessReviewProbe,
   observations: readonly ControlObservation[],
 ): ProbeDecision {
-  const decision = observations.find(
-    (observation) =>
-      observationReportsProbe(probe, observation.label) && typeof observation.value === 'boolean',
-  );
-  if (decision === undefined) {
+  const decision = readBoolean(observations, probe.observationLabel);
+  if (decision.state === 'unreported') {
     return 'unreported';
   }
-  return decision.value === true ? 'allowed' : 'denied';
+  if (decision.state !== 'reported') {
+    return 'conflicting';
+  }
+  return decision.value ? 'allowed' : 'denied';
 }
 
 /**
@@ -439,6 +443,17 @@ export interface RbacWildcardAssessment {
   readonly controlBroken: boolean;
   /** `true` when the positive control was not reported at all. */
   readonly controlUnconfirmed: boolean;
+  /**
+   * `true` when the positive control's decision was reported more than once, or at a
+   * type that is not a boolean.
+   *
+   * Distinct from both {@link RbacWildcardAssessment.controlBroken} (a decision was
+   * reported and it was the wrong one) and
+   * {@link RbacWildcardAssessment.controlUnconfirmed} (no decision was reported): here a
+   * decision was reported and it is unusable. The remedy differs -- fix the report --
+   * which is why it is not folded into either of the others.
+   */
+  readonly controlConflicting: boolean;
   /** Every reported finding, in server order, complete and untruncated. */
   readonly findings: readonly ControlFinding[];
   /** Every server-emitted warning, in server order. */
@@ -461,12 +476,22 @@ export interface RbacWildcardAssessment {
  *      (it cannot allow everything and deny everything at once), and of the two
  *      readings `'fail'` is the one that can never be mistaken for a clean bill
  *      of health. The setup-breakage affordance still renders alongside it.
- *   2. `'unknown'` — the positive control is denied or unreported. Zero findings
- *      is only meaningful once the check has proved it can say "allowed" at all
+ *   2. `'unknown'` — the NEGATIVE ASSERTION was not established, i.e. its decision is
+ *      anything other than an observed `'denied'`. F-001-RQ-001 is the assertion this
+ *      control exists to make, and a report that never made it cannot be a pass however
+ *      confidently the server labelled it.
+ *   3. `'unknown'` — the positive control is denied, unreported or conflicting. Zero
+ *      findings is only meaningful once the check has proved it can say "allowed" at all
  *      (`rbac_test.go` L1252-1254).
- *   3. the reported verdict, for `'warn'` and `'pass'`.
- *   4. `'unknown'` — anything else, including a payload that reported
+ *   4. the reported verdict, for `'warn'` and `'pass'`.
+ *   5. `'unknown'` — anything else, including a payload that reported
  *      `'unknown'` itself.
+ *
+ * WHY RULE 2 EXISTS. Both probes must be ESTABLISHED, not merely un-contradicted. The
+ * previous shape checked only the positive control, so a payload asserting `pass` with
+ * a satisfied positive control and NO negative-assertion evidence at all rendered a
+ * clean pass -- on half the assertions the oracle makes. AAP §0.7.2 makes assertion
+ * density part of the contract: V1 keeps BOTH strategies, so both must be observed.
  *
  * @param reported - the verdict the payload carried.
  * @param evidence - the locally derived evidence.
@@ -477,11 +502,15 @@ export function resolveRbacWildcardVerdict(
   evidence: {
     readonly escalated: boolean;
     readonly findingCount: number;
+    readonly nonMasterDecision: ProbeDecision;
     readonly systemMastersDecision: ProbeDecision;
   },
 ): ControlVerdict {
   if (reported === 'fail' || evidence.escalated || evidence.findingCount > 0) {
     return 'fail';
+  }
+  if (evidence.nonMasterDecision !== 'denied') {
+    return 'unknown';
   }
   if (evidence.systemMastersDecision !== 'allowed') {
     return 'unknown';
@@ -490,6 +519,27 @@ export function resolveRbacWildcardVerdict(
     return reported;
   }
   return 'unknown';
+}
+
+/**
+ * The panel's own conservative verdict for V1, as one call over one payload.
+ *
+ * Exported so the aggregate dashboard counts, filters and summarises the SAME verdict
+ * this panel renders in its badge, rather than the raw `status.verdict` the server sent.
+ * A dashboard that counted the raw verdict would report "8 passing" beside a panel
+ * rendering UNKNOWN, and the two would disagree with no single place to look.
+ *
+ * `strictestVerdict` is applied to the single derived verdict so that this resolver and
+ * every other control's resolver combine through one shared function rather than through
+ * eight private conventions.
+ *
+ * @param control - the payload for V1, or `undefined` when it was not reported.
+ * @returns the verdict this panel renders.
+ */
+export function resolveRbacWildcardEffectiveVerdict(
+  control: ControlStatus | undefined,
+): ControlVerdict {
+  return strictestVerdict([assessRbacWildcard(control).verdict]);
 }
 
 /**
@@ -514,6 +564,7 @@ export function assessRbacWildcard(
     verdict: resolveRbacWildcardVerdict(control?.verdict ?? 'unknown', {
       escalated,
       findingCount: findings.length,
+      nonMasterDecision,
       systemMastersDecision,
     }),
     nonMasterDecision,
@@ -521,6 +572,7 @@ export function assessRbacWildcard(
     escalated,
     controlBroken: systemMastersDecision === 'denied',
     controlUnconfirmed: systemMastersDecision === 'unreported',
+    controlConflicting: systemMastersDecision === 'conflicting',
     findings,
     warnings,
   };
@@ -602,6 +654,20 @@ export const POSITIVE_CONTROL_UNCONFIRMED_TEXT =
   `absence of findings cannot be read as a pass.`;
 
 /**
+ * The positive control was reported inconsistently, so it proves nothing.
+ *
+ * Kept textually distinct from both the satisfied and the unconfirmed notices. Falling
+ * through to the SATISFIED wording is what an inexhaustive branch would have done here,
+ * and it would have announced that the review machinery works on the strength of a
+ * self-contradictory report.
+ */
+export const POSITIVE_CONTROL_CONFLICTING_TEXT =
+  `Positive control not confirmed — this is a positive control, not a security ` +
+  `finding. The decision for the ${SYSTEM_PRIVILEGED_GROUP} group was reported more ` +
+  `than once, or at a type that is not a boolean, so which answer is authoritative ` +
+  `cannot be determined and none of them is treated as a decision.`;
+
+/**
  * Stated whenever the non-master identity resolved full wildcard authority, so
  * the escalation is visible even if the server listed no matching finding.
  */
@@ -618,9 +684,7 @@ export const PROBE_TABLE_CAPTION =
 export const REFRESH_BUTTON_LABEL = 'Re-run the RBAC least-privilege check';
 
 /** Explains a disabled re-request affordance rather than leaving it inert. */
-export const REFRESH_UNAVAILABLE_TITLE =
-  'This panel was rendered from a payload supplied by its caller, so there is no ' +
-  'request for it to re-issue.';
+export const REFRESH_UNAVAILABLE_TITLE = SHARED_REFRESH_UNAVAILABLE_TITLE;
 
 /** Heading of the findings section, parameterised by the count. */
 export function findingsHeading(count: number): string {
@@ -645,6 +709,7 @@ export const DECISION_LABELS: Readonly<Record<ProbeDecision, string>> = Object.f
   allowed: 'Allowed',
   denied: 'Denied',
   unreported: 'Not reported',
+  conflicting: 'Reported inconsistently',
 });
 
 /**
@@ -697,6 +762,15 @@ export const PROBE_OUTCOME_FINDING = 'Privilege-escalation finding';
 export const PROBE_OUTCOME_BROKEN = 'Check integrity broken';
 
 /**
+ * Outcome cell: the decision was reported more than once, or at the wrong type.
+ *
+ * Worded so it cannot be mistaken for either a holding probe or a finding. The report
+ * is broken, which is neither evidence of a defect nor evidence of correctness.
+ */
+export const PROBE_OUTCOME_CONFLICTING =
+  'Reported inconsistently — not counted as a decision';
+
+/**
  * Whether a probe's observed decision matches the outcome the control requires.
  *
  * Invariant locked: `'unreported'` NEVER holds. Silence is not agreement, and
@@ -708,7 +782,7 @@ export const PROBE_OUTCOME_BROKEN = 'Check integrity broken';
  * @returns `true` only when the probe was evaluated and agreed.
  */
 export function probeHolds(probe: SubjectAccessReviewProbe, decision: ProbeDecision): boolean {
-  if (decision === 'unreported') {
+  if (decision === 'unreported' || decision === 'conflicting') {
     return false;
   }
   return (decision === 'allowed') === probe.expectedAllowed;
@@ -725,6 +799,9 @@ export function probeHolds(probe: SubjectAccessReviewProbe, decision: ProbeDecis
 function describeProbeOutcome(probe: SubjectAccessReviewProbe, decision: ProbeDecision): string {
   if (decision === 'unreported') {
     return PROBE_OUTCOME_UNREPORTED;
+  }
+  if (decision === 'conflicting') {
+    return PROBE_OUTCOME_CONFLICTING;
   }
   if (probeHolds(probe, decision)) {
     return PROBE_OUTCOME_HOLDS;
@@ -790,6 +867,9 @@ function PositiveControlNotice({ decision }: { readonly decision: ProbeDecision 
   }
   if (decision === 'unreported') {
     return <p>{POSITIVE_CONTROL_UNCONFIRMED_TEXT}</p>;
+  }
+  if (decision === 'conflicting') {
+    return <p>{POSITIVE_CONTROL_CONFLICTING_TEXT}</p>;
   }
   return <p>{POSITIVE_CONTROL_SATISFIED_TEXT}</p>;
 }
@@ -1014,25 +1094,27 @@ function RbacWildcardReport({
  */
 function RbacWildcardResult({
   result,
+  onRefresh,
 }: {
   readonly result: UseControlStatusResult;
+  readonly onRefresh: (() => void) | undefined;
 }): ReactElement {
   if (result.status === 'loading') {
-    return <RbacWildcardLoading onRefresh={result.refresh} />;
+    return <RbacWildcardLoading onRefresh={onRefresh} />;
   }
   if (result.status === 'error') {
-    return <RbacWildcardError error={result.error} onRefresh={result.refresh} />;
+    return <RbacWildcardError error={result.error} onRefresh={onRefresh} />;
   }
   const control = selectControlStatus(result.controls, RBAC_WILDCARD_CONTROL_ID);
   if (control === undefined) {
     return (
       <RbacWildcardEmpty
         reason={result.isEmpty ? 'no-controls-reported' : 'control-absent'}
-        onRefresh={result.refresh}
+        onRefresh={onRefresh}
       />
     );
   }
-  return <RbacWildcardReport control={control} onRefresh={result.refresh} />;
+  return <RbacWildcardReport control={control} onRefresh={onRefresh} />;
 }
 
 /**
@@ -1044,9 +1126,20 @@ function RbacWildcardResult({
  * fetching and being handed a payload has to be a choice of which component to
  * render, not a conditional call.
  */
-function RbacWildcardConnected(): ReactElement {
+function RbacWildcardConnected({
+  onRefresh,
+  canRefresh,
+}: {
+  readonly onRefresh: (() => void) | undefined;
+  readonly canRefresh: boolean;
+}): ReactElement {
   const result = useControlStatus(RBAC_WILDCARD_CONTROL_ID);
-  return <RbacWildcardResult result={result} />;
+  return (
+    <RbacWildcardResult
+      result={result}
+      onRefresh={resolveRefreshHandler(onRefresh, result.refresh, canRefresh)}
+    />
+  );
 }
 
 /**
@@ -1072,6 +1165,14 @@ export interface RbacWildcardPanelProps {
    * own `refresh`.
    */
   readonly onRefresh?: () => void;
+  /**
+   * Whether refreshing can re-request anything at all.
+   *
+   * `false` disables this panel's refresh affordance and explains why, which is how an
+   * aggregate surface that was handed its posture directly keeps every control's button
+   * consistent with its own. Defaults to `true`, so a panel used on its own is unaffected.
+   */
+  readonly canRefresh?: boolean;
 }
 
 /**
@@ -1094,12 +1195,23 @@ export default function RbacWildcardPanel({
   status,
   result,
   onRefresh,
+  canRefresh = true,
 }: RbacWildcardPanelProps = {}): ReactElement {
   if (status !== undefined) {
-    return <RbacWildcardReport control={status} onRefresh={onRefresh} />;
+    return (
+      <RbacWildcardReport
+        control={status}
+        onRefresh={resolveRefreshHandler(onRefresh, undefined, canRefresh)}
+      />
+    );
   }
   if (result !== undefined) {
-    return <RbacWildcardResult result={result} />;
+    return (
+      <RbacWildcardResult
+        result={result}
+        onRefresh={resolveRefreshHandler(onRefresh, result.refresh, canRefresh)}
+      />
+    );
   }
-  return <RbacWildcardConnected />;
+  return <RbacWildcardConnected onRefresh={onRefresh} canRefresh={canRefresh} />;
 }

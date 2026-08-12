@@ -177,10 +177,13 @@ filterwarnings = [
   # exist yet - the normal state while the tier is populated file by file -
   # Config._decide_args() issues exactly this PytestConfigWarning, and
   # escalating it aborts pytest with a bare Python traceback and exit 1 instead
-  # of the clean exit 5 that hack/make-rules/test-python.sh deliberately
-  # reports as "no Python tests collected yet (migration in progress)". An
-  # illegible traceback would defeat that design for no gain: an empty tier is
-  # already reported, loudly, by the warning itself.
+  # of the clean exit 5 that hack/make-rules/test-python.sh turns into a NAMED
+  # test-gate failure ("pytest collected NO tests ... which this gate treats as
+  # a failure", with the offending target, marker or empty tier identified).
+  # Zero collection is a failure there, not a pass; the downgrade here only
+  # decides whether that failure is legible or an illegible traceback, and an
+  # illegible one would help nobody: an empty tier is already reported, loudly,
+  # by the warning itself.
   #
   # Ordering is load-bearing. Each entry is applied in turn and the last one
   # applied wins, so this narrowing MUST follow "error"; placed before it, the
@@ -340,16 +343,29 @@ warn_unused_configs = true
 strict_equality = true
 warn_no_return = true
 
-# Third-party packages that ship neither inline types nor a py.typed marker.
-# The list is exactly as long as it needs to be, derived by auditing the
-# installed distributions rather than guessed: everything else the tier imports
-# (etcd3gw, PyJWT, httpx, respx, freezegun, hypothesis, pytest itself) IS
-# typed, and mypy's `X.*` pattern already matches both `X` and its submodules.
-# Extend this list only after confirming the package genuinely lacks types -
-# a redundant entry is reported as an unused section by warn_unused_configs.
+# Third-party packages that ship neither inline types nor a py.typed marker AND
+# that the tier imports TODAY. Both halves matter: `warn_unused_configs = true`
+# above reports an override with no matching import as an unused section, so an
+# entry added ahead of its first consumer makes every mypy run emit a note - which
+# trains the reader to ignore mypy's notes, the opposite of what a type gate is
+# for.
+#
+# The list is derived by auditing the installed distributions rather than guessed:
+# everything else the tier imports (etcd3gw, PyJWT, httpx, respx, freezegun,
+# hypothesis, pytest itself) IS typed, and mypy's `X.*` pattern already matches
+# both `X` and its submodules.
+#
+# PENDING ENTRY, deliberately absent until it is needed: PyYAML 6.0.3 is a pinned
+# dependency but ships no py.typed marker (verified in the installed
+# distribution), and nothing under python/ imports it yet - the config-schema tier
+# that will (AAP 0.4.2.3: test_encryption_provider_config.py,
+# test_namespace_pss_labels.py, test_admission_webhook_failclosed.py and the three
+# beside them) is not written. Add "yaml.*" to the list below IN THE SAME CHANGE as
+# the first module that imports yaml. Do NOT reach for types-PyYAML instead: AAP
+# 0.6.1.1 pins exactly eighteen direct Python distributions, so a nineteenth would
+# be a dependency-inventory change rather than a typing fix.
 [[tool.mypy.overrides]]
 module = [
   "kubernetes.*",
-  "yaml.*",
 ]
 ignore_missing_imports = true

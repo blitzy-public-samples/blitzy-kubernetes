@@ -323,13 +323,31 @@ const AUDIT_DELETE_OPTIONS_BODY: AuditPayload = { kind: 'DeleteOptions' };
 // test/integration/controlplane/audit/audit_test.go L812-852. The count was
 // verified by counting the `Level:` keys in that exact range: THREE.
 //
-// WHY THREE AND NOT FOUR. `secretOperations` (L742-755) performs FOUR calls --
-// create, GET, update, delete -- yet the oracle expects three events. The `get`
-// is the one that yields nothing: at `Request` the API server records the request
-// object and never the response object, and a read carries its payload only in
-// the RESPONSE. So a Secret read logs no Secret data at all, which is the whole
-// point of choosing `Request`. A port that "helpfully" added a fourth expected
-// event for the `get` would fail against the real audit log.
+// WHY THREE EXPECTED AND NOT FOUR -- AND WHY FOUR ARE LOGGED.
+// `secretOperations` (L742-755) performs FOUR calls -- create, GET, update,
+// delete -- and the oracle expects three events. The reason is recorded in that
+// function's own comment at L739-L741: "the get is intentionally not asserted
+// (CheckAuditLines ignores unmatched log lines)". So the fourth event IS WRITTEN
+// TO THE AUDIT LOG; it is simply absent from the expected table, and
+// `CheckAuditLinesFiltered` (test/utils/audit.go L92-L130) is a PRESENCE check
+// that marks expectations off against the stream and ignores every line it did
+// not expect.
+//
+// The distinction is load-bearing rather than pedantic. The audit LEVEL decides
+// what a recorded event CONTAINS, never whether one exists: at `Request` the API
+// server records the request object and never the response object, and a read
+// carries its payload only in the RESPONSE -- so the Secret GET is logged with no
+// Secret data in it whatsoever, which is the whole point of choosing `Request`.
+// That makes the GET the single most valuable event in the stream for the
+// confidentiality guard, because it is a `secrets` event that the expected table
+// does not contain.
+//
+// The builder below therefore returns the THREE ASSERTED events and nothing else,
+// so it stays a faithful mirror of `secretAuditRequestEvents` -- adding a fourth
+// expectation would fail against the real audit log for a namespace whose policy
+// never promised one. The logged-but-unasserted GET lives in
+// {@link secretsRequestUnassertedAuditEvents} and reaches consumers through
+// {@link ALL_OBSERVED_AUDIT_EVENTS}.
 //
 // WHY NO RESPONSE OBJECT (F-006-RQ-002, AAP §0.10.2). Recorded from the source
 // comment at `audit_test.go` L802-811 and asserted by the guard at L1043-1047:
@@ -445,6 +463,64 @@ export function secretsRequestAuditEvents(namespace: string): AuditEvent[] {
       // A delete's request body is the DeleteOptions, which is why the oracle
       // records RequestObject: true here too (L847).
       requestObject: AUDIT_DELETE_OPTIONS_BODY,
+      annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
+    },
+  ];
+}
+
+/**
+ * Builds the `secrets` audit event the oracle CAUSES but does not assert: the
+ * Secret read from `secretOperations` (`audit_test.go` L750-L751).
+ *
+ * INVARIANT LOCKED (F-006-RQ-002): a Secret READ is audited at `Request` and
+ * carries NEITHER a `requestObject` (a GET has no request body) NOR a
+ * `responseObject` (the level forbids it). It is the event that proves the
+ * confidentiality guard is scanning the stream rather than the expectations,
+ * because no expected-events table contains it.
+ *
+ * WHY IT IS SEPARATE FROM THE EXPECTED SET, AND MUST STAY SEPARATE. The two sets
+ * answer different questions and the Go oracle keeps them apart on purpose. The
+ * expected set is checked for PRESENCE -- every entry must be found, and
+ * `audit_test.go` L1021-L1024 fails the wait loop while any is missing. The
+ * observed stream is checked for a PROHIBITION -- L1039-L1046 iterates
+ * `missingReport.AllEvents` and reports every `secrets` event carrying a response
+ * object. Merging them would break both directions at once: this GET would become
+ * an expectation the recorded policy never promised, and the guard would go back
+ * to scanning only what it already expected.
+ *
+ * Timestamps sit between the recorded create and update, matching the order the
+ * operations ran. Like every timestamp in this file they are frozen synthetic
+ * literals, because `testEventFromInternalFiltered` projects neither timestamp
+ * (test/utils/audit.go L133-L148) and so no measured value exists to record.
+ *
+ * @param namespace - the namespace the audit policy raises to `Request`; pass
+ *   {@link SECRET_AUDIT_REQUEST_NAMESPACE} to reproduce the recorded case.
+ * @returns the single logged-but-unasserted read event, in a fresh array.
+ */
+export function secretsRequestUnassertedAuditEvents(namespace: string): AuditEvent[] {
+  return [
+    {
+      apiVersion: 'audit.k8s.io/v1',
+      kind: 'Event',
+      auditID: '8a4c2e17-5b93-4d06-9f81-3c7e0a52d9b6',
+      level: 'Request',
+      stage: 'ResponseComplete',
+      requestURI: `/api/v1/namespaces/${namespace}/secrets/${AUDIT_SECRET_NAME}`,
+      verb: 'get',
+      user: { username: AUDIT_TEST_USERNAME },
+      requestReceivedTimestamp: '2026-02-17T09:14:02.803556Z',
+      stageTimestamp: '2026-02-17T09:14:02.831094Z',
+      objectRef: {
+        resource: 'secrets',
+        namespace,
+        name: AUDIT_SECRET_NAME,
+        apiGroup: '',
+        apiVersion: 'v1',
+      },
+      responseStatus: { code: 200 },
+      // requestObject: ABSENT -- a GET carries no request body.
+      // responseObject: ABSENT -- `Request` never records one. This event is the
+      // reason the guard has something to find that the expectations do not hold.
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
   ];
@@ -666,7 +742,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
 // no randomness -- so importing this module has no observable effect beyond
 // binding names.
 //
-// All three are typed `readonly AuditEvent[]`. `readonly` is the point: a spec
+// All four are typed `readonly AuditEvent[]`. `readonly` is the point: a spec
 // that spliced or sorted a shared fixture in place would leak that edit into
 // every later spec in the same worker, and the compiler now refuses. A consumer
 // that genuinely needs a mutable array should call the builder, which hands back
@@ -696,19 +772,43 @@ export const RBAC_RESPONSE_AUDIT_EVENTS: readonly AuditEvent[] =
   rbacResponseAuditEvents(RBAC_AUDIT_RESPONSE_NAMESPACE);
 
 /**
- * All nine recorded events -- the two per-case collections concatenated, in the
- * order the measured operations ran.
+ * The `secrets` events the oracle logs WITHOUT asserting -- the Secret read.
+ *
+ * Kept as its own named constant rather than folded into the observed stream so
+ * that a spec can state the property that matters directly: this event is in
+ * {@link ALL_OBSERVED_AUDIT_EVENTS} and is NOT in
+ * {@link SECRETS_REQUEST_AUDIT_EVENTS}. That difference is what makes the
+ * observed stream a genuine superset instead of a synonym.
+ */
+export const SECRETS_REQUEST_UNASSERTED_AUDIT_EVENTS: readonly AuditEvent[] =
+  secretsRequestUnassertedAuditEvents(SECRET_AUDIT_REQUEST_NAMESPACE);
+
+/**
+ * The complete observed audit stream -- ALL TEN events, in the order the measured
+ * operations ran: the Secret create, the UNASSERTED Secret read, the Secret
+ * update and delete, then the six RBAC events.
  *
  * WHY THIS EXISTS, AND WHY A CONSUMER MUST PREFER IT.
  * The Go guard does NOT scan the expected-events table. It scans
  * `missingReport.AllEvents` (`audit_test.go` L1028 and L1038-1040), which
  * `test/utils/audit.go` L122 appends to for EVERY decoded audit line -- a
- * SUPERSET of the expectations. The recorded reason is that a future regression
- * to `RequestResponse` is then caught even if the expected-events table were
- * edited to match the regression. The presentation mirror inherits that
- * property only if it inspects EVERY event it received or rendered, not just the
- * ones it expected, so this collection is the correct input for
- * ConfidentialityRedaction and for any panel-wide assertion.
+ * SUPERSET of the expectations. The recorded reason is stated at
+ * `audit_test.go` L1041-L1043: a future regression to `RequestResponse` is then
+ * caught "even if the expected-events table were changed to match". The
+ * presentation mirror inherits that property only if it inspects EVERY event it
+ * received or rendered, not just the ones it expected, so this collection is the
+ * correct input for ConfidentialityRedaction and for any panel-wide assertion.
+ *
+ * IT IS A SUPERSET IN FACT AND NOT ONLY IN INTENT. It contains
+ * {@link SECRETS_REQUEST_UNASSERTED_AUDIT_EVENTS} -- the Secret GET that
+ * `secretOperations` performs at `audit_test.go` L750-L751 and that its own
+ * comment at L739-L741 records as "intentionally not asserted". While this
+ * collection was merely the two expected sets concatenated, a guard scanning it
+ * scanned exactly the events it already expected, which is the one thing the Go
+ * comment says the guard must not do: an expected-events table edited to match a
+ * regression would have taken the guard's only evidence with it. Now there is a
+ * `secrets` event in the stream that no expectation holds, so the guard has
+ * something to catch that the expectations cannot hide.
  *
  * INVARIANT LOCKED (F-006-RQ-002, the confidentiality guard mirrored from
  * `audit_test.go` L1043-1047): across this whole collection, NO event whose
@@ -724,7 +824,11 @@ export const RBAC_RESPONSE_AUDIT_EVENTS: readonly AuditEvent[] =
  * `{ ...secretsRequestAuditEvents('ns')[0], responseObject: { kind: 'Secret' } }`.
  */
 export const ALL_OBSERVED_AUDIT_EVENTS: readonly AuditEvent[] = [
-  ...SECRETS_REQUEST_AUDIT_EVENTS,
+  // Interleaved rather than concatenated, because the stream is chronological and
+  // the read happened between the create and the update.
+  ...SECRETS_REQUEST_AUDIT_EVENTS.slice(0, 1),
+  ...SECRETS_REQUEST_UNASSERTED_AUDIT_EVENTS,
+  ...SECRETS_REQUEST_AUDIT_EVENTS.slice(1),
   ...RBAC_RESPONSE_AUDIT_EVENTS,
 ];
 
@@ -949,4 +1053,3 @@ export const AUDIT_LEVEL_ALIASES = [
   { alias: 'request', level: 'Request' },
   { alias: 'response', level: 'RequestResponse' },
 ] as const satisfies readonly AuditLevelAlias[];
-

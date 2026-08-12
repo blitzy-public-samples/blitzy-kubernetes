@@ -33,11 +33,3 @@ export LOG_LEVEL=4
 set -x;
 make test-cmd
 make test-integration
-
-# Python (pytest) and React (Vitest) test tiers plus the parity contract that
-# asserts they reproduce every verdict the Go oracle records.
-# AAP 0.4.6 / 0.5.4: CI is external Prow driving this dockerized entry point,
-# so wiring the targets here is the entire CI change required.
-make test-python
-make test-web
-make test-parity

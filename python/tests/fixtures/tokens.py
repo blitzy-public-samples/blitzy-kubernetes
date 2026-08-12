@@ -102,7 +102,9 @@ Usage::
 # raises at import time rather than silently producing a token file with a different
 # number of columns than the apiserver expects.
 
+import os
 import pathlib
+import tempfile
 from dataclasses import dataclass
 from typing import Final
 
@@ -115,6 +117,7 @@ __all__ = [
     "NODE2_IDENTITY",
     "NODE2_NAME",
     "NODE_USERNAME_PREFIX",
+    "TOKEN_FILE_MODE",
     "TOKEN_IDENTITIES",
     "TOKEN_MASTER",
     "TOKEN_NODE1",
@@ -135,6 +138,16 @@ __all__ = [
 #
 # Go names, for the reader diffing against the original: tokenMaster (line 1594),
 # tokenNode1 (line 1595), tokenNode2 (line 1596).
+# The mode write_token_csv creates the token file with: owner read/write only.
+#
+# A token-auth file is the apiserver's --token-auth-file, so every bearer token in it is a
+# credential for the process that reads it. These three are fake and ephemeral (see above),
+# but the MODE is not about these values - it is about the helper being safe to point at a
+# real token file, and about the file the V7 port writes not being world-readable on a
+# multi-tenant CI worker where /tmp is shared. 0o600 is what os.CreateTemp gives the Go
+# original by default, so this also restores fidelity that write_text had lost.
+TOKEN_FILE_MODE: Final[int] = 0o600
+
 TOKEN_MASTER: Final[str] = "master-token"
 TOKEN_NODE1: Final[str] = "node1-token"
 TOKEN_NODE2: Final[str] = "node2-token"
@@ -352,12 +365,41 @@ def token_csv() -> str:
 
 
 def write_token_csv(path: pathlib.Path) -> pathlib.Path:
-    """Write :func:`token_csv` to a destination the caller owns.
+    """Write :func:`token_csv` to a destination the caller owns, ATOMICALLY and mode 0600.
 
     The Go original calls ``os.CreateTemp("", "kubeconfig")`` and leaves the file behind. In
-    pytest the consumer owns isolation, so this helper creates nothing of its own: it writes
-    where it is told - conventionally ``tmp_path / "tokens.csv"``, which pytest cleans up -
-    sets no permissions, and registers no finaliser.
+    pytest the consumer owns isolation, so this helper creates no destination of its own: it
+    writes where it is told - conventionally ``tmp_path / "tokens.csv"``, which pytest cleans
+    up - and registers no finaliser.
+
+    TWO PROPERTIES OF THE FILE ITSELF ARE PART OF THE CONTRACT, and neither was true when
+    this wrote through ``Path.write_text``:
+
+    * MODE 0600, set on the file descriptor rather than left to the ambient umask. The
+      previous implementation created the file with ``0o666 & ~umask``, which on the
+      prevailing CI umask of 022 is ``0o644`` - a WORLD-READABLE file whose every line is
+      ``<bearer token>,<username>,<uid>,"<groups>"``. These three tokens are fake and
+      ephemeral, so nothing here was ever exposed; the problem is that the helper taught the
+      wrong default to every future caller, and that a token file readable by other users on
+      a shared CI worker is exactly the posture the V1-V8 suite exists to assert against.
+      Go's ``os.CreateTemp`` creates at 0600, so this restores fidelity rather than adding a
+      rule. ``os.fchmod`` after creation makes the result umask-INDEPENDENT: a umask that
+      strips an owner bit (0o200, say) would otherwise leave the file unreadable and the
+      apiserver unable to authenticate anyone.
+    * ATOMIC REPLACEMENT. The body is written to a temporary file in the SAME directory and
+      then replaced onto the destination with ``os.replace``, so a reader - the apiserver, which is
+      routinely started in the same fixture that writes this file - sees either the whole
+      previous file or the whole new one and never a partially written one. Truncating in
+      place, which ``write_text`` does, has a window in which the file is empty or holds only
+      the master row, and an apiserver that read it there would reject ``node1-token`` as an
+      unknown bearer token: a spurious 401 in a test whose whole subject is the difference
+      between 401, 403 and 404. The temporary file is created in the destination's own
+      directory because ``os.replace`` is only atomic within one filesystem.
+
+    Replacing rather than truncating has a second effect worth naming: ``os.replace`` acts on
+    the destination NAME, so a symlink at that path is replaced by a regular file instead of
+    being followed. ``write_text`` followed it and wrote the token file wherever the link
+    pointed.
 
     Args:
         path: The destination file. Its parent directory must already exist, which is true
@@ -368,17 +410,52 @@ def write_token_csv(path: pathlib.Path) -> pathlib.Path:
         ``--token-auth-file`` value is assembled.
 
     Raises:
-        OSError: If the destination cannot be written - it does not exist, is a directory,
-            or is not writable. The exception carries the offending path, so it is allowed
-            to propagate unwrapped rather than being re-raised with less information.
+        OSError: If the destination cannot be written - its parent does not exist or is not
+            writable, or the destination itself is a directory. The exception carries the
+            offending path, so it is allowed to propagate unwrapped rather than being
+            re-raised with less information. The temporary file is removed first, so a
+            failure leaves nothing behind.
     """
     # Accepts a str or any os.PathLike from an unannotated caller as well as the Path the
     # signature asks for; for a Path this is an identity conversion.
     destination = pathlib.Path(path)
 
-    # encoding is explicit so the bytes on disk never depend on the ambient locale, and
-    # newline="\n" disables the platform line-ending translation that write_text would
-    # otherwise apply - together they make the file byte-identical to token_csv().
-    destination.write_text(token_csv(), encoding="utf-8", newline="\n")
+    # mkstemp creates with O_CREAT|O_EXCL and mode 0600, so the window in which the file
+    # could be opened by anyone else does not exist. The prefix names this module so a
+    # leftover file - which the finally clauses below make unreachable - would still be
+    # attributable.
+    handle, temporary_name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
+    )
+    temporary = pathlib.Path(temporary_name)
+    try:
+        try:
+            # fchmod rather than chmod: it acts on the descriptor just created, so there is
+            # no path to re-resolve and no umask left in the result.
+            os.fchmod(handle, TOKEN_FILE_MODE)
+            # encoding is explicit so the bytes on disk never depend on the ambient locale,
+            # and newline="\n" disables the platform line-ending translation a text stream
+            # would otherwise apply - together they make the file byte-identical to
+            # token_csv(). closefd=False keeps ownership of the descriptor here so it is
+            # closed exactly once, in the finally below, whichever way this exits.
+            with open(handle, "w", encoding="utf-8", newline="\n", closefd=False) as stream:
+                stream.write(token_csv())
+                stream.flush()
+                # The bytes must be on the filesystem before the rename publishes the name:
+                # os.replace orders the rename against the data only if the data was already
+                # flushed out of the process and, here, out of the kernel's page cache.
+                os.fsync(handle)
+        finally:
+            os.close(handle)
+        # Atomic within this directory: after this line the destination name resolves to a
+        # complete file, and the temporary name no longer exists.
+        os.replace(temporary, destination)
+    except BaseException:
+        # Reached only when the write or the replace failed, so the temporary is still
+        # present and orphaned. missing_ok covers the race-free case where replace itself
+        # partially succeeded. BaseException rather than Exception so a KeyboardInterrupt
+        # between mkstemp and replace does not leak the file either.
+        temporary.unlink(missing_ok=True)
+        raise
 
     return destination

@@ -45,6 +45,20 @@
     "strict": true,
     "noEmit": true,
 
+    // Permits `import viteConfig from './vite.config.ts'` in web/vitest.config.ts.
+    //
+    // Vite 8.2.1 warns on an extensionless relative configuration specifier, because a
+    // future major will load configuration natively where it would no longer resolve.
+    // Naming the extension silences that, and TS5097 requires this option before the
+    // specifier will typecheck. The option itself requires `noEmit` or
+    // `emitDeclarationOnly`, and `noEmit` above is already unconditional because this
+    // project exists solely to TYPECHECK the two build-tooling modules -- nothing is
+    // ever emitted from it. So this states a fact about the project rather than
+    // relaxing a check, and both halves were re-measured afterwards: `tsc --noEmit -p
+    // tsconfig.node.json` exits 0, and `vitest run` prints no notice where it
+    // previously printed three lines of one.
+    "allowImportingTsExtensions": true,
+
     // Mandatory here — see the @types/node note above.
     "skipLibCheck": true,
 

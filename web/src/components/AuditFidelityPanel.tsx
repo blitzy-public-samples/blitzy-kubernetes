@@ -96,16 +96,26 @@ limitations under the License.
 import { useCallback, useId, useMemo, useState } from 'react';
 import type { ChangeEvent, ReactElement } from 'react';
 
+import {
+  readNumber,
+  readString,
+  selectObservation,
+  strictestVerdict,
+  type EffectiveVerdict,
+} from '../domain/evidence';
+import { V6_OBSERVATIONS, v6ResourceLevelObservation } from '../domain/observationIds';
 import type { AuditEvent, AuditLevel } from '../hooks/useAuditEvents';
 import { AUDIT_LEVEL_ORDER } from '../hooks/useAuditEvents';
 import type {
   ControlId,
+  ControlObservation,
   ControlStatus,
   ControlStatusError,
   ControlVerdict,
   UseControlStatusResult,
 } from '../hooks/useControlStatus';
 import { selectControlStatus, useControlStatus } from '../hooks/useControlStatus';
+import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
 
 /**
  * The control this panel reports on.
@@ -585,6 +595,308 @@ function auditEventFindings(event: AuditEvent): readonly string[] {
   return findings;
 }
 
+/** Selects the singular or plural form for a count, so no sentence reads "1 events". */
+function plural(count: number, singular: string, pluralForm: string): string {
+  return count === 1 ? singular : pluralForm;
+}
+
+/**
+ * The `objectRef` identity of the ONE per-resource level row whose value is a
+ * load-bearing boundary condition.
+ *
+ * Built through the shared identity builder rather than spelled out, so the
+ * fixtures, the payloads and this panel name the measurement identically and
+ * compare it with `===`.
+ */
+const SECRETS_LEVEL_ROW_IDENTITY = v6ResourceLevelObservation(
+  '',
+  [SECRETS_RESOURCE],
+  'secret-audit-request',
+);
+
+/** The level order as the payload must report it: the canonical relation, verbatim. */
+const REQUIRED_LEVEL_ORDERING = AUDIT_LEVEL_ORDER.join(' < ');
+
+/**
+ * One measured fact a V6 pass rests on, and what became of it.
+ *
+ * `indeterminate` and `violated` are kept apart deliberately: the first is a gap in
+ * the report and withholds a pass, the second is a finding and forces a failure.
+ * Collapsing them would either invent violations out of silence or hide real ones.
+ */
+interface AuditMeasurement {
+  /** The observation identity, rendered so the row cites what it read. */
+  readonly identity: string;
+  /** What the measurement establishes, in a reader's words. */
+  readonly title: string;
+  /** The outcome. */
+  readonly result: 'satisfied' | 'violated' | 'indeterminate';
+  /** Why, in one sentence. Never carries an audited payload. */
+  readonly detail: string;
+}
+
+/** Shared empty list, so a payload with no observations allocates nothing. */
+const NO_OBSERVATIONS: readonly ControlObservation[] = Object.freeze([]);
+
+/**
+ * Requires one observation to be exactly the given level.
+ *
+ * A level ABOVE the required one and a level BELOW it are reported as two different
+ * violations, by rank rather than by inequality, for the same reason
+ * {@link describeSecretsLevelDeviation} does it for events: above means the response
+ * body reached the audit log, below means the forensic record was lost, and an
+ * operator has to know which way to act.
+ */
+function requireLevel(
+  observations: readonly ControlObservation[],
+  identity: string,
+  title: string,
+  required: AuditLevel,
+): AuditMeasurement {
+  const observed = readString(observations, identity);
+  if (observed.state !== 'reported') {
+    return { identity, title, result: 'indeterminate', detail: observed.reason };
+  }
+  if (observed.value === required) {
+    return {
+      identity,
+      title,
+      result: 'satisfied',
+      detail: `Audited at exactly ${describeAuditLevel(required)}.`,
+    };
+  }
+  if (!isAuditLevel(observed.value)) {
+    return {
+      identity,
+      title,
+      result: 'indeterminate',
+      detail:
+        `Reported as a level this panel cannot name, so it cannot be ranked against ` +
+        `${describeAuditLevel(required)}.`,
+    };
+  }
+  const deviation = describeSecretsLevelDeviation(observed.value);
+  return {
+    identity,
+    title,
+    result: 'violated',
+    detail: deviation ?? `Audited at ${describeAuditLevel(observed.value)}.`,
+  };
+}
+
+/**
+ * THE CONFIDENTIALITY GUARD, as one number.
+ *
+ * The count of observed `secrets` events carrying a `responseObject` MUST be zero.
+ * Any other value is a Secret body written into the audit log, which is precisely
+ * the disclosure V6 exists to prevent, so it is a VIOLATION and forces a failure
+ * however the check itself scored the control.
+ *
+ * A `null` count is NOT zero and must never be read as one. The recorded
+ * indeterminate payload carries `null` exactly because no event was seen at all,
+ * and "no Secret event carried a response body because no Secret event existed" is
+ * emphatically not a pass.
+ */
+function requireResponseObjectCount(observations: readonly ControlObservation[]): AuditMeasurement {
+  const identity = V6_OBSERVATIONS.secretsResponseObjectCount;
+  const title = `no observed ${SECRETS_RESOURCE} event carries a response body`;
+  const observed = readNumber(observations, identity);
+  if (observed.state !== 'reported') {
+    return {
+      identity,
+      title,
+      result: 'indeterminate',
+      detail: `${observed.reason} A count that was not reported is not a count of zero.`,
+    };
+  }
+  if (observed.value === 0) {
+    return {
+      identity,
+      title,
+      result: 'satisfied',
+      detail: 'The check scanned the observed events and found no recorded response body.',
+    };
+  }
+  return {
+    identity,
+    title,
+    result: 'violated',
+    detail:
+      `${String(observed.value)} observed ${SECRETS_RESOURCE} ` +
+      `${plural(observed.value, 'event', 'events')} carried a response body, so the payload ` +
+      'reached the audit log.',
+  };
+}
+
+/**
+ * Requires the reported level ordering to be the canonical strict total order.
+ *
+ * The ordering is carried as a VALUE rather than as a boolean so that it can be
+ * compared: a reordering fails here, whereas a bare `true` would be unverifiable
+ * prose that no check could contradict.
+ */
+function requireLevelOrdering(observations: readonly ControlObservation[]): AuditMeasurement {
+  const identity = V6_OBSERVATIONS.levelOrdering;
+  const title = `the level order is ${REQUIRED_LEVEL_ORDERING}`;
+  const observed = readString(observations, identity);
+  if (observed.state !== 'reported') {
+    return { identity, title, result: 'indeterminate', detail: observed.reason };
+  }
+  return observed.value === REQUIRED_LEVEL_ORDERING
+    ? { identity, title, result: 'satisfied', detail: 'The reported order is the required order.' }
+    : {
+        identity,
+        title,
+        result: 'violated',
+        detail:
+          'The reported order is not the required order, so a level could be silently ' +
+          'downgraded without any single level looking wrong.',
+      };
+}
+
+/**
+ * The measurements a V6 pass rests on, in the order a reader needs them.
+ *
+ * THREE are required outright — the `secrets` level, the response-body count and the
+ * level ordering — and each is an exact value from AAP §0.10.2. Two more are
+ * CONDITIONAL: they constrain the verdict only when the check reported them, because
+ * their absence is normal rather than suspicious.
+ *
+ *   * `audit events observed` reported as zero means nothing was scanned, so a pass
+ *     is withheld. It is not a violation: an empty audit log is an unverified
+ *     control, not a broken one.
+ *   * the per-resource `secrets` level row, when present, must be exactly `Request`
+ *     for the same reason the aggregate level must be.
+ */
+function buildAuditMeasurements(
+  observations: readonly ControlObservation[],
+): readonly AuditMeasurement[] {
+  const measurements: AuditMeasurement[] = [
+    requireLevel(
+      observations,
+      V6_OBSERVATIONS.secretsAuditLevel,
+      `${SECRETS_RESOURCE} are audited at exactly ${SECRETS_REQUIRED_LEVEL}`,
+      SECRETS_REQUIRED_LEVEL,
+    ),
+    requireResponseObjectCount(observations),
+    requireLevelOrdering(observations),
+  ];
+
+  const observedCount = selectObservation(observations, V6_OBSERVATIONS.auditEventsObserved);
+  if (observedCount.state !== 'unreported') {
+    const count = readNumber(observations, V6_OBSERVATIONS.auditEventsObserved);
+    measurements.push(
+      count.state !== 'reported'
+        ? {
+            identity: V6_OBSERVATIONS.auditEventsObserved,
+            title: 'at least one audit event was scanned',
+            result: 'indeterminate',
+            detail: count.reason,
+          }
+        : {
+            identity: V6_OBSERVATIONS.auditEventsObserved,
+            title: 'at least one audit event was scanned',
+            result: count.value > 0 ? 'satisfied' : 'indeterminate',
+            detail:
+              count.value > 0
+                ? `${String(count.value)} ${plural(count.value, 'event', 'events')} scanned.`
+                : 'No audit event was scanned, so the guard had nothing to inspect.',
+          },
+    );
+  }
+
+  if (selectObservation(observations, SECRETS_LEVEL_ROW_IDENTITY).state !== 'unreported') {
+    measurements.push(
+      requireLevel(
+        observations,
+        SECRETS_LEVEL_ROW_IDENTITY,
+        `the policy rule for ${SECRETS_LEVEL_ROW_IDENTITY} projects at ${SECRETS_REQUIRED_LEVEL}`,
+        SECRETS_REQUIRED_LEVEL,
+      ),
+    );
+  }
+
+  return measurements;
+}
+
+/**
+ * The verdict the EVIDENCE alone supports, folding in what this panel measured for
+ * itself from the observed events.
+ *
+ * INVARIANT LOCKED — A LOCAL CONFIDENTIALITY VIOLATION IS A FAILURE, whatever the
+ * server said. This is the whole point of computing anything here: the panel already
+ * detected, per event, that a `secrets` event carried a response body or sat at the
+ * wrong level, and it rendered those findings in a table cell while leaving the
+ * headline verdict at the value the server sent. A rendered PASS beside a rendered
+ * confidentiality violation is not a display inconsistency — it is the panel
+ * contradicting its own evidence, and a reader who trusts the headline is told the
+ * control holds when this panel has proof it does not.
+ *
+ * @param measurements - the reported measurements, from {@link buildAuditMeasurements}.
+ * @param localFindingCount - findings this panel derived from the observed events.
+ */
+function summariseAuditEvidence(
+  measurements: readonly AuditMeasurement[],
+  localFindingCount: number,
+): EffectiveVerdict {
+  if (localFindingCount > 0) {
+    return 'fail';
+  }
+  if (measurements.some((measurement) => measurement.result === 'violated')) {
+    return 'fail';
+  }
+  return measurements.every((measurement) => measurement.result === 'satisfied')
+    ? 'pass'
+    : 'unknown';
+}
+
+/** Every audit-fidelity finding this panel derived from the observed events. */
+function localEventFindings(events: readonly AuditEvent[]): readonly string[] {
+  return events.flatMap((event) => auditEventFindings(event));
+}
+
+/**
+ * The verdict this panel renders, which is not always the verdict the check
+ * reported.
+ *
+ * INVARIANT LOCKED — A PASS MUST BE EARNED, and every rule only ever moves the
+ * outcome in the safe direction:
+ *
+ *   1. A local confidentiality violation — a `secrets` event carrying a response
+ *      body, or one audited above or below `Request` — is a FAILURE. So is a
+ *      reported response-body count above zero, and so is a finding the check
+ *      attached.
+ *   2. A reported pass is downgraded to UNKNOWN when the three required
+ *      measurements were not all demonstrated, or when the check reported that it
+ *      scanned no events at all. An empty audit log is not evidence that Secret
+ *      responses go unlogged.
+ *   3. Otherwise the STRICTEST of the reported verdict and the evidence verdict
+ *      stands, so `warn` and `unknown` stay distinct and neither becomes a pass.
+ *
+ * Exported because the aggregate dashboard must count, filter and summarise the SAME
+ * verdict this panel renders; a dashboard deriving it from `status.verdict` would
+ * disagree with its own children.
+ *
+ * @param control - the payload for this control, exactly as the hook parsed it.
+ * @param events - observed events, when the caller supplied any. Their local
+ *   findings are folded in; an empty list contributes none.
+ * @returns the verdict the panel renders for that payload.
+ */
+export function resolveAuditFidelityEffectiveVerdict(
+  control: ControlStatus,
+  events: readonly AuditEvent[] = [],
+): EffectiveVerdict {
+  const measurements = buildAuditMeasurements(control.evidence?.observations ?? NO_OBSERVATIONS);
+  const evidence = summariseAuditEvidence(measurements, localEventFindings(events).length);
+  if (control.verdict === 'fail' || evidence === 'fail' || control.findings.length > 0) {
+    return 'fail';
+  }
+  if (control.verdict === 'pass') {
+    return evidence;
+  }
+  return strictestVerdict([control.verdict, evidence]);
+}
+
 /**
  * Describes which audited payloads an event recorded, WITHOUT rendering either
  * of them.
@@ -728,6 +1040,25 @@ const FILTER_LABEL = 'Filter by audit level';
 const ALL_LEVELS_OPTION_LABEL = 'All audit levels';
 /** Accessible name of the measured level table. */
 const LEVELS_TABLE_CAPTION = 'Measured per-resource audit levels';
+
+/**
+ * How each measurement result opens its sentence.
+ *
+ * `Record` over the union rather than a partial map, so a new result is a compile
+ * error here instead of an unlabelled row. The three words are deliberately
+ * different: "not established" is a gap and "violated" is a finding, and a reader
+ * must never have to guess which of the two they are looking at.
+ */
+type MeasurementResult = AuditMeasurement['result'];
+
+const MEASUREMENT_RESULT_WORDS: Readonly<Record<MeasurementResult, string>> = Object.freeze({
+  satisfied: 'Established:',
+  violated: 'Violated:',
+  indeterminate: 'Not established:',
+});
+
+/** Accessible name of the list of findings this panel derived from the observed events. */
+const LOCAL_FINDINGS_LABEL = 'Audit fidelity findings derived from the observed events';
 /** Accessible name of the observed event table. */
 const EVENTS_TABLE_CAPTION = 'Observed audit events and their recorded payloads';
 /** Names the nested region listing reported violations. */
@@ -821,6 +1152,11 @@ interface AuditFidelityVerdictProps {
   readonly control: ControlStatus | undefined;
   /** Identifier of the visible element that names this live region. */
   readonly labelId: string;
+  /**
+   * The observed events this panel was given, whose local findings are folded into
+   * the rendered verdict. Empty when none were supplied.
+   */
+  readonly events: readonly AuditEvent[];
 }
 
 /**
@@ -831,13 +1167,26 @@ interface AuditFidelityVerdictProps {
  * the control, and treating that silence as success would let this panel report
  * a clean control on evidence it never received.
  *
+ * Invariant locked: the verdict is RESOLVED rather than echoed. It is the output of
+ * {@link resolveAuditFidelityEffectiveVerdict}, so a `secrets` event carrying a
+ * response body, a `secrets` level away from `Request`, a non-zero reported
+ * response-body count or an unproven required measurement each move this affordance
+ * even when the server scored the control a pass. Echoing `control.verdict` here is
+ * what let the panel render PASS while its own event table listed a confidentiality
+ * violation two elements below.
+ *
  * `data-verdict` carries the resolved verdict so a stylesheet can distinguish
  * the four outcomes without this component inventing colour classes, and so
  * colour is never the sole carrier of meaning: the affordance text states the
  * verdict in words regardless of how it is styled.
  */
-function AuditFidelityVerdict({ control, labelId }: AuditFidelityVerdictProps): ReactElement {
-  const verdict: ControlVerdict = control === undefined ? 'unknown' : control.verdict;
+function AuditFidelityVerdict({
+  control,
+  labelId,
+  events,
+}: AuditFidelityVerdictProps): ReactElement {
+  const verdict: ControlVerdict =
+    control === undefined ? 'unknown' : resolveAuditFidelityEffectiveVerdict(control, events);
   const summary = control === undefined ? ABSENT_CONTROL_SUMMARY : control.summary;
   const presentation = VERDICT_PRESENTATION[verdict];
   return (
@@ -853,6 +1202,69 @@ function AuditFidelityVerdict({ control, labelId }: AuditFidelityVerdictProps): 
       <span className="audit-fidelity-panel__verdict-summary">{summary}</span>{' '}
       <span className="audit-fidelity-panel__state-detail">{presentation.description}</span>
     </p>
+  );
+}
+
+/** Props of the measured-evidence block. */
+interface AuditMeasurementListProps {
+  /** The control payload whose measurements are being interrogated. */
+  readonly control: ControlStatus;
+  /** The observed events whose local findings are folded in. */
+  readonly events: readonly AuditEvent[];
+}
+
+/**
+ * The measurements a V6 pass rests on, with what became of each.
+ *
+ * Rendered in every resolved state, not only on failure, because the reader's
+ * question is "what was actually checked?" and the answer has to be the same
+ * whether the answer is good or bad. Each row carries `data-measurement` and
+ * `data-result` so a single measurement is addressable without parsing prose.
+ *
+ * When the resolved verdict differs from the one the check reported, the
+ * disagreement is stated out loud rather than left for a reader to infer from two
+ * elements that contradict each other.
+ */
+function AuditMeasurementList({ control, events }: AuditMeasurementListProps): ReactElement {
+  const headingId = useId();
+  const measurements = buildAuditMeasurements(control.evidence?.observations ?? NO_OBSERVATIONS);
+  const localFindings = localEventFindings(events);
+  const resolved = resolveAuditFidelityEffectiveVerdict(control, events);
+  return (
+    <section
+      className="audit-fidelity-panel__measurements-region"
+      aria-labelledby={headingId}
+      data-region="measurements"
+    >
+      <h3 id={headingId}>What this verdict rests on</h3>
+      {resolved === control.verdict ? null : (
+        <p className="audit-fidelity-panel__disagreement" data-disagreement={resolved}>
+          {`The check reported ${control.verdict} for this control; the evidence below supports ` +
+            `${resolved}, and the weaker of the two is the verdict shown. Silence about a ` +
+            'required measurement is not agreement with it, and a recorded Secret response ' +
+            'body is a failure however the control was scored.'}
+        </p>
+      )}
+      <dl className="audit-fidelity-panel__measurements">
+        {measurements.map((measurement) => (
+          <div
+            key={measurement.identity}
+            data-measurement={measurement.identity}
+            data-result={measurement.result}
+          >
+            <dt>{measurement.title}</dt>
+            <dd>{`${MEASUREMENT_RESULT_WORDS[measurement.result]} ${measurement.detail}`}</dd>
+          </div>
+        ))}
+      </dl>
+      {localFindings.length === 0 ? null : (
+        <ul className="audit-fidelity-panel__local-findings" aria-label={LOCAL_FINDINGS_LABEL}>
+          {localFindings.map((finding, index) => (
+            <li key={`${String(index)}:${finding}`}>{finding}</li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -1100,6 +1512,10 @@ interface AuditFidelityPanelViewProps {
    * {@link AuditFidelityPanelProps.events}.
    */
   readonly events?: readonly AuditEvent[];
+  /** Replaces the result's own refresh; see {@link AuditFidelityPanelProps.onRefresh}. */
+  readonly onRefresh?: () => void;
+  /** Whether refreshing can achieve anything; see {@link AuditFidelityPanelProps.canRefresh}. */
+  readonly canRefresh?: boolean;
 }
 
 /**
@@ -1132,6 +1548,8 @@ function AuditFidelityPanelView({
   result,
   expectations,
   events,
+  onRefresh,
+  canRefresh = true,
 }: AuditFidelityPanelViewProps): ReactElement {
   // One base per instance, suffixed per element, so two panels on one page never
   // collide and so no identifier depends on render order.
@@ -1145,6 +1563,11 @@ function AuditFidelityPanelView({
   const levelsEmptyLabelId = `${baseId}-levels-empty-label`;
   const eventsEmptyLabelId = `${baseId}-events-empty-label`;
   const filterId = `${baseId}-level-filter`;
+
+  // ONE refresh channel: a caller's handler REPLACES the result's own rather than
+  // running alongside it, and an unavailable refresh resolves to `undefined` so the
+  // button is disabled and explains itself instead of accepting a dead press.
+  const refresh = resolveRefreshHandler(onRefresh, result.refresh, canRefresh);
 
   const [levelFilter, setLevelFilter] = useState<AuditLevelFilterValue>(ALL_LEVELS_VALUE);
 
@@ -1182,7 +1605,13 @@ function AuditFidelityPanelView({
         {`Requirements covered: ${COVERED_REQUIREMENT_IDS.join(', ')}.`}
       </p>
       <div className="audit-fidelity-panel__controls">
-        <button className="audit-fidelity-panel__refresh" type="button" onClick={result.refresh}>
+        <button
+          className="audit-fidelity-panel__refresh"
+          type="button"
+          onClick={refresh}
+          disabled={refresh === undefined}
+          title={refresh === undefined ? REFRESH_UNAVAILABLE_TITLE : undefined}
+        >
           {REFRESH_LABEL}
         </button>
       </div>
@@ -1192,7 +1621,10 @@ function AuditFidelityPanelView({
         <AuditFidelityError error={result.error} labelId={errorLabelId} />
       )}
       {result.status === 'success' && (
-        <AuditFidelityVerdict control={control} labelId={verdictLabelId} />
+        <AuditFidelityVerdict control={control} labelId={verdictLabelId} events={events ?? []} />
+      )}
+      {control === undefined ? null : (
+        <AuditMeasurementList control={control} events={events ?? []} />
       )}
       {control === undefined ? null : <AuditFidelityControlDetail control={control} />}
 
@@ -1271,6 +1703,10 @@ interface ConnectedAuditFidelityPanelProps {
   readonly expectations: readonly AuditLevelExpectation[];
   /** Forwarded unchanged to the presentational body. */
   readonly events?: readonly AuditEvent[];
+  /** Forwarded unchanged to the presentational body. */
+  readonly onRefresh?: () => void;
+  /** Forwarded unchanged to the presentational body. */
+  readonly canRefresh?: boolean;
 }
 
 /**
@@ -1289,9 +1725,19 @@ interface ConnectedAuditFidelityPanelProps {
 function ConnectedAuditFidelityPanel({
   expectations,
   events,
+  onRefresh,
+  canRefresh = true,
 }: ConnectedAuditFidelityPanelProps): ReactElement {
   const result = useControlStatus(AUDIT_FIDELITY_CONTROL_ID);
-  return <AuditFidelityPanelView result={result} expectations={expectations} events={events} />;
+  return (
+    <AuditFidelityPanelView
+      result={result}
+      expectations={expectations}
+      events={events}
+      onRefresh={onRefresh}
+      canRefresh={canRefresh}
+    />
+  );
 }
 
 /**
@@ -1336,6 +1782,21 @@ export interface AuditFidelityPanelProps {
    * body is ever rendered.
    */
   readonly events?: readonly AuditEvent[];
+  /**
+   * Called when the refresh control is used, REPLACING the result's own `refresh`
+   * rather than running alongside it, so one press is one request. With a
+   * pre-resolved state that owns no request and no handler here, the control is
+   * disabled and carries a title saying why.
+   */
+  readonly onRefresh?: () => void;
+  /**
+   * Whether refreshing can re-request anything at all.
+   *
+   * `false` disables this panel's refresh affordance and explains why, which is how an
+   * aggregate surface that was handed its posture directly keeps every control's button
+   * consistent with its own. Defaults to `true`, so a panel used on its own is unaffected.
+   */
+  readonly canRefresh?: boolean;
 }
 
 /**
@@ -1375,10 +1836,26 @@ export default function AuditFidelityPanel({
   result,
   expectations = AUDIT_LEVEL_EXPECTATIONS,
   events,
+  onRefresh,
+  canRefresh = true,
 }: AuditFidelityPanelProps): ReactElement {
   if (result === undefined) {
-    return <ConnectedAuditFidelityPanel expectations={expectations} events={events} />;
+    return (
+      <ConnectedAuditFidelityPanel
+        expectations={expectations}
+        events={events}
+        onRefresh={onRefresh}
+        canRefresh={canRefresh}
+      />
+    );
   }
-  return <AuditFidelityPanelView result={result} expectations={expectations} events={events} />;
+  return (
+    <AuditFidelityPanelView
+      result={result}
+      expectations={expectations}
+      events={events}
+      onRefresh={onRefresh}
+      canRefresh={canRefresh}
+    />
+  );
 }
-

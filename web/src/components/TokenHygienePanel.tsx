@@ -83,11 +83,26 @@ limitations under the License.
 //      omitting that row would make a non-null regression invisible.
 //   6. Nothing here reads a wall clock. Every instant used is one the props or
 //      the hook supplied, so what is rendered is a function of its input.
+//   7. A reported finding FLOORS the verdict at `fail`. A payload cannot claim
+//      `pass` while simultaneously reporting something wrong, and the overall
+//      verdict is the strictest of every input rather than of a subset of them.
+//   8. Each claim is identified EXACTLY, by the stable identity in
+//      `../domain/observationIds`, and an identity carried by more than one
+//      observation is reported as ambiguous rather than resolved to whichever
+//      copy arrived first. Which of two conflicting `kubernetes.io/pod` values
+//      applies is genuinely unknowable, and a first-match rule answers it by
+//      accident: a later non-null value — the regression this control exists to
+//      catch — would never be seen.
+//   9. A timestamp is accepted only when it satisfies the RFC 3339 grammar AND
+//      names a real calendar instant. `Date.parse` accepts far more than that,
+//      including `2026-02-30T00:00:00Z`, which it silently reads as 2 March —
+//      moving an expiry two days later and then comparing it as if it were the
+//      value the server sent.
 //
-// The only imports are `react` and the sibling hook module, both already fixed
-// by AAP §0.6.1.2; no dependency is added (AAP §0.11.1, "respect the surviving
-// freeze"). Data access is exclusively through `useControlStatus`, so this file
-// calls `fetch` nowhere.
+// The only imports are `react`, the sibling hook module and the two
+// production-neutral `../domain` modules, all already fixed by AAP §0.6.1.2; no
+// dependency is added (AAP §0.11.1, "respect the surviving freeze"). Data access
+// is exclusively through `useControlStatus`, so this file calls `fetch` nowhere.
 import { useId } from 'react';
 
 import {
@@ -103,6 +118,9 @@ import {
   type ControlVerdict,
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
+import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
+import { strictestVerdict } from '../domain/evidence';
+import { V4_OBSERVATIONS } from '../domain/observationIds';
 
 /** The control this panel reports on. Annotated so a typo cannot compile. */
 const CONTROL_ID: ControlId = 'V4';
@@ -178,14 +196,38 @@ const EMPTY_STRING_LABEL = '(empty string)';
 const SENSITIVE_LABEL_PATTERN = /token|secret|key|password|credential|bearer/i;
 
 /**
- * A value shaped like a compact JSON Web Token: three non-empty base64url
- * segments separated by dots.
+ * A substring shaped like a compact JSON Web Token: three or more base64url
+ * segments of at least eight characters each, separated by dots.
  *
  * Deliberately expressed as a shape rather than by matching the well-known
  * header prefix, so that this file contains no fragment of a token and the
  * guard still catches one whose header differs.
+ *
+ * UNANCHORED, AND THAT IS THE POINT. An anchored pattern only ever matches a
+ * whole string, so it saw nothing in `token=<jwt>`, `(<jwt>)`, `"<jwt>"`,
+ * `Bearer <jwt>.` or any other punctuation- or prefix-adjacent placement — which
+ * is how a credential stayed on screen while a guard reported that it had looked.
+ *
+ * `{2,}` trailing segments rather than exactly two, so a four-segment (encrypted)
+ * token is consumed whole instead of leaving its final segment behind.
+ *
+ * The eight-character floor per segment is what keeps ordinary dotted
+ * identifiers out of the guard's way: `kubernetes.io.serviceaccount.name`,
+ * `pod-security.admission.config.k8s.io` and `unbounded.example.com` all contain
+ * a segment shorter than eight, so none of them can match. Over-redaction is
+ * nevertheless the safe direction here, and is preferred to any narrowing.
  */
-const CREDENTIAL_SHAPED_VALUE = /^[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}$/;
+const CREDENTIAL_SHAPED_VALUE = /[\w-]{8,}(?:\.[\w-]{8,}){2,}/;
+
+/**
+ * The same shape, global, used ONLY for replacement.
+ *
+ * A separate instance because a `g` regex carries a mutable `lastIndex`, and
+ * sharing one between `test` and `replace` makes each call depend on the last.
+ * `String.prototype.replace` starts from zero and resets afterwards, so this
+ * instance is safe where a shared one would not be.
+ */
+const CREDENTIAL_SHAPED_VALUE_GLOBAL = new RegExp(CREDENTIAL_SHAPED_VALUE.source, 'g');
 
 /**
  * Longest string value rendered verbatim. Anything longer is redacted rather
@@ -205,36 +247,72 @@ const MAX_RENDERED_VALUE_LENGTH = 200;
 interface ClaimDescriptor {
   /** How the claim is named on screen, in its canonical dotted form. */
   readonly claimName: string;
-  /** Normalised labels that identify this claim. */
+  /**
+   * The claim's STABLE IDENTITY, from `../domain/observationIds`.
+   *
+   * Matched with `===` first, so the identity the panel looks for and the
+   * identity a recorded payload writes are the same string by construction.
+   */
+  readonly identity: string;
+  /** Normalised spellings that also identify this claim. */
   readonly aliases: readonly string[];
 }
 
+/**
+ * Builds a descriptor from its rendered name and its stable identity.
+ *
+ * The alias set is exactly the normalised identity and the normalised claim
+ * name, deduplicated — nothing wider. The BARE single-word aliases this file
+ * used to carry (`pod`, `secret`, `namespace`, `subject`) are deliberately gone:
+ * after {@link normaliseLabel} strips punctuation, `pod` matches any observation
+ * whose label folds to that word, so an unrelated measurement could be read as
+ * the pod claim, and a genuine claim could be joined by an impostor and turned
+ * into an ambiguity. A spelling this panel does not recognise now reads "could
+ * not verify", which is the honest answer and never a pass.
+ */
+function claimDescriptor(claimName: string, identity: string): ClaimDescriptor {
+  return {
+    claimName,
+    identity,
+    aliases: [...new Set([normaliseLabel(identity), normaliseLabel(claimName)])],
+  };
+}
+
 /** The `sub` claim: the canonical ServiceAccount subject. */
-const SUBJECT_CLAIM: ClaimDescriptor = { claimName: 'sub', aliases: ['sub', 'subject'] };
+const SUBJECT_CLAIM: ClaimDescriptor = claimDescriptor('sub', V4_OBSERVATIONS.subject);
 
 /** The namespace half of the subject. */
-const NAMESPACE_CLAIM: ClaimDescriptor = {
-  claimName: 'kubernetes.io.namespace',
-  aliases: ['kubernetesionamespace', 'namespace'],
-};
+const NAMESPACE_CLAIM: ClaimDescriptor = claimDescriptor(
+  'kubernetes.io.namespace',
+  V4_OBSERVATIONS.kubernetesIoNamespace,
+);
 
 /** The ServiceAccount-name half of the subject. */
-const SERVICE_ACCOUNT_NAME_CLAIM: ClaimDescriptor = {
-  claimName: 'kubernetes.io.serviceaccount.name',
-  aliases: ['kubernetesioserviceaccountname', 'serviceaccountname'],
-};
+const SERVICE_ACCOUNT_NAME_CLAIM: ClaimDescriptor = claimDescriptor(
+  'kubernetes.io.serviceaccount.name',
+  V4_OBSERVATIONS.kubernetesIoServiceAccountName,
+);
 
 /** Must be null: a non-null value means the token is bound to a Pod. */
-const POD_CLAIM: ClaimDescriptor = {
-  claimName: 'kubernetes.io.pod',
-  aliases: ['kubernetesiopod', 'pod'],
-};
+const POD_CLAIM: ClaimDescriptor = claimDescriptor(
+  'kubernetes.io.pod',
+  V4_OBSERVATIONS.kubernetesIoPod,
+);
 
 /** Must be null: a non-null value means a legacy Secret-backed token. */
-const SECRET_CLAIM: ClaimDescriptor = {
-  claimName: 'kubernetes.io.secret',
-  aliases: ['kubernetesiosecret', 'secret'],
-};
+const SECRET_CLAIM: ClaimDescriptor = claimDescriptor(
+  'kubernetes.io.secret',
+  V4_OBSERVATIONS.kubernetesIoSecret,
+);
+
+/** Every claim this panel reads, in the order its rows are rendered. */
+const ALL_CLAIMS: readonly ClaimDescriptor[] = [
+  SUBJECT_CLAIM,
+  NAMESPACE_CLAIM,
+  SERVICE_ACCOUNT_NAME_CLAIM,
+  POD_CLAIM,
+  SECRET_CLAIM,
+];
 
 // ---------------------------------------------------------------------------
 // Pure helper layer.
@@ -273,40 +351,20 @@ interface CheckRow {
   readonly outcome: CheckOutcome;
 }
 
-/**
- * Relative severity of a verdict, used to combine several verdicts by taking
- * the strictest.
+/*
+ * The strictest-verdict combinator is imported from `../domain/evidence` rather
+ * than written here.
  *
- * `unknown` deliberately outranks `warn`: a control whose evidence could not be
- * read must not present as merely noisy, and the Go oracle makes the same
- * distinction when it treats a broken positive control as setup breakage rather
- * than as a finding.
+ * It used to be a module-private copy with its own severity table. Two copies of
+ * one ordering is one copy too many: the dashboard aggregates what these panels
+ * render, so a divergence between the two tables would show as a child badge
+ * disagreeing with the count beside it and no single place to look. The imported
+ * ordering is identical (`pass` < `warn` < `unknown` < `fail`, with `unknown`
+ * deliberately outranking `warn` because unmeasured is worse news than measured
+ * with a caveat) and differs only in treating an EMPTY list as `unknown` rather
+ * than as `pass` — which is the safer default and is never reached here, because
+ * every call below passes a fixed, non-empty list.
  */
-const VERDICT_SEVERITY: Readonly<Record<ControlVerdict, number>> = {
-  pass: 0,
-  warn: 1,
-  unknown: 2,
-  fail: 3,
-};
-
-/**
- * Combines verdicts by taking the strictest.
- *
- * Invariant locked: a verdict can only ever be made stricter here, never
- * softer, so no combination of inputs can turn a failed or unverifiable check
- * into a pass.
- *
- * @param verdicts - the verdicts to combine; an empty list is `pass`, which is
- *   only reachable when there is genuinely nothing to object to.
- * @returns the strictest verdict supplied.
- */
-function strictestVerdict(verdicts: readonly ControlVerdict[]): ControlVerdict {
-  return verdicts.reduce<ControlVerdict>(
-    (strictest, candidate) =>
-      VERDICT_SEVERITY[candidate] > VERDICT_SEVERITY[strictest] ? candidate : strictest,
-    'pass',
-  );
-}
 
 /**
  * Reduces a set of check rows to one verdict.
@@ -335,25 +393,80 @@ function normaliseLabel(label: string): string {
   return label.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-/**
- * Finds the observation carrying a claim.
- *
- * @param observations - the reported evidence, or `undefined` when none was.
- * @param descriptor - the claim to look for.
- * @returns the first matching observation, or `undefined`. First match wins so
- *   that the server's ordering is respected rather than silently re-ranked.
- */
-function findObservation(
-  observations: readonly ControlObservation[] | undefined,
-  descriptor: ClaimDescriptor,
-): ControlObservation | undefined {
-  if (observations === undefined) {
-    return undefined;
-  }
-  return observations.find((observation) =>
-    descriptor.aliases.includes(normaliseLabel(observation.label)),
+/** Does this observation carry that claim? Exact identity first, then aliases. */
+function identifies(descriptor: ClaimDescriptor, observation: ControlObservation): boolean {
+  return (
+    observation.label === descriptor.identity ||
+    descriptor.aliases.includes(normaliseLabel(observation.label))
   );
 }
+
+/**
+ * Every observation carrying a claim — all of them, not the first.
+ *
+ * Returning the whole list is what makes the ambiguity visible: the count is the
+ * evidence that the report is broken, and a function that returned one
+ * observation could not express it.
+ */
+function findObservations(
+  observations: readonly ControlObservation[] | undefined,
+  descriptor: ClaimDescriptor,
+): readonly ControlObservation[] {
+  if (observations === undefined) {
+    return [];
+  }
+  return observations.filter((observation) => identifies(descriptor, observation));
+}
+
+/**
+ * The result of looking one claim up.
+ *
+ * `ambiguous` is a THIRD state rather than a flavour of absence, because it
+ * calls for different wording: absent means the server did not measure the
+ * claim, and ambiguous means it measured it more than once and the panel cannot
+ * choose. Both withhold a pass; only one of them is a gap in the report.
+ */
+type ClaimReading =
+  | { readonly state: 'reported'; readonly observation: ControlObservation }
+  | { readonly state: 'absent' }
+  | { readonly state: 'ambiguous'; readonly count: number };
+
+/**
+ * Resolves one claim out of the reported evidence.
+ *
+ * INVARIANT LOCKED (invariant 8): exactly one observation, or nothing usable.
+ * The previous rule was "first match wins so that the server's ordering is
+ * respected", and respecting the ordering is precisely the defect — a payload
+ * carrying `kubernetes.io/pod: null` followed by `kubernetes.io/pod:
+ * "some-pod"` would have been read as an unbound token, hiding the exact
+ * regression F-004-RQ-002 exists to catch. Which value applies is unknowable
+ * from here, so the answer is that it could not be verified.
+ */
+function selectClaim(
+  observations: readonly ControlObservation[] | undefined,
+  descriptor: ClaimDescriptor,
+): ClaimReading {
+  const matches = findObservations(observations, descriptor);
+  const [first] = matches;
+  if (first === undefined) {
+    return { state: 'absent' };
+  }
+  if (matches.length > 1) {
+    return { state: 'ambiguous', count: matches.length };
+  }
+  return { state: 'reported', observation: first };
+}
+
+/** Wording for an ambiguous claim, naming the count that makes it ambiguous. */
+function describeAmbiguity(count: number): string {
+  return (
+    `the claim was reported by ${String(count)} observations, so which value applies ` +
+    'cannot be determined; taking the first would hide the others'
+  );
+}
+
+/** Rendered in the observed column of an ambiguous claim. */
+const AMBIGUOUS_OBSERVED = 'reported more than once';
 
 /**
  * Renders one observed value as text, redacting anything credential-bearing.
@@ -390,23 +503,30 @@ function presentValue(label: string, value: string | number | boolean | null): s
 }
 
 /**
- * Redacts credential-shaped words out of free prose before it is rendered.
+ * Redacts every credential-shaped substring out of free prose before it is
+ * rendered.
  *
- * Summaries, details, findings and warnings are human-readable text rather than
- * measured values, so they are rendered as written — except for any single word
- * shaped like a compact token, which is replaced. Splitting on a capturing
- * whitespace group preserves the original spacing, so nothing else about the
- * text changes.
+ * Summaries, details, findings, warnings, error messages, identifiers and
+ * observation labels are human-readable text rather than measured values, so
+ * they are rendered as written — except for any substring shaped like a compact
+ * token, each of which is replaced. Everything around the match, including the
+ * punctuation that touched it, is preserved exactly.
+ *
+ * WHAT CHANGED, AND WHY. The previous implementation split the text on
+ * whitespace and tested each whole word against an ANCHORED pattern, so it only
+ * ever caught a credential standing alone between two spaces. `token=<jwt>`,
+ * `(<jwt>)`, `"<jwt>"` and `<jwt>,` all survived it untouched — the guard was
+ * running and reporting success while the credential was on screen. A global,
+ * unanchored replacement has no such blind spot, and it needs no splitting at
+ * all, so the original spacing is preserved by construction rather than by
+ * reassembly.
  *
  * This is the second half of invariant 5: {@link presentValue} guards measured
  * values, and this guards prose, so there is no path by which a credential
  * reaches the DOM.
  */
 function redactCredentialShapedText(text: string): string {
-  return text
-    .split(/(\s+)/)
-    .map((part) => (CREDENTIAL_SHAPED_VALUE.test(part) ? REDACTED : part))
-    .join('');
+  return text.replace(CREDENTIAL_SHAPED_VALUE_GLOBAL, REDACTED);
 }
 
 /** Renders a count of seconds with its unit, without altering the number. */
@@ -500,20 +620,117 @@ function outcomeForPosition(position: WindowPosition): CheckOutcome {
 }
 
 /**
+ * The RFC 3339 `date-time` grammar, in full and with nothing optional that the
+ * grammar requires.
+ *
+ * Seven groups, every one of them mandatory so that each is a `string` rather
+ * than a possibly-absent one: year, month, day, hour, minute, second and the
+ * time offset. A fractional second is permitted and consumed but not captured,
+ * because `.Unix()` discards it.
+ *
+ * `[Tt]` and `[Zz]` are both accepted, which RFC 3339 §5.6 explicitly permits
+ * ("may alternatively be lower case"). Everything else the grammar forbids is
+ * rejected here: a date with no time, a space in place of the `T`, a missing
+ * offset, an unpadded field, surrounding whitespace, a bare epoch count and any
+ * of the many prose forms `Date.parse` accepts by extension.
+ */
+const RFC3339_DATE_TIME =
+  /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
+/** Days per month in a common year, January first. */
+const DAYS_PER_MONTH: readonly number[] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** The proleptic Gregorian leap rule, in full — including the century exception. */
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+/** How many days that month has in that year. */
+function daysInMonth(year: number, month: number): number {
+  if (month === 2 && isLeapYear(year)) {
+    return 29;
+  }
+  return DAYS_PER_MONTH[month - 1] ?? 0;
+}
+
+/**
+ * Converts a `[Zz]` or `[+-]hh:mm` offset to seconds east of UTC.
+ *
+ * @returns the offset in seconds, or `undefined` when either field is out of
+ *   range. `+24:00` and `+00:60` match the grammar yet name no offset.
+ */
+function offsetToSeconds(zone: string): number | undefined {
+  if (zone === 'Z' || zone === 'z') {
+    return 0;
+  }
+  const hours = Number(zone.slice(1, 3));
+  const minutes = Number(zone.slice(4, 6));
+  if (hours > 23 || minutes > 59) {
+    return undefined;
+  }
+  const magnitude = hours * 3600 + minutes * 60;
+  return zone.startsWith('-') ? -magnitude : magnitude;
+}
+
+/**
  * Converts an RFC 3339 timestamp to whole seconds since the Unix epoch, the
  * Python-and-Go-agnostic equivalent of the oracle's `.Time.Unix()`
  * (`svcaccttoken_test.go` L1511).
  *
- * Truncation towards negative infinity matches `.Unix()`, which discards the
- * sub-second remainder rather than rounding it. `Date.parse` is used only on a
- * value the caller supplied, so this reads no clock.
+ * INVARIANT LOCKED (invariant 9). The grammar is checked, and then the CALENDAR
+ * is checked, and only a value that satisfies both is converted. `Date.parse`
+ * did neither, and its failures were silent rather than loud:
  *
- * @returns the instant in seconds, or `undefined` when the string is not a
- *   timestamp this runtime can read.
+ *   * `2026-02-30T00:00:00Z` parses, and resolves to 2 March — an expiry moved
+ *     two days later and then compared against the permitted window as though it
+ *     were the value the server sent. That is the severe one, because it
+ *     produces a WRONG NUMBER rather than no number.
+ *   * `2026-01-01` (date only) and `Jan 1 2026 01:00:00 UTC` (prose) both parse,
+ *     so neither was reported as unreadable.
+ *   * `2026-01-01T01:00:00`, with no offset, is interpreted in the HOST time
+ *     zone, making the panel's output depend on where it happens to run — which
+ *     also breaks invariant 6.
+ *
+ * Truncation towards negative infinity matches `.Unix()`: the fractional second
+ * is non-negative, so discarding it and flooring agree. No clock is read.
+ *
+ * @param value - the timestamp exactly as the server sent it.
+ * @returns the instant in whole seconds, or `undefined` when the value is not an
+ *   RFC 3339 timestamp naming a real instant.
  */
 function timestampToUnixSeconds(value: string): number | undefined {
-  const milliseconds = Date.parse(value);
-  return Number.isNaN(milliseconds) ? undefined : Math.floor(milliseconds / 1000);
+  const match = RFC3339_DATE_TIME.exec(value);
+  if (match === null) {
+    return undefined;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (month < 1 || month > 12) {
+    return undefined;
+  }
+  if (day < 1 || day > daysInMonth(year, month)) {
+    return undefined;
+  }
+  // A leap second (`:60`) is rejected, as `time.Parse` rejects it: the oracle
+  // compares against a value Go produced, so accepting one here would compare a
+  // second Go could never have emitted.
+  if (hour > 23 || minute > 59 || second > 59) {
+    return undefined;
+  }
+  const offsetSeconds = offsetToSeconds(match[7]);
+  if (offsetSeconds === undefined) {
+    return undefined;
+  }
+  // A two-argument-or-more `Date.UTC` maps years 0-99 onto 1900-1999, so the
+  // year is set explicitly afterwards rather than passed in. The day has already
+  // been validated against the REAL year, so this assignment cannot roll over.
+  const instant = new Date(Date.UTC(2000, month - 1, day, hour, minute, second));
+  instant.setUTCFullYear(year);
+  return Math.floor(instant.getTime() / 1000) - offsetSeconds;
 }
 
 // ---------------------------------------------------------------------------
@@ -696,13 +913,13 @@ function buildLifetimeChecks(evidence: ControlEvidence | undefined): LifetimeChe
   return { permittedWindow, rows: [requestedTtlRow, expRow, timestampRow] };
 }
 
-/** The five claim observations this panel reads, matched by label alias. */
+/** The five claim lookups this panel performs, each with its own outcome. */
 interface ClaimReadings {
-  readonly subject: ControlObservation | undefined;
-  readonly namespace: ControlObservation | undefined;
-  readonly serviceAccountName: ControlObservation | undefined;
-  readonly pod: ControlObservation | undefined;
-  readonly secret: ControlObservation | undefined;
+  readonly subject: ClaimReading;
+  readonly namespace: ClaimReading;
+  readonly serviceAccountName: ClaimReading;
+  readonly pod: ClaimReading;
+  readonly secret: ClaimReading;
 }
 
 /** Resolves every claim this panel knows about out of the reported evidence. */
@@ -710,12 +927,17 @@ function readClaims(
   observations: readonly ControlObservation[] | undefined,
 ): ClaimReadings {
   return {
-    subject: findObservation(observations, SUBJECT_CLAIM),
-    namespace: findObservation(observations, NAMESPACE_CLAIM),
-    serviceAccountName: findObservation(observations, SERVICE_ACCOUNT_NAME_CLAIM),
-    pod: findObservation(observations, POD_CLAIM),
-    secret: findObservation(observations, SECRET_CLAIM),
+    subject: selectClaim(observations, SUBJECT_CLAIM),
+    namespace: selectClaim(observations, NAMESPACE_CLAIM),
+    serviceAccountName: selectClaim(observations, SERVICE_ACCOUNT_NAME_CLAIM),
+    pod: selectClaim(observations, POD_CLAIM),
+    secret: selectClaim(observations, SECRET_CLAIM),
   };
+}
+
+/** The value of a claim that resolved to exactly one observation. */
+function claimValue(reading: ClaimReading): string | number | boolean | null | undefined {
+  return reading.state === 'reported' ? reading.observation.value : undefined;
 }
 
 /**
@@ -728,8 +950,8 @@ function readClaims(
  *   rather than inventing an expectation.
  */
 function expectedSubject(readings: ClaimReadings): string | undefined {
-  const namespace = readings.namespace?.value;
-  const name = readings.serviceAccountName?.value;
+  const namespace = claimValue(readings.namespace);
+  const name = claimValue(readings.serviceAccountName);
   if (typeof namespace !== 'string' || namespace.length === 0) {
     return undefined;
   }
@@ -742,13 +964,28 @@ function expectedSubject(readings: ClaimReadings): string | undefined {
 /** Builds the `sub` check. */
 function buildSubjectRow(readings: ClaimReadings): CheckRow {
   const expected = expectedSubject(readings);
-  const required = expected ?? `${SUBJECT_PREFIX}<namespace>:<serviceaccount name>`;
-  const observation = readings.subject;
+  // The required column is DERIVED FROM SERVER DATA — the namespace and
+  // ServiceAccount-name claims — so it is guarded like any other server text
+  // rather than treated as a computed literal. The comparison below uses the
+  // unredacted `expected`, so guarding what is shown changes no verdict.
+  const required = redactCredentialShapedText(
+    expected ?? `${SUBJECT_PREFIX}<namespace>:<serviceaccount name>`,
+  );
+  const reading = readings.subject;
   const base = { id: 'claim-sub', check: SUBJECT_CLAIM.claimName, required };
 
-  if (observation === undefined) {
+  if (reading.state === 'absent') {
     return { ...base, observed: NOT_REPORTED, detail: CLAIM_NOT_REPORTED_DETAIL, outcome: 'unknown' };
   }
+  if (reading.state === 'ambiguous') {
+    return {
+      ...base,
+      observed: AMBIGUOUS_OBSERVED,
+      detail: describeAmbiguity(reading.count),
+      outcome: 'unknown',
+    };
+  }
+  const { observation } = reading;
   const observed = presentValue(observation.label, observation.value);
   if (expected === undefined) {
     return {
@@ -772,12 +1009,21 @@ function buildSubjectRow(readings: ClaimReadings): CheckRow {
 function buildPresenceRow(
   id: string,
   descriptor: ClaimDescriptor,
-  observation: ControlObservation | undefined,
+  reading: ClaimReading,
 ): CheckRow {
   const base = { id, check: descriptor.claimName, required: 'a non-empty string' };
-  if (observation === undefined) {
+  if (reading.state === 'absent') {
     return { ...base, observed: NOT_REPORTED, detail: CLAIM_NOT_REPORTED_DETAIL, outcome: 'unknown' };
   }
+  if (reading.state === 'ambiguous') {
+    return {
+      ...base,
+      observed: AMBIGUOUS_OBSERVED,
+      detail: describeAmbiguity(reading.count),
+      outcome: 'unknown',
+    };
+  }
+  const { observation } = reading;
   const present = typeof observation.value === 'string' && observation.value.length > 0;
   return {
     ...base,
@@ -798,12 +1044,24 @@ function buildPresenceRow(
 function buildNullRow(
   id: string,
   descriptor: ClaimDescriptor,
-  observation: ControlObservation | undefined,
+  reading: ClaimReading,
 ): CheckRow {
   const base = { id, check: descriptor.claimName, required: 'null' };
-  if (observation === undefined) {
+  if (reading.state === 'absent') {
     return { ...base, observed: NOT_REPORTED, detail: CLAIM_NOT_REPORTED_DETAIL, outcome: 'unknown' };
   }
+  if (reading.state === 'ambiguous') {
+    // A duplicated pod or secret claim is the sharpest case for refusing a
+    // first-match answer: one copy reading `null` alongside another reading a
+    // pod name is exactly a bound token wearing an unbound token's evidence.
+    return {
+      ...base,
+      observed: AMBIGUOUS_OBSERVED,
+      detail: describeAmbiguity(reading.count),
+      outcome: 'unknown',
+    };
+  }
+  const { observation } = reading;
   const isNull = observation.value === null;
   return {
     ...base,
@@ -835,19 +1093,18 @@ function buildClaimRows(readings: ClaimReadings): readonly CheckRow[] {
  */
 function unrecognisedObservations(
   observations: readonly ControlObservation[] | undefined,
-  readings: ClaimReadings,
 ): readonly ControlObservation[] {
   if (observations === undefined) {
     return [];
   }
-  const recognised = [
-    readings.subject,
-    readings.namespace,
-    readings.serviceAccountName,
-    readings.pod,
-    readings.secret,
-  ];
-  return observations.filter((observation) => !recognised.includes(observation));
+  // Computed from the DESCRIPTORS rather than from the resolved readings, so
+  // that every copy of a duplicated claim counts as recognised. A copy that
+  // leaked into this section would be reported twice — once as an ambiguity in
+  // the claim table and once as unrelated evidence — and the second reading
+  // would look like an independent measurement.
+  return observations.filter(
+    (observation) => !ALL_CLAIMS.some((descriptor) => identifies(descriptor, observation)),
+  );
 }
 
 /** Everything the panel needs to render one control payload. */
@@ -871,10 +1128,19 @@ interface PanelAnalysis {
 /**
  * Reduces one control payload to everything the panel renders.
  *
- * Invariant locked: the rendered verdict is the STRICTEST of what the server
- * said, what recomputing the checks says, and whether any warning was reported.
- * A server claiming `pass` over failing evidence is therefore rendered as
- * `fail`, and no combination of inputs can soften a verdict.
+ * Invariant locked: the rendered verdict is the STRICTEST of FOUR inputs — what
+ * the server said, what recomputing the checks says, whether any FINDING was
+ * reported, and whether any warning was. A server claiming `pass` over failing
+ * evidence is therefore rendered as `fail`, and no combination of inputs can
+ * soften a verdict.
+ *
+ * The findings floor (invariant 7) is the fourth input and was the missing one.
+ * A payload can report a finding whose subject this panel measures nothing about
+ * — a rotation policy, an issuer mismatch, anything the evidence bag does not
+ * carry — and every recomputed row would then pass while the finding sat
+ * rendered directly underneath a `pass`. A finding is the server stating that
+ * something is wrong, so it is a `fail` on its own authority and needs no
+ * corroborating measurement.
  */
 function analyseControl(control: ControlStatus): PanelAnalysis {
   const evidence = control.evidence;
@@ -883,12 +1149,14 @@ function analyseControl(control: ControlStatus): PanelAnalysis {
   const audienceRows = buildAudienceRows(evidence);
   const lifetime = buildLifetimeChecks(evidence);
   const claimRows = buildClaimRows(readings);
+  const findingVerdict: ControlVerdict = control.findings.length > 0 ? 'fail' : 'pass';
   const warningVerdict: ControlVerdict = control.warnings.length > 0 ? 'warn' : 'pass';
 
   return {
     overallVerdict: strictestVerdict([
       control.verdict,
       verdictFromRows([...audienceRows, ...lifetime.rows, ...claimRows]),
+      findingVerdict,
       warningVerdict,
     ]),
     audiences: evidence?.audiences,
@@ -898,8 +1166,29 @@ function analyseControl(control: ControlStatus): PanelAnalysis {
     permittedWindow: lifetime.permittedWindow,
     lifetimeRows: lifetime.rows,
     claimRows,
-    extraObservations: unrecognisedObservations(observations, readings),
+    extraObservations: unrecognisedObservations(observations),
   };
+}
+
+/**
+ * The panel's own conservative verdict for V4, as one call over one payload.
+ *
+ * Exported so the aggregate dashboard counts, filters and summarises the SAME
+ * verdict this panel renders in its `output`, rather than the raw
+ * `status.verdict` the server sent. A dashboard counting the raw verdict would
+ * report a pass beside a panel rendering FAIL, and the two would disagree with no
+ * single place to look.
+ *
+ * @param control - the payload for V4, or `undefined` when it was not reported.
+ * @returns the verdict this panel renders.
+ */
+export function resolveTokenHygieneEffectiveVerdict(
+  control: ControlStatus | undefined,
+): ControlVerdict {
+  if (control === undefined) {
+    return 'unknown';
+  }
+  return strictestVerdict([analyseControl(control).overallVerdict]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,9 +1631,13 @@ type PanelState = 'loading' | 'error' | 'empty' | 'success';
 function TokenHygieneView({
   result,
   headingId,
+  onRefresh,
+  canRefresh = true,
 }: {
   readonly result: UseControlStatusResult;
   readonly headingId?: string;
+  readonly onRefresh?: () => void;
+  readonly canRefresh?: boolean;
 }) {
   // One generated prefix per mounted panel, so several panels on one page keep
   // unique ids without the caller having to supply any.
@@ -1380,6 +1673,12 @@ function TokenHygieneView({
       ? reportedRequirementIds
       : REQUIREMENT_IDS;
 
+  // ONE refresh channel: an explicit handler REPLACES the result's own, so a single
+  // press is a single request. When nothing can be re-requested the handler resolves
+  // to `undefined`, and the button below is disabled and says why rather than
+  // accepting a press that does nothing.
+  const refresh = resolveRefreshHandler(onRefresh, result.refresh, canRefresh);
+
   return (
     <section
       className={BLOCK}
@@ -1396,12 +1695,18 @@ function TokenHygieneView({
           .join(', ')}`}
       </p>
       {/*
-        Always rendered and always operable, in every state, so the affordance's
-        presence does not depend on how the panel happens to be fed. A native
-        button is focusable and activates on both Enter and Space with no extra
-        handling.
+        Always rendered, in every state, so the affordance's presence does not depend
+        on how the panel happens to be fed. A native button is focusable and activates
+        on both Enter and Space with no extra handling. It is DISABLED, with a title
+        explaining why, exactly when there is no request behind this view to re-issue.
       */}
-      <button type="button" className={`${BLOCK}__refresh`} onClick={result.refresh}>
+      <button
+        type="button"
+        className={`${BLOCK}__refresh`}
+        onClick={refresh}
+        disabled={refresh === undefined}
+        title={refresh === undefined ? REFRESH_UNAVAILABLE_TITLE : undefined}
+      >
         Re-request token posture
       </button>
 
@@ -1418,17 +1723,34 @@ function TokenHygieneView({
 }
 
 /** Drives the panel from the hook. Exists so the hook call is unconditional. */
-function TokenHygieneConnected({ headingId }: { readonly headingId?: string }) {
+function TokenHygieneConnected({
+  headingId,
+  onRefresh,
+  canRefresh = true,
+}: {
+  readonly headingId?: string;
+  readonly onRefresh?: () => void;
+  readonly canRefresh?: boolean;
+}) {
   const result = useControlStatus(CONTROL_ID);
-  return <TokenHygieneView result={result} headingId={headingId} />;
+  return (
+    <TokenHygieneView
+      result={result}
+      headingId={headingId}
+      onRefresh={onRefresh}
+      canRefresh={canRefresh}
+    />
+  );
 }
 
 /**
- * Used when a pre-resolved payload is supplied without a refresh handler.
+ * Occupies {@link UseControlStatusResult.refresh} when a pre-resolved payload is
+ * supplied, which the type requires but this panel never calls.
  *
  * Not a stub: with a pre-resolved payload there is genuinely no request to
- * re-issue, and the affordance is still rendered and still operable so that it
- * is present in every state.
+ * re-issue. The affordance is still rendered in every state, but on that branch it
+ * is disabled unless the caller supplied a handler of their own, so this is never
+ * wired to an enabled control.
  */
 function noRefresh(): void {
   // Deliberately empty. See the note above.
@@ -1455,11 +1777,19 @@ export interface TokenHygienePanelProps {
    */
   readonly status?: ControlStatus;
   /**
-   * Invoked by the re-request button when the panel is driven by `status`.
-   * Ignored when `result` is supplied, because that state carries its own
-   * refresh handle, and unnecessary when the hook is driving.
+   * Invoked by the re-request button, REPLACING whatever refresh the panel would
+   * otherwise use. With a pre-resolved `status` and no handler there is nothing to
+   * re-request, so the button is disabled and carries a title saying so.
    */
   readonly onRefresh?: () => void;
+  /**
+   * Whether refreshing can re-request anything at all.
+   *
+   * `false` disables this panel's refresh affordance and explains why, which is how an
+   * aggregate surface that was handed its posture directly keeps every control's button
+   * consistent with its own. Defaults to `true`, so a panel used on its own is unaffected.
+   */
+  readonly canRefresh?: boolean;
   /**
    * Overrides the generated id used for the panel's accessible name, and the
    * prefix of every section id. Supply it when the surrounding page needs a
@@ -1499,27 +1829,41 @@ export default function TokenHygienePanel({
   result,
   status,
   onRefresh,
+  canRefresh = true,
   headingId,
 }: TokenHygienePanelProps) {
   if (result !== undefined) {
-    return <TokenHygieneView result={result} headingId={headingId} />;
+    return (
+      <TokenHygieneView
+        result={result}
+        headingId={headingId}
+        onRefresh={onRefresh}
+        canRefresh={canRefresh}
+      />
+    );
   }
   if (status !== undefined) {
+    // A payload handed over directly owns no request, so ONLY an explicit handler can
+    // refresh it; `noRefresh` merely satisfies the required member and is never called.
     return (
       <TokenHygieneView
         result={{
           status: 'success',
           controls: [status],
           isEmpty: false,
-          refresh: onRefresh ?? noRefresh,
+          refresh: noRefresh,
         }}
         headingId={headingId}
+        onRefresh={onRefresh}
+        canRefresh={canRefresh && onRefresh !== undefined}
       />
     );
   }
   // No hook is called on either branch above, so this is a stable choice of
   // component per call site rather than a conditional hook.
-  return <TokenHygieneConnected headingId={headingId} />;
+  return (
+    <TokenHygieneConnected headingId={headingId} onRefresh={onRefresh} canRefresh={canRefresh} />
+  );
 }
 
 /**

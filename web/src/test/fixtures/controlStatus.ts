@@ -114,6 +114,19 @@ import type {
   ControlVerdict,
 } from '../../hooks/useControlStatus';
 import { CONTROL_IDS } from '../../hooks/useControlStatus';
+import {
+  V1_OBSERVATIONS,
+  V2_OBSERVATIONS,
+  V3_OBSERVATIONS,
+  V4_OBSERVATIONS,
+  V5_OBSERVATIONS,
+  V6_OBSERVATIONS,
+  V7_OBSERVATIONS,
+  V7_OUTCOME_TITLES,
+  V8_OBSERVATIONS,
+  v2NamespaceLabelObservation,
+  v6ResourceLevelObservation,
+} from '../../domain/observationIds';
 // The ONLY cross-fixture import permitted in this folder (AAP §0.5.5): the two
 // V3 constants have exactly one definition site, so an edit there propagates
 // here instead of diverging. They are deliberately NOT re-littered as literals.
@@ -252,9 +265,13 @@ export const OBSERVED_AT = '2026-01-01T00:00:00Z';
  * NOT reported as a security finding.
  *
  * Collapsing the two would be a silent downgrade in assurance, so they are
- * modelled apart: findings accumulate on the payload, positive controls live
- * here and in {@link CONTROL_POSITIVE_CONTROLS}, and a broken one produces a
- * verdict of `unknown`.
+ * modelled apart: findings accumulate on the payload, and positive controls live here
+ * and in {@link CONTROL_POSITIVE_CONTROLS}.
+ *
+ * WHAT A BROKEN POSITIVE CONTROL PRODUCES IS PER CONTROL, not universal. V1's aborts
+ * (`t.Fatalf`) and yields `unknown` with no findings; V7's two accumulate (`t.Errorf`
+ * via `expectAllowed`) and yield `fail` with one finding each. See
+ * {@link PositiveControl.severityWhenBroken}.
  */
 export interface PositiveControl {
   /** Stable, human-readable name of the control, suitable for a panel row. */
@@ -266,11 +283,26 @@ export interface PositiveControl {
   /** What must happen for the surrounding negative assertions to be meaningful. */
   readonly expectation: string;
   /**
-   * Always `'abort'`. Declared as the narrow literal rather than as
-   * {@link AssertionSeverity} so that recording a positive control as
-   * `accumulate` -- i.e. as an ordinary finding -- is a compile error.
+   * How the oracle behaves when THIS positive control fails.
+   *
+   * PER CONTROL, AND MEASURED RATHER THAN ASSUMED. This field was previously the narrow
+   * literal `'abort'`, on the reasoning that a positive control is by nature a
+   * precondition. The Go source says otherwise, and it says so plainly:
+   *
+   *   * V1's positive control is reported with `t.Fatalf` (`rbac_test.go` L1252-L1254)
+   *     and its message begins "test setup broken", so the run ABORTS and the payload
+   *     carries `unknown` with an empty findings list;
+   *   * V7's two positive controls go through `expectAllowed` (`node_test.go`
+   *     L1712-L1716), which reports with `t.Errorf`. They ACCUMULATE: the run continues
+   *     and one evaluation reports both, so the payload carries `fail` with one finding
+   *     each.
+   *
+   * Pinning this to `'abort'` made the V7 truth unrepresentable -- recording it was a
+   * compile error -- which meant the tier stated V7's semantics incorrectly and could
+   * not be corrected without widening the type. It is now {@link AssertionSeverity},
+   * and each entry records what its own oracle does.
    */
-  readonly severityWhenBroken: 'abort';
+  readonly severityWhenBroken: AssertionSeverity;
   /** Where the behaviour was measured, as `<path> L<from>-L<to>`. */
   readonly sourceReference: string;
 }
@@ -392,24 +424,24 @@ export const V1_RBAC_PASSING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'subjectAccessReview.resourceAttributes', value: '*/*/*' },
-      { label: 'denied subject: user', value: V1_DENIED_SUBJECT.user },
-      { label: 'denied subject: status.allowed', value: false },
+      { label: V1_OBSERVATIONS.requestedAttributes, value: '*/*/*' },
+      { label: V1_OBSERVATIONS.deniedSubjectUser, value: V1_DENIED_SUBJECT.user },
+      { label: V1_OBSERVATIONS.deniedSubjectAllowed, value: false },
       {
-        label: 'positive control: user',
+        label: V1_OBSERVATIONS.positiveControlUser,
         value: V1_POSITIVE_CONTROL_SUBJECT.user,
       },
-      { label: 'positive control: status.allowed', value: true },
+      { label: V1_OBSERVATIONS.positiveControlAllowed, value: true },
       {
-        label: 'ClusterRoles carrying a full wildcard rule',
+        label: V1_OBSERVATIONS.wildcardClusterRoles,
         value: V1_PERMITTED_WILDCARD_ROLE,
       },
       {
-        label: 'ClusterRoles carrying a full wildcard rule outside cluster-admin',
+        label: V1_OBSERVATIONS.wildcardClusterRolesOutsideClusterAdmin,
         value: 0,
       },
       {
-        label: 'full-wildcard bindings with a subject outside Group/system:masters',
+        label: V1_OBSERVATIONS.wildcardBindingsOutsideMasters,
         value: 0,
       },
     ],
@@ -481,20 +513,20 @@ export const V1_RBAC_FAILING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'subjectAccessReview.resourceAttributes', value: '*/*/*' },
-      { label: 'denied subject: user', value: V1_DENIED_SUBJECT.user },
-      { label: 'denied subject: status.allowed', value: true },
+      { label: V1_OBSERVATIONS.requestedAttributes, value: '*/*/*' },
+      { label: V1_OBSERVATIONS.deniedSubjectUser, value: V1_DENIED_SUBJECT.user },
+      { label: V1_OBSERVATIONS.deniedSubjectAllowed, value: true },
       {
-        label: 'positive control: user',
+        label: V1_OBSERVATIONS.positiveControlUser,
         value: V1_POSITIVE_CONTROL_SUBJECT.user,
       },
-      { label: 'positive control: status.allowed', value: true },
+      { label: V1_OBSERVATIONS.positiveControlAllowed, value: true },
       {
-        label: 'ClusterRoles carrying a full wildcard rule outside cluster-admin',
+        label: V1_OBSERVATIONS.wildcardClusterRolesOutsideClusterAdmin,
         value: 1,
       },
       {
-        label: 'full-wildcard bindings with a subject outside Group/system:masters',
+        label: V1_OBSERVATIONS.wildcardBindingsOutsideMasters,
         value: 1,
       },
     ],
@@ -533,12 +565,12 @@ export const V1_RBAC_UNKNOWN = {
   evidence: {
     observations: [
       {
-        label: 'positive control: user',
+        label: V1_OBSERVATIONS.positiveControlUser,
         value: V1_POSITIVE_CONTROL_SUBJECT.user,
       },
-      { label: 'positive control: status.allowed', value: false },
-      { label: 'denied subject: status.allowed', value: null },
-      { label: 'ClusterRoles observed', value: 0 },
+      { label: V1_OBSERVATIONS.positiveControlAllowed, value: false },
+      { label: V1_OBSERVATIONS.deniedSubjectAllowed, value: null },
+      { label: V1_OBSERVATIONS.clusterRolesObserved, value: 0 },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -715,12 +747,31 @@ export const V2_RESTRICTED_WARNINGS = [
 
 
 /**
- * V2 passing payload: `enforce=baseline` rejected both offending pods.
+ * V2 passing payload: all THREE measured paths of the oracle, in one payload.
  *
  * INVARIANT LOCKED (F-002-RQ-001, F-002-RQ-003): the privileged pod and the
  * hostPID pod are both rejected with 403, and the rejection is genuinely a
  * PodSecurity decision because the namespace's `default` ServiceAccount existed
- * first.
+ * first; and the `warn=restricted` namespace ADMITS its pod while still
+ * objecting to it.
+ *
+ * WHY ALL THREE, and this is the correction that matters:
+ * `TestPodSecurityEnforceBaselineRejectsPrivileged` is ONE test function whose
+ * single verdict covers four `t.Errorf` assertions -- the two rejections
+ * (L408, L420), the admission under `warn=restricted` (L447-L449) and the
+ * non-zero warning count (L451-L455). A payload that claims `pass` for V2 while
+ * recording only the enforce half is claiming more than it measured, and
+ * `PodSecurityPanel`'s own pass sentence says so out loud: "the enforced level
+ * rejected every violating pod AND the warned level objected as expected".
+ * Recording only two of the three paths here is what let that sentence be
+ * rendered without evidence for its second clause. The panel now REQUIRES all
+ * three before it will render a pass, so the recorded pass records all three.
+ *
+ * `warnings` is therefore non-empty on a PASSING payload, which is correct
+ * rather than contradictory: under `warn=restricted` a warning is REQUIRED
+ * evidence, not a defect. Its absence is the failure (L451-L455), which is why
+ * {@link V2_POD_SECURITY_WARNING} keeps the warn half on its own as a separate,
+ * narrower scenario.
  *
  * The precondition and the dry-run posture are recorded as observations rather
  * than left in a comment, so the panel can show WHY the 403 is trustworthy.
@@ -728,43 +779,59 @@ export const V2_RESTRICTED_WARNINGS = [
 export const V2_POD_SECURITY_PASSING = {
   controlId: 'V2',
   verdict: 'pass',
-  summary: 'enforce=baseline rejected privileged and hostPID pods.',
+  summary: 'enforce=baseline rejected privileged and hostPID pods; warn=restricted objected.',
   detail:
     'Both offending pods were rejected with 403 Forbidden by the PodSecurity ' +
     'admission plugin. The namespace default ServiceAccount was created before ' +
     'the pods, so neither rejection can be a ServiceAccount error masquerading ' +
     'as a Pod Security decision, and both creations ran with dry-run so nothing ' +
-    'persisted.',
+    'persisted. In the separately labelled warn=restricted namespace the ' +
+    'restricted-violating pod was admitted -- enforce is left at the cluster ' +
+    'default of privileged -- and the server still returned a warning.',
   requirementIds: ['F-002-RQ-001', 'F-002-RQ-002', 'F-002-RQ-003'],
   findings: [],
-  warnings: [],
+  warnings: V2_RESTRICTED_WARNINGS,
   evidence: {
     observations: [
       {
-        label: `namespace ${V2_NAMESPACES.enforceBaseline.name}: ${V2_NAMESPACES.enforceBaseline.labelKey}`,
+        label: v2NamespaceLabelObservation(
+          V2_NAMESPACES.enforceBaseline.name,
+          V2_NAMESPACES.enforceBaseline.labelKey,
+        ),
         value: V2_NAMESPACES.enforceBaseline.labelValue,
       },
-      { label: 'pod privileged-pod: response status', value: FORBIDDEN_STATUS },
-      { label: 'pod hostpid-pod: response status', value: FORBIDDEN_STATUS },
+      { label: V2_OBSERVATIONS.privilegedPodStatus, value: FORBIDDEN_STATUS },
+      { label: V2_OBSERVATIONS.hostPidPodStatus, value: FORBIDDEN_STATUS },
       {
-        label: 'precondition: namespace default ServiceAccount created first',
+        label: V2_OBSERVATIONS.defaultServiceAccountPrecondition,
         value: true,
       },
-      { label: 'createOptions.dryRun', value: 'All' },
+      { label: V2_OBSERVATIONS.dryRun, value: 'All' },
       {
-        label: 'admission config defaults.enforce',
+        label: v2NamespaceLabelObservation(
+          V2_NAMESPACES.warnRestricted.name,
+          V2_NAMESPACES.warnRestricted.labelKey,
+        ),
+        value: V2_NAMESPACES.warnRestricted.labelValue,
+      },
+      { label: V2_OBSERVATIONS.warnPodAdmitted, value: true },
+      { label: V2_OBSERVATIONS.warnPodStatus, value: null },
+      { label: V2_OBSERVATIONS.warningsRecorded, value: V2_RESTRICTED_WARNINGS.length },
+      { label: V2_OBSERVATIONS.effectiveEnforceLevel, value: 'privileged' },
+      {
+        label: V2_OBSERVATIONS.admissionEnforce,
         value: V2_GENERATED_ADMISSION_CONFIG.defaults.enforce,
       },
       {
-        label: 'admission config defaults.warn',
+        label: V2_OBSERVATIONS.admissionWarn,
         value: V2_GENERATED_ADMISSION_CONFIG.defaults.warn,
       },
       {
-        label: 'admission config defaults.audit',
+        label: V2_OBSERVATIONS.admissionAudit,
         value: V2_GENERATED_ADMISSION_CONFIG.defaults.audit,
       },
       {
-        label: 'admission config exemptions.namespaces',
+        label: V2_OBSERVATIONS.admissionExemptNamespaces,
         value: V2_GENERATED_ADMISSION_CONFIG.exemptions.namespaces.join(','),
       },
     ],
@@ -805,14 +872,17 @@ export const V2_POD_SECURITY_WARNING = {
   evidence: {
     observations: [
       {
-        label: `namespace ${V2_NAMESPACES.warnRestricted.name}: ${V2_NAMESPACES.warnRestricted.labelKey}`,
+        label: v2NamespaceLabelObservation(
+          V2_NAMESPACES.warnRestricted.name,
+          V2_NAMESPACES.warnRestricted.labelKey,
+        ),
         value: V2_NAMESPACES.warnRestricted.labelValue,
       },
-      { label: 'pod warn-pod: admitted', value: true },
-      { label: 'pod warn-pod: response status', value: null },
-      { label: 'warnings recorded', value: V2_RESTRICTED_WARNINGS.length },
-      { label: 'effective enforce level', value: 'privileged' },
-      { label: 'createOptions.dryRun', value: 'All' },
+      { label: V2_OBSERVATIONS.warnPodAdmitted, value: true },
+      { label: V2_OBSERVATIONS.warnPodStatus, value: null },
+      { label: V2_OBSERVATIONS.warningsRecorded, value: V2_RESTRICTED_WARNINGS.length },
+      { label: V2_OBSERVATIONS.effectiveEnforceLevel, value: 'privileged' },
+      { label: V2_OBSERVATIONS.dryRun, value: 'All' },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -855,16 +925,19 @@ export const V2_POD_SECURITY_FAILING = {
   evidence: {
     observations: [
       {
-        label: `namespace ${V2_NAMESPACES.enforceBaseline.name}: ${V2_NAMESPACES.enforceBaseline.labelKey}`,
+        label: v2NamespaceLabelObservation(
+          V2_NAMESPACES.enforceBaseline.name,
+          V2_NAMESPACES.enforceBaseline.labelKey,
+        ),
         value: V2_NAMESPACES.enforceBaseline.labelValue,
       },
-      { label: 'pod privileged-pod: admitted', value: true },
-      { label: 'pod hostpid-pod: admitted', value: true },
+      { label: V2_OBSERVATIONS.privilegedPodAdmitted, value: true },
+      { label: V2_OBSERVATIONS.hostPidPodAdmitted, value: true },
       {
-        label: 'precondition: namespace default ServiceAccount created first',
+        label: V2_OBSERVATIONS.defaultServiceAccountPrecondition,
         value: true,
       },
-      { label: 'createOptions.dryRun', value: 'All' },
+      { label: V2_OBSERVATIONS.dryRun, value: 'All' },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -894,11 +967,11 @@ export const V2_POD_SECURITY_UNKNOWN = {
   evidence: {
     observations: [
       {
-        label: 'precondition: namespace default ServiceAccount created first',
+        label: V2_OBSERVATIONS.defaultServiceAccountPrecondition,
         value: false,
       },
-      { label: 'pod privileged-pod: response status', value: null },
-      { label: 'pod privileged-pod: admitted', value: null },
+      { label: V2_OBSERVATIONS.privilegedPodStatus, value: null },
+      { label: V2_OBSERVATIONS.privilegedPodAdmitted, value: null },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1024,13 +1097,13 @@ export const V3_ENCRYPTION_PASSING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'etcd entries for the Secret key', value: 1 },
-      { label: 'raw stored value prefix (prefix match)', value: AESGCM_PREFIX },
-      { label: 'plaintext canary', value: PLAINTEXT_CANARY },
-      { label: 'plaintext canary present in raw blob', value: false },
-      { label: 'API server read round-trips to plaintext', value: true },
-      { label: 'storage prefix read from live configuration', value: true },
-      { label: 'storage prefix shape', value: V3_EXAMPLE_STORAGE_PREFIX },
+      { label: V3_OBSERVATIONS.etcdEntryCount, value: 1 },
+      { label: V3_OBSERVATIONS.rawValuePrefix, value: AESGCM_PREFIX },
+      { label: V3_OBSERVATIONS.canaryLiteral, value: PLAINTEXT_CANARY },
+      { label: V3_OBSERVATIONS.canaryPresentInRawBlob, value: false },
+      { label: V3_OBSERVATIONS.plaintextRoundTrip, value: true },
+      { label: V3_OBSERVATIONS.storagePrefixFromLiveConfig, value: true },
+      { label: V3_OBSERVATIONS.storagePrefixShape, value: V3_EXAMPLE_STORAGE_PREFIX },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1073,12 +1146,12 @@ export const V3_ENCRYPTION_FAILING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'etcd entries for the Secret key', value: 1 },
-      { label: 'raw stored value prefix (prefix match)', value: null },
-      { label: 'plaintext canary', value: PLAINTEXT_CANARY },
-      { label: 'plaintext canary present in raw blob', value: true },
-      { label: 'API server read round-trips to plaintext', value: true },
-      { label: 'storage prefix read from live configuration', value: true },
+      { label: V3_OBSERVATIONS.etcdEntryCount, value: 1 },
+      { label: V3_OBSERVATIONS.rawValuePrefix, value: null },
+      { label: V3_OBSERVATIONS.canaryLiteral, value: PLAINTEXT_CANARY },
+      { label: V3_OBSERVATIONS.canaryPresentInRawBlob, value: true },
+      { label: V3_OBSERVATIONS.plaintextRoundTrip, value: true },
+      { label: V3_OBSERVATIONS.storagePrefixFromLiveConfig, value: true },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1111,10 +1184,10 @@ export const V3_ENCRYPTION_UNKNOWN = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'etcd entries for the Secret key', value: 0 },
-      { label: 'raw stored value prefix (prefix match)', value: null },
-      { label: 'plaintext canary present in raw blob', value: null },
-      { label: 'storage prefix read from live configuration', value: false },
+      { label: V3_OBSERVATIONS.etcdEntryCount, value: 0 },
+      { label: V3_OBSERVATIONS.rawValuePrefix, value: null },
+      { label: V3_OBSERVATIONS.canaryPresentInRawBlob, value: null },
+      { label: V3_OBSERVATIONS.storagePrefixFromLiveConfig, value: false },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1327,17 +1400,20 @@ export const V4_TOKEN_EVIDENCE = {
   requestedTtlSeconds: V4_REQUESTED_TTL_SECONDS,
   observedExpiry: V4_OBSERVED_EXPIRY,
   observations: [
-    { label: 'issuer', value: V4_ISSUER },
-    { label: 'sub', value: V4_CLAIM_SHAPE.subject },
-    { label: 'kubernetes.io/namespace', value: V4_CLAIM_SHAPE.kubernetesIoNamespace },
+    { label: V4_OBSERVATIONS.issuer, value: V4_ISSUER },
+    { label: V4_OBSERVATIONS.subject, value: V4_CLAIM_SHAPE.subject },
     {
-      label: 'kubernetes.io/serviceaccount/name',
+      label: V4_OBSERVATIONS.kubernetesIoNamespace,
+      value: V4_CLAIM_SHAPE.kubernetesIoNamespace,
+    },
+    {
+      label: V4_OBSERVATIONS.kubernetesIoServiceAccountName,
       value: V4_CLAIM_SHAPE.kubernetesIoServiceAccountName,
     },
-    { label: 'kubernetes.io/pod', value: V4_CLAIM_SHAPE.kubernetesIoPod },
-    { label: 'kubernetes.io/secret', value: V4_CLAIM_SHAPE.kubernetesIoSecret },
-    { label: 'expiry window: earliest', value: V4_EXPIRY_WINDOW.earliestSeconds },
-    { label: 'expiry window: latest', value: V4_EXPIRY_WINDOW.latestSeconds },
+    { label: V4_OBSERVATIONS.kubernetesIoPod, value: V4_CLAIM_SHAPE.kubernetesIoPod },
+    { label: V4_OBSERVATIONS.kubernetesIoSecret, value: V4_CLAIM_SHAPE.kubernetesIoSecret },
+    { label: V4_OBSERVATIONS.expiryWindowEarliest, value: V4_EXPIRY_WINDOW.earliestSeconds },
+    { label: V4_OBSERVATIONS.expiryWindowLatest, value: V4_EXPIRY_WINDOW.latestSeconds },
   ],
 } as const satisfies ControlEvidence;
 
@@ -1435,12 +1511,12 @@ export const V4_TOKEN_FAILING = {
     requestedTtlSeconds: V4_REQUESTED_TTL_SECONDS,
     observedExpiry: V4_LONG_LIVED_OBSERVED_EXPIRY,
     observations: [
-      { label: 'issuer', value: V4_ISSUER },
-      { label: 'sub', value: V4_CLAIM_SHAPE.subject },
-      { label: 'kubernetes.io/pod', value: V4_CLAIM_SHAPE.kubernetesIoPod },
-      { label: 'kubernetes.io/secret', value: V4_CLAIM_SHAPE.kubernetesIoSecret },
-      { label: 'expiry window: earliest', value: V4_EXPIRY_WINDOW.earliestSeconds },
-      { label: 'expiry window: latest', value: V4_EXPIRY_WINDOW.latestSeconds },
+      { label: V4_OBSERVATIONS.issuer, value: V4_ISSUER },
+      { label: V4_OBSERVATIONS.subject, value: V4_CLAIM_SHAPE.subject },
+      { label: V4_OBSERVATIONS.kubernetesIoPod, value: V4_CLAIM_SHAPE.kubernetesIoPod },
+      { label: V4_OBSERVATIONS.kubernetesIoSecret, value: V4_CLAIM_SHAPE.kubernetesIoSecret },
+      { label: V4_OBSERVATIONS.expiryWindowEarliest, value: V4_EXPIRY_WINDOW.earliestSeconds },
+      { label: V4_OBSERVATIONS.expiryWindowLatest, value: V4_EXPIRY_WINDOW.latestSeconds },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1468,10 +1544,10 @@ export const V4_TOKEN_UNKNOWN = {
   evidence: {
     requestedTtlSeconds: V4_REQUESTED_TTL_SECONDS,
     observations: [
-      { label: 'token issued', value: false },
-      { label: 'sub', value: null },
-      { label: 'kubernetes.io/pod', value: null },
-      { label: 'kubernetes.io/secret', value: null },
+      { label: V4_OBSERVATIONS.tokenIssued, value: false },
+      { label: V4_OBSERVATIONS.subject, value: null },
+      { label: V4_OBSERVATIONS.kubernetesIoPod, value: null },
+      { label: V4_OBSERVATIONS.kubernetesIoSecret, value: null },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1631,6 +1707,20 @@ export const FAIL_OPEN_WEBHOOK = {
  * drift apart in which fields they surface -- the only difference between them
  * should be the recorded posture itself.
  *
+ * THE WIRE TYPE OF A LIST-VALUED FIELD IS PART OF THE RECORD.
+ * `ControlObservation.value` carries a scalar, so a list has to be encoded as a
+ * string -- and the encoding chosen is the manifest's OWN punctuation, produced by
+ * `JSON.stringify`, so `admissionReviewVersions` is recorded as the four
+ * characters `["v1"]` exactly as L22 commits it and `rules[0].apiGroups` as
+ * `[""]` exactly as L11 commits it.
+ *
+ * A comma-join was the obvious alternative and is deliberately NOT used: joining
+ * `['v1']` yields the bare text `v1`, which is indistinguishable from a SCALAR
+ * `admissionReviewVersions: "v1"` -- a malformed manifest the admission API would
+ * reject. Recording the punctuation is what lets a panel tell the two apart, and
+ * `WebhookPosturePanel` parses this value as a JSON array of strings for exactly
+ * that reason.
+ *
  * @param posture - the recorded webhook posture to describe.
  * @returns One observation per asserted field, in the manifest's own order.
  */
@@ -1638,24 +1728,33 @@ export function webhookPostureObservations(
   posture: RecordedWebhookPosture,
 ): readonly ControlObservation[] {
   return [
-    { label: 'webhook name', value: posture.name },
-    { label: 'failurePolicy', value: posture.failurePolicy },
-    { label: 'timeoutSeconds', value: posture.timeoutSeconds },
-    { label: 'sideEffects', value: posture.sideEffects },
+    { label: V5_OBSERVATIONS.webhookName, value: posture.name },
+    { label: V5_OBSERVATIONS.failurePolicy, value: posture.failurePolicy },
+    { label: V5_OBSERVATIONS.timeoutSeconds, value: posture.timeoutSeconds },
+    { label: V5_OBSERVATIONS.sideEffects, value: posture.sideEffects },
     {
-      label: 'admissionReviewVersions',
-      value: posture.admissionReviewVersions.join(','),
+      label: V5_OBSERVATIONS.admissionReviewVersions,
+      value: JSON.stringify(posture.admissionReviewVersions),
     },
-    { label: 'clientConfig.url', value: posture.clientConfig.url },
-    { label: 'clientConfig.caBundle', value: posture.clientConfig.caBundle },
-    { label: 'rules[0].apiGroups', value: posture.rules[0].apiGroups.join(',') },
-    { label: 'rules[0].apiVersions', value: posture.rules[0].apiVersions.join(',') },
-    { label: 'rules[0].operations', value: posture.rules[0].operations.join(',') },
-    { label: 'rules[0].resources', value: posture.rules[0].resources.join(',') },
-    { label: 'rules[0].scope', value: posture.rules[0].scope },
-    { label: 'matchConditions[0].name', value: posture.matchConditions[0].name },
+    { label: V5_OBSERVATIONS.clientConfigUrl, value: posture.clientConfig.url },
+    { label: V5_OBSERVATIONS.clientConfigCaBundle, value: posture.clientConfig.caBundle },
+    { label: V5_OBSERVATIONS.ruleApiGroups, value: JSON.stringify(posture.rules[0].apiGroups) },
     {
-      label: 'matchConditions[0].expression',
+      label: V5_OBSERVATIONS.ruleApiVersions,
+      value: JSON.stringify(posture.rules[0].apiVersions),
+    },
+    {
+      label: V5_OBSERVATIONS.ruleOperations,
+      value: JSON.stringify(posture.rules[0].operations),
+    },
+    {
+      label: V5_OBSERVATIONS.ruleResources,
+      value: JSON.stringify(posture.rules[0].resources),
+    },
+    { label: V5_OBSERVATIONS.ruleScope, value: posture.rules[0].scope },
+    { label: V5_OBSERVATIONS.matchConditionName, value: posture.matchConditions[0].name },
+    {
+      label: V5_OBSERVATIONS.matchConditionExpression,
       value: posture.matchConditions[0].expression,
     },
   ];
@@ -1722,10 +1821,10 @@ export const V5_WEBHOOK_UNKNOWN = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'webhook name', value: 'cloud-pvl-admission.k8s.io' },
-      { label: 'configuration readable', value: false },
-      { label: 'failurePolicy', value: null },
-      { label: 'timeoutSeconds', value: null },
+      { label: V5_OBSERVATIONS.webhookName, value: FAIL_CLOSED_WEBHOOK.name },
+      { label: V5_OBSERVATIONS.configurationReadable, value: false },
+      { label: V5_OBSERVATIONS.failurePolicy, value: null },
+      { label: V5_OBSERVATIONS.timeoutSeconds, value: null },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1955,7 +2054,7 @@ export const V6_CONFIDENTIALITY_GUARD = {
  */
 export const V6_AUDIT_LEVEL_OBSERVATIONS: readonly ControlObservation[] =
   SENSITIVE_RESOURCE_AUDIT_RULES.map((rule) => ({
-    label: `${rule.apiGroup === '' ? 'core' : rule.apiGroup}/${rule.resources.join('+')} in ${rule.namespace}`,
+    label: v6ResourceLevelObservation(rule.apiGroup, rule.resources, rule.namespace),
     value: rule.level,
   }));
 
@@ -1978,13 +2077,10 @@ export const V6_AUDIT_PASSING = {
   evidence: {
     observations: [
       ...V6_AUDIT_LEVEL_OBSERVATIONS,
-      { label: 'secrets audit level', value: SECRETS_AUDIT_LEVEL },
+      { label: V6_OBSERVATIONS.secretsAuditLevel, value: SECRETS_AUDIT_LEVEL },
+      { label: V6_OBSERVATIONS.secretsResponseObjectCount, value: 0 },
       {
-        label: 'secrets events carrying a responseObject',
-        value: 0,
-      },
-      {
-        label: 'level ordering None < Metadata < Request < RequestResponse',
+        label: V6_OBSERVATIONS.levelOrdering,
         value: AUDIT_LEVEL_ORDER.join(' < '),
       },
     ],
@@ -2037,11 +2133,11 @@ export const V6_AUDIT_FAILING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'secrets audit level', value: 'RequestResponse' },
-      { label: 'secrets audit level required', value: SECRETS_AUDIT_LEVEL },
-      { label: 'secrets events carrying a responseObject', value: 2 },
+      { label: V6_OBSERVATIONS.secretsAuditLevel, value: 'RequestResponse' },
+      { label: V6_OBSERVATIONS.secretsAuditLevelRequired, value: SECRETS_AUDIT_LEVEL },
+      { label: V6_OBSERVATIONS.secretsResponseObjectCount, value: 2 },
       {
-        label: 'requestObject on create/update (accepted trade-off)',
+        label: V6_OBSERVATIONS.requestObjectTradeOff,
         value: V6_CONFIDENTIALITY_GUARD.requestObjectPermitted,
       },
     ],
@@ -2072,9 +2168,9 @@ export const V6_AUDIT_UNKNOWN = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'audit events observed', value: 0 },
-      { label: 'secrets audit level', value: null },
-      { label: 'secrets events carrying a responseObject', value: null },
+      { label: V6_OBSERVATIONS.auditEventsObserved, value: 0 },
+      { label: V6_OBSERVATIONS.secretsAuditLevel, value: null },
+      { label: V6_OBSERVATIONS.secretsResponseObjectCount, value: null },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2151,10 +2247,27 @@ export interface NodeRestrictionCheck {
    */
   readonly expectedHttpStatus: number | null;
   /**
-   * `true` for the two allowances. A failing positive control is setup breakage
-   * rather than a security finding -- see {@link PositiveControl}.
+   * `true` for the two allowances, which exist to prove the denials are targeted.
+   *
+   * NOTE THE DIFFERENCE FROM V1, because it is measured and not a matter of taste.
+   * V1's positive control fails with `t.Fatalf` (`rbac_test.go` L1252-L1254) and its
+   * message begins "test setup broken", so a V1 positive-control failure ABORTS and is
+   * reported as `unknown` with no findings. V7's four checks all go through
+   * `expectForbidden` (`node_test.go` L698) or `expectAllowed` (L712), and BOTH call
+   * `t.Errorf`. A V7 positive-control failure is therefore a recorded FAILURE that
+   * accumulates -- see {@link NodeRestrictionCheck.severityWhenViolated}.
    */
   readonly isPositiveControl: boolean;
+  /**
+   * How a failure of this check behaves in the oracle.
+   *
+   * `'accumulate'` for all four, without exception: `expectForbidden` and
+   * `expectAllowed` both report with `t.Errorf`, so ONE run reports EVERY check that
+   * failed rather than stopping at the first. Recording it per check is what stops a
+   * consumer from assuming the V1 abort semantics apply here as well, and it is why
+   * {@link V7_POSITIVE_CONTROLS_FAILING} carries TWO findings from one evaluation.
+   */
+  readonly severityWhenViolated: AssertionSeverity;
   /** Where the behaviour was measured. */
   readonly sourceReference: string;
 }
@@ -2168,39 +2281,43 @@ export interface NodeRestrictionCheck {
  */
 export const V7_NODE_RESTRICTION_CHECKS = [
   {
-    label: 'cross-node status update is denied',
+    label: V7_OUTCOME_TITLES.crossNodeDenied,
     principal: V7_PRINCIPALS.node1.user,
     operation: 'UpdateStatus on Node "node2"',
     expectedOutcome: 'forbidden',
     expectedHttpStatus: FORBIDDEN_STATUS,
     isPositiveControl: false,
+    severityWhenViolated: 'accumulate',
     sourceReference: 'test/integration/auth/node_test.go L1653-L1659',
   },
   {
-    label: 'unrelated Secret read is denied',
+    label: V7_OUTCOME_TITLES.unrelatedSecretDenied,
     principal: V7_PRINCIPALS.node1.user,
     operation: 'get Secret "unrelatedsecret" in namespace "ns"',
     expectedOutcome: 'forbidden',
     expectedHttpStatus: FORBIDDEN_STATUS,
     isPositiveControl: false,
+    severityWhenViolated: 'accumulate',
     sourceReference: 'test/integration/auth/node_test.go L1665-L1668',
   },
   {
-    label: 'own Node read is allowed',
+    label: V7_OUTCOME_TITLES.ownNodeReadAllowed,
     principal: V7_PRINCIPALS.node1.user,
     operation: 'get Node "node1"',
     expectedOutcome: 'allowed',
     expectedHttpStatus: null,
     isPositiveControl: true,
+    severityWhenViolated: 'accumulate',
     sourceReference: 'test/integration/auth/node_test.go L1673-L1676',
   },
   {
-    label: 'own Node status update is allowed',
+    label: V7_OUTCOME_TITLES.ownNodeStatusUpdateAllowed,
     principal: V7_PRINCIPALS.node1.user,
     operation: 'UpdateStatus on Node "node1"',
     expectedOutcome: 'allowed',
     expectedHttpStatus: null,
     isPositiveControl: true,
+    severityWhenViolated: 'accumulate',
     sourceReference: 'test/integration/auth/node_test.go L1680-L1686',
   },
 ] as const satisfies readonly NodeRestrictionCheck[];
@@ -2222,25 +2339,25 @@ export const V7_NODE_RESTRICTION_PASSING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'authorization mode', value: V7_ENABLING_POSTURE.authorizationMode },
+      { label: V7_OBSERVATIONS.authorizationMode, value: V7_ENABLING_POSTURE.authorizationMode },
       {
-        label: 'admission plugins enabled',
+        label: V7_OBSERVATIONS.admissionPluginsEnabled,
         value: V7_ENABLING_POSTURE.enabledAdmissionPlugins.join(','),
       },
       {
-        label: 'denial: node1 UpdateStatus on node2',
+        label: V7_OBSERVATIONS.crossNodeStatusUpdate,
         value: FORBIDDEN_STATUS,
       },
       {
-        label: 'denial: node1 get Secret ns/unrelatedsecret',
+        label: V7_OBSERVATIONS.unrelatedSecretRead,
         value: FORBIDDEN_STATUS,
       },
-      { label: 'positive control: node1 get own Node', value: 'allowed' },
+      { label: V7_OBSERVATIONS.ownNodeRead, value: 'allowed' },
       {
-        label: 'positive control: node1 UpdateStatus own Node',
+        label: V7_OBSERVATIONS.ownNodeStatusUpdate,
         value: 'allowed',
       },
-      { label: 'precondition: node2 existed before the cross-node call', value: true },
+      { label: V7_OBSERVATIONS.node2ExistedFirst, value: true },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2281,12 +2398,12 @@ export const V7_NODE_RESTRICTION_FAILING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'authorization mode', value: V7_ENABLING_POSTURE.authorizationMode },
-      { label: 'denial: node1 UpdateStatus on node2', value: 'allowed' },
-      { label: 'denial: node1 get Secret ns/unrelatedsecret', value: 'allowed' },
-      { label: 'positive control: node1 get own Node', value: 'allowed' },
-      { label: 'positive control: node1 UpdateStatus own Node', value: 'allowed' },
-      { label: 'precondition: node2 existed before the cross-node call', value: true },
+      { label: V7_OBSERVATIONS.authorizationMode, value: V7_ENABLING_POSTURE.authorizationMode },
+      { label: V7_OBSERVATIONS.crossNodeStatusUpdate, value: 'allowed' },
+      { label: V7_OBSERVATIONS.unrelatedSecretRead, value: 'allowed' },
+      { label: V7_OBSERVATIONS.ownNodeRead, value: 'allowed' },
+      { label: V7_OBSERVATIONS.ownNodeStatusUpdate, value: 'allowed' },
+      { label: V7_OBSERVATIONS.node2ExistedFirst, value: true },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2331,44 +2448,116 @@ export const V7_NODE_RESTRICTION_NOT_FOUND = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'authorization mode', value: V7_ENABLING_POSTURE.authorizationMode },
-      { label: 'denial: node1 UpdateStatus on node2', value: NOT_FOUND_STATUS },
-      { label: 'denial status required', value: FORBIDDEN_STATUS },
-      { label: 'precondition: node2 existed before the cross-node call', value: false },
+      { label: V7_OBSERVATIONS.authorizationMode, value: V7_ENABLING_POSTURE.authorizationMode },
+      { label: V7_OBSERVATIONS.crossNodeStatusUpdate, value: NOT_FOUND_STATUS },
+      { label: V7_OBSERVATIONS.denialStatusRequired, value: FORBIDDEN_STATUS },
+      { label: V7_OBSERVATIONS.node2ExistedFirst, value: false },
     ],
   },
   observedAt: OBSERVED_AT,
 } as const satisfies ControlStatus;
 
 /**
- * V7 indeterminate payload: the positive controls failed.
+ * V7 failing payload: BOTH positive controls were refused.
  *
- * node1 could not reach even its OWN Node object, so the authorization stack is
- * refusing everything and the two denials carry no information -- a stack that
- * denies all requests denies the cross-node one too. Setup breakage, so the
- * verdict is `unknown` and there are no findings.
+ * INVARIANT LOCKED (F-007-RQ-002) -- THIS IS A FAILURE, NOT AN UNKNOWN, and the
+ * distinction is measured rather than chosen. `node_test.go` L1712's `expectAllowed`
+ * reports with `t.Errorf`, so a refused positive control is a recorded failure that
+ * ACCUMULATES; only V1's positive control uses `t.Fatalf` and therefore aborts. A
+ * consumer that carried V1's abort semantics across to V7 would report a refused
+ * positive control as "could not evaluate" when the oracle calls it a failure.
+ *
+ * BOTH failures are in ONE payload, and that is the whole point of the accumulate
+ * semantics: `t.Errorf` records and continues, so one evaluation reports every check
+ * that failed. A payload carrying only the first would make a panel that renders only
+ * `findings[0]` look correct.
+ *
+ * The two denials are recorded as 403 alongside them, because that is what a stack
+ * refusing everything actually returns -- which is precisely why the positive controls
+ * exist. Without them, those two 403s read as a clean pass.
+ */
+export const V7_POSITIVE_CONTROLS_FAILING = {
+  controlId: 'V7',
+  verdict: 'fail',
+  summary: 'A node identity cannot reach even its own Node object.',
+  detail:
+    'node1 was refused 403 Forbidden when reading its own Node object AND when ' +
+    'updating its own Node status, so NodeRestriction is over-broad or the ' +
+    'authorization stack is refusing everything. The two denials below also ' +
+    'returned 403, which is exactly why they prove nothing on their own. Both ' +
+    'failures are reported from one evaluation because the oracle records each ' +
+    'with t.Errorf and continues.',
+  requirementIds: ['F-007-RQ-002'],
+  findings: [
+    {
+      message:
+        'Positive control failed: identity "system:node:node1" was refused 403 ' +
+        'Forbidden reading its OWN Node object. NodeRestriction permits a node to ' +
+        'read its own Node, so the two denials in this report carry no information.',
+      subject: 'node/node1',
+      requirementId: 'F-007-RQ-002',
+    },
+    {
+      message:
+        'Positive control failed: identity "system:node:node1" was refused 403 ' +
+        'Forbidden updating the status of its OWN Node object. NodeRestriction ' +
+        'permits a node to act on its own Node, so this denial means the ' +
+        'restriction is over-broad.',
+      subject: 'node/node1',
+      requirementId: 'F-007-RQ-002',
+    },
+  ],
+  warnings: [],
+  evidence: {
+    observations: [
+      { label: V7_OBSERVATIONS.authorizationMode, value: V7_ENABLING_POSTURE.authorizationMode },
+      { label: V7_OBSERVATIONS.crossNodeStatusUpdate, value: FORBIDDEN_STATUS },
+      { label: V7_OBSERVATIONS.unrelatedSecretRead, value: FORBIDDEN_STATUS },
+      { label: V7_OBSERVATIONS.ownNodeRead, value: FORBIDDEN_STATUS },
+      { label: V7_OBSERVATIONS.ownNodeStatusUpdate, value: FORBIDDEN_STATUS },
+      { label: V7_OBSERVATIONS.node2ExistedFirst, value: true },
+    ],
+  },
+  observedAt: OBSERVED_AT,
+} as const satisfies ControlStatus;
+
+/**
+ * V7 indeterminate payload: the four checks were never measured.
+ *
+ * INVARIANT LOCKED (F-007-RQ-002) -- an `unknown` payload is one where the EVIDENCE IS
+ * ABSENT, not one where the evidence is bad. The enabling posture was read and the
+ * cross-node call was attempted, but no outcome was recorded for any of the four
+ * checks: the cross-node result is explicitly `null` and the other three are missing
+ * entirely.
+ *
+ * This is the payload that makes the V7 panel's conservative floor assertable. All
+ * four checks unmeasured means the panel MUST render `unknown` -- and it must do so
+ * even if the server had claimed `pass`, because assertion density is part of the
+ * contract (AAP §0.7.2): V7 keeps its four assertions, and a report carrying none of
+ * them has not made them.
+ *
+ * `findings` is empty because nothing was found; an absence of evidence is not a
+ * defect, and reporting one would be as untruthful as reporting a pass. The payload
+ * for genuinely refused positive controls is {@link V7_POSITIVE_CONTROLS_FAILING},
+ * which carries findings and the verdict `fail`.
  */
 export const V7_NODE_RESTRICTION_UNKNOWN = {
   controlId: 'V7',
   verdict: 'unknown',
   summary: 'Node isolation could not be evaluated.',
   detail:
-    'Setup breakage, not a security finding: node1 was denied access to its own ' +
-    'Node object, so the authorization stack is refusing everything. The ' +
-    'cross-node and unrelated-Secret denials are therefore uninformative and no ' +
-    'verdict is reported.',
+    'None of the four authorization checks produced a recorded outcome: the ' +
+    'cross-node update reported no result at all and the unrelated-Secret read ' +
+    'and both positive controls were not reported. No verdict about node ' +
+    'isolation follows from a report that measured nothing.',
   requirementIds: ['F-007-RQ-001', 'F-007-RQ-002'],
   findings: [],
   warnings: [],
   evidence: {
     observations: [
-      { label: 'authorization mode', value: V7_ENABLING_POSTURE.authorizationMode },
-      { label: 'positive control: node1 get own Node', value: FORBIDDEN_STATUS },
-      {
-        label: 'positive control: node1 UpdateStatus own Node',
-        value: FORBIDDEN_STATUS,
-      },
-      { label: 'denial: node1 UpdateStatus on node2', value: null },
+      { label: V7_OBSERVATIONS.authorizationMode, value: V7_ENABLING_POSTURE.authorizationMode },
+      { label: V7_OBSERVATIONS.denialStatusRequired, value: FORBIDDEN_STATUS },
+      { label: V7_OBSERVATIONS.crossNodeStatusUpdate, value: null },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2602,19 +2791,19 @@ export const V8_ETCD_TRANSPORT_PASSING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: '--etcd-servers', value: 'https://127.0.0.1:2379' },
-      { label: '--etcd-cafile', value: 'CACertPath' },
-      { label: '--etcd-certfile', value: 'APIServerCertPath' },
-      { label: '--etcd-keyfile', value: 'APIServerKeyPath' },
-      { label: 'credentials supplied', value: 'all' },
-      { label: 'exit code', value: 0 },
+      { label: V8_OBSERVATIONS.etcdServers, value: 'https://127.0.0.1:2379' },
+      { label: V8_OBSERVATIONS.etcdCaFile, value: 'CACertPath' },
+      { label: V8_OBSERVATIONS.etcdCertFile, value: 'APIServerCertPath' },
+      { label: V8_OBSERVATIONS.etcdKeyFile, value: 'APIServerKeyPath' },
+      { label: V8_OBSERVATIONS.credentialsSupplied, value: 'all' },
+      { label: V8_OBSERVATIONS.exitCode, value: 0 },
       {
-        label: 'insecure fallback default (cluster/gce/config-default.sh)',
+        label: V8_OBSERVATIONS.insecureFallbackDefaultDefaultProfile,
         value:
           ETCD_INSECURE_FALLBACK_PROFILE_DEFAULTS['cluster/gce/config-default.sh'],
       },
       {
-        label: 'insecure fallback default (cluster/gce/config-test.sh)',
+        label: V8_OBSERVATIONS.insecureFallbackDefaultTestProfile,
         value: ETCD_INSECURE_FALLBACK_PROFILE_DEFAULTS['cluster/gce/config-test.sh'],
       },
     ],
@@ -2645,11 +2834,11 @@ export const V8_ETCD_TRANSPORT_FAIL_CLOSED = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'credentials supplied', value: 'none' },
-      { label: 'insecure fallback permitted', value: false },
-      { label: 'outcome', value: 'fail-closed' },
-      { label: 'exit code', value: 1 },
-      { label: '--etcd-servers', value: null },
+      { label: V8_OBSERVATIONS.credentialsSupplied, value: 'none' },
+      { label: V8_OBSERVATIONS.insecureFallbackPermitted, value: false },
+      { label: V8_OBSERVATIONS.outcome, value: 'fail-closed' },
+      { label: V8_OBSERVATIONS.exitCode, value: 1 },
+      { label: V8_OBSERVATIONS.etcdServers, value: null },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2684,12 +2873,12 @@ export const V8_ETCD_TRANSPORT_WARNING = {
   ],
   evidence: {
     observations: [
-      { label: '--etcd-servers', value: 'http://127.0.0.1:2379' },
-      { label: 'credentials supplied', value: 'none' },
-      { label: 'insecure fallback permitted', value: true },
-      { label: 'outcome', value: 'plaintext-loopback' },
-      { label: 'exit code', value: 0 },
-      { label: 'unit-test compatibility default', value: false },
+      { label: V8_OBSERVATIONS.etcdServers, value: 'http://127.0.0.1:2379' },
+      { label: V8_OBSERVATIONS.credentialsSupplied, value: 'none' },
+      { label: V8_OBSERVATIONS.insecureFallbackPermitted, value: true },
+      { label: V8_OBSERVATIONS.outcome, value: 'plaintext-loopback' },
+      { label: V8_OBSERVATIONS.exitCode, value: 0 },
+      { label: V8_OBSERVATIONS.unitTestCompatibilityDefault, value: false },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2734,12 +2923,12 @@ export const V8_ETCD_TRANSPORT_FAILING = {
   warnings: [],
   evidence: {
     observations: [
-      { label: '--etcd-servers', value: 'http://127.0.0.1:2379' },
-      { label: 'credentials supplied', value: 'partial' },
-      { label: 'insecure fallback permitted', value: false },
-      { label: 'outcome', value: 'plaintext-loopback' },
-      { label: 'exit code', value: 0 },
-      { label: 'exit code required for partial credentials', value: 1 },
+      { label: V8_OBSERVATIONS.etcdServers, value: 'http://127.0.0.1:2379' },
+      { label: V8_OBSERVATIONS.credentialsSupplied, value: 'partial' },
+      { label: V8_OBSERVATIONS.insecureFallbackPermitted, value: false },
+      { label: V8_OBSERVATIONS.outcome, value: 'plaintext-loopback' },
+      { label: V8_OBSERVATIONS.exitCode, value: 0 },
+      { label: V8_OBSERVATIONS.exitCodeRequiredForPartial, value: 1 },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2765,10 +2954,10 @@ export const V8_ETCD_TRANSPORT_UNKNOWN = {
   warnings: [],
   evidence: {
     observations: [
-      { label: 'rendered command readable', value: false },
-      { label: '--etcd-servers', value: null },
-      { label: 'credentials supplied', value: null },
-      { label: 'exit code', value: null },
+      { label: V8_OBSERVATIONS.renderedCommandReadable, value: false },
+      { label: V8_OBSERVATIONS.etcdServers, value: null },
+      { label: V8_OBSERVATIONS.credentialsSupplied, value: null },
+      { label: V8_OBSERVATIONS.exitCode, value: null },
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2788,11 +2977,15 @@ export const V8_ETCD_TRANSPORT_UNKNOWN = {
 /**
  * The two measured positive controls.
  *
- * A broken positive control is SETUP BREAKAGE and never a security finding.
- * Reading these alongside {@link V1_RBAC_UNKNOWN} and
- * {@link V7_NODE_RESTRICTION_UNKNOWN} shows the pairing: when one of these fails,
- * the corresponding payload carries verdict `unknown` with an EMPTY findings list,
- * which is the presentation-layer equivalent of the oracle's `t.Fatalf`.
+ * WHAT A BREAK MEANS DIFFERS BETWEEN THE TWO, and the difference is measured. Read V1's
+ * entry alongside {@link V1_RBAC_UNKNOWN}: its break is `t.Fatalf`, so the payload
+ * carries `unknown` with an EMPTY findings list -- setup breakage, never a security
+ * finding. Read V7's two alongside {@link V7_POSITIVE_CONTROLS_FAILING}: theirs is
+ * `t.Errorf` via `expectAllowed`, so the payload carries `fail` with one finding per
+ * refused control, both from a single evaluation.
+ *
+ * Neither is {@link V7_NODE_RESTRICTION_UNKNOWN}, which is the different case of the
+ * four checks never having been measured at all.
  */
 export const CONTROL_POSITIVE_CONTROLS = {
   V1: [
@@ -2817,7 +3010,7 @@ export const CONTROL_POSITIVE_CONTROLS = {
       expectation:
         'MUST be allowed. Without it the cross-node denial is also satisfied by ' +
         'an authorization stack that refuses every request.',
-      severityWhenBroken: 'abort',
+      severityWhenBroken: 'accumulate',
       sourceReference: 'test/integration/auth/node_test.go L1670-L1676',
     },
     {
@@ -2828,7 +3021,7 @@ export const CONTROL_POSITIVE_CONTROLS = {
         'MUST be allowed. NodeRestriction permits a node to act on its own Node ' +
         'object, so a denial here proves the denials above are blanket failures ' +
         'rather than targeted node scoping.',
-      severityWhenBroken: 'abort',
+      severityWhenBroken: 'accumulate',
       sourceReference: 'test/integration/auth/node_test.go L1678-L1686',
     },
   ],
@@ -3084,4 +3277,3 @@ export function controlStatusListFixture(
 ): readonly ControlStatus[] {
   return CONTROL_IDS.map((controlId) => CONTROL_STATUS_FIXTURES[variant][controlId]);
 }
-

@@ -101,11 +101,21 @@ import {
   type ControlVerdict,
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
+import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
 import {
   AESGCM_PREFIX,
-  DEPLOYMENT_ENCRYPTION_CONFIG,
   PLAINTEXT_CANARY,
-} from '../test/fixtures/encryptionConfig';
+  REQUIRED_ENCRYPTION_CONFIG_SHAPE,
+} from '../domain/securityConstants';
+import {
+  describeType,
+  readBoolean,
+  readNullable,
+  readNumber,
+  strictestVerdict,
+  type EvidenceAbsenceReason,
+} from '../domain/evidence';
+import { V3_ASSERTION_TITLES, V3_OBSERVATIONS } from '../domain/observationIds';
 
 /**
  * The control this panel reports on.
@@ -141,7 +151,7 @@ const REQUIREMENT_IDS = ['F-003-RQ-001', 'F-003-RQ-002', 'F-003-RQ-003'] as cons
  * diverging — which is precisely the failure mode a second copy of these values
  * would introduce.
  */
-const RECORDED_RULE = DEPLOYMENT_ENCRYPTION_CONFIG.resources[0];
+const RECORDED_RULE = REQUIRED_ENCRYPTION_CONFIG_SHAPE.rule;
 
 /**
  * The resources the manifest encrypts: `secrets` first, then `configmaps`
@@ -151,7 +161,7 @@ const RECORDED_RULE = DEPLOYMENT_ENCRYPTION_CONFIG.resources[0];
 const EXPECTED_RESOURCES = RECORDED_RULE.resources;
 
 /** The strong provider block: KMS v2, first in the list (manifest L46-50). */
-const RECORDED_KMS = RECORDED_RULE.providers[0].kms;
+const RECORDED_KMS = RECORDED_RULE.strongProvider;
 
 /** The bounded gRPC budget for the envelope call: `3s` (manifest L50). */
 const EXPECTED_KMS_TIMEOUT = RECORDED_KMS.timeout;
@@ -172,6 +182,16 @@ const PLACEHOLDER_KMS_ENDPOINT = RECORDED_KMS.endpoint;
  * and the API server still boots — a silently dead control.
  */
 const IDENTITY_PROVIDER = 'identity';
+
+/**
+ * The prefix a HARDCODED storage path uses, and the boundary AAP §0.10.2 names.
+ *
+ * The live prefix is a per-run UUID followed by this word, so the bare word on its
+ * own is the mistake: it addresses a key that does not exist, the raw read returns
+ * zero entries, and the cardinality assertion then fails for entirely the wrong
+ * reason. It is named here so the shape row can call that case out explicitly.
+ */
+const HARDCODED_STORAGE_PREFIX = 'registry';
 
 /**
  * The stored-entry count that proves the raw read addressed the right object:
@@ -196,10 +216,13 @@ const FORBIDDEN_KMS_V2_KEY = 'cachesize';
  * manifest's configuration boundaries; the last is context rather than a check.
  */
 type EvidenceCheckId =
+  | 'stored-entry-count'
   | 'ciphertext-prefix'
   | 'plaintext-canary'
-  | 'stored-entry-count'
+  | 'canary-literal'
   | 'plaintext-round-trip'
+  | 'storage-prefix-live'
+  | 'storage-prefix-shape'
   | 'provider-order'
   | 'kms-timeout'
   | 'cachesize-absent'
@@ -243,10 +266,13 @@ interface EvidenceRow {
  * of being dropped — see {@link buildEvidenceRows}.
  */
 export const ENCRYPTION_EVIDENCE_LABELS = {
-  'ciphertext-prefix': 'Stored value prefix',
-  'plaintext-canary': 'Plaintext canary',
   'stored-entry-count': 'Stored etcd entries',
+  'ciphertext-prefix': 'Stored value prefix',
+  'plaintext-canary': 'Plaintext canary in the raw blob',
+  'canary-literal': 'Canary searched for',
   'plaintext-round-trip': 'Plaintext round trip',
+  'storage-prefix-live': 'Storage prefix source',
+  'storage-prefix-shape': 'Storage prefix shape',
   'provider-order': 'Provider order',
   'kms-timeout': 'KMS timeout',
   'cachesize-absent': 'cachesize key',
@@ -255,182 +281,136 @@ export const ENCRYPTION_EVIDENCE_LABELS = {
 } as const satisfies Record<EvidenceCheckId, string>;
 
 /**
- * Keyword table used to route a reported observation to an evidence row.
+ * The STABLE IDENTITY of the observation each row is measured from.
  *
- * WHY KEYWORDS AND NOT EXACT LABELS ONLY — `ControlObservation.label` is
- * documented as human-readable prose ("what was measured"), so an exact-match
- * table alone would silently render "not reported" for a payload that plainly
- * did report the measurement. Matching on a keyword recovers that data, and
- * every canonical label in {@link ENCRYPTION_EVIDENCE_LABELS} is itself matched
- * by the entry below it, so an aligned caller and an unaligned one land on the
- * same row.
+ * THIS TABLE REPLACES A KEYWORD MATCHER, and the replacement is the substance of
+ * the V3 contract fix. The previous version routed an observation to a row by
+ * testing whether its normalised label CONTAINED one of a list of keywords, first
+ * keyword and first observation winning. The recorded passing payload carries two
+ * canary-related measurements — the canary STRING that was searched for, and the
+ * BOOLEAN answer to whether it was present in the raw blob — and both contain the
+ * word "canary". The string arrived first, claimed the row, and was read as a
+ * present canary because a non-empty string containing the canary is exactly what
+ * "the canary is present" looks like. The explicit `false` that followed was then
+ * DISCARDED, because the row was already taken. A recorded PASS rendered as
+ * "Plaintext detected", inverting the most serious of the eight controls.
  *
- * ORDER IS SIGNIFICANT and the sequence is deliberate: the first entry whose
- * keyword appears in the normalised label wins.
- *   * `round trip` precedes the canary entry because a round-trip label
- *     legitimately contains the word "plaintext";
- *   * the canary entry precedes the prefix entry for the same reason, since a
- *     stored-value label may mention plaintext too;
- *   * the cardinality entry precedes the prefix entry because the oracle's own
- *     phrasing for that assertion is "the raw PREFIX SCAN returns exactly one
- *     key/value pair". Measured, not assumed: with the two the other way round,
- *     a label worded like the oracle's routes the COUNT to the prefix row and
- *     leaves both rows wrong. `entr` is a stem so it matches "entry" and
- *     "entries" alike.
- * Each observation is routed to at most ONE row, and the first observation to
- * claim a row keeps it — mirroring `selectControlStatus`, where a duplicated
- * entry lets the first occurrence win rather than silently overwriting.
+ * Identities come from `../domain/observationIds`, so the string a payload writes
+ * and the string this panel looks for are the same one by construction; the two
+ * canary measurements now have two identities and two rows, and no observation can
+ * claim a row it does not name.
  */
-const EVIDENCE_KEYWORDS: readonly {
-  readonly id: EvidenceCheckId;
-  readonly keywords: readonly string[];
-}[] = [
-  { id: 'plaintext-round-trip', keywords: ['round trip', 'roundtrip', 'read back', 'readback'] },
-  { id: 'plaintext-canary', keywords: ['canary'] },
-  { id: 'stored-entry-count', keywords: ['entr', 'key value pair', 'cardinality', 'count', 'kvs'] },
-  {
-    id: 'ciphertext-prefix',
-    keywords: ['prefix', 'ciphertext', 'aesgcm', 'stored value', 'stored blob', 'raw value'],
-  },
-  { id: 'provider-order', keywords: ['provider', 'identity'] },
-  { id: 'kms-timeout', keywords: ['timeout'] },
-  { id: 'cachesize-absent', keywords: ['cachesize', 'cache size'] },
-  { id: 'encrypted-resources', keywords: ['resource'] },
-  { id: 'kms-endpoint', keywords: ['endpoint', 'socket'] },
+const CHECK_IDENTITY: Record<EvidenceCheckId, string> = {
+  'stored-entry-count': V3_OBSERVATIONS.etcdEntryCount,
+  'ciphertext-prefix': V3_OBSERVATIONS.rawValuePrefix,
+  'plaintext-canary': V3_OBSERVATIONS.canaryPresentInRawBlob,
+  'canary-literal': V3_OBSERVATIONS.canaryLiteral,
+  'plaintext-round-trip': V3_OBSERVATIONS.plaintextRoundTrip,
+  'storage-prefix-live': V3_OBSERVATIONS.storagePrefixFromLiveConfig,
+  'storage-prefix-shape': V3_OBSERVATIONS.storagePrefixShape,
+  'provider-order': V3_OBSERVATIONS.providerOrder,
+  'kms-timeout': V3_OBSERVATIONS.kmsTimeout,
+  'cachesize-absent': V3_OBSERVATIONS.cachesizeKey,
+  'encrypted-resources': V3_OBSERVATIONS.encryptedResources,
+  'kms-endpoint': V3_OBSERVATIONS.kmsEndpoint,
+};
+
+/** Every identity this panel recognises, for separating out the unrecognised. */
+const RECOGNISED_IDENTITIES: readonly string[] = Object.values(CHECK_IDENTITY);
+
+/**
+ * The four rows a PASS must rest on — the four assertions of
+ * `TestSecretsAreEncryptedAtRest`, and nothing less.
+ *
+ * The previous version required only the prefix and the canary, so a payload that
+ * reported neither a stored-entry count nor a round-trip could still render a
+ * clean pass. All four are load-bearing and each fails differently: the count
+ * proves the raw read addressed the right object, the prefix proves the value was
+ * written by the declared transformer, the canary proves the BODY was encrypted
+ * rather than merely prefixed, and the round trip proves the encryption is
+ * transparent to clients.
+ *
+ * The manifest rows below them are NOT required for a pass: they are a
+ * configuration audit rather than a measurement of the stored Secret, and a
+ * payload that omits them has not failed to prove encryption. A CONTRADICTED
+ * manifest row still fails the control, which is the asymmetry that matters.
+ */
+const REQUIRED_CHECKS: readonly EvidenceCheckId[] = [
+  'stored-entry-count',
+  'ciphertext-prefix',
+  'plaintext-canary',
+  'plaintext-round-trip',
 ];
 
 /**
- * Values that read as "yes, the thing this label names holds".
+ * The provider kinds that ENCRYPT, verbatim from the API type that defines them —
+ * `staging/src/k8s.io/apiserver/pkg/apis/apiserver/v1/types_encryption.go` L89-101,
+ * whose `ProviderConfiguration` declares exactly five JSON keys: `aesgcm`,
+ * `aescbc`, `secretbox`, `identity` and `kms`.
  *
- * A CLOSED vocabulary, matched against the WHOLE normalised value and never as
- * a substring, so a raw stored blob can never be mistaken for a token. Note
- * that `plaintext` and `unencrypted` are denials rather than affirmations: in
- * this panel's vocabulary they name the failure, not the subject.
+ * `identity` is the one that does not encrypt, so it is excluded here and named
+ * separately. This closed set is what makes "the first provider is strong" a
+ * decidable statement: previously ANY list without `identity` was accepted, so a
+ * list naming a single unrecognised provider — a typo, a removed provider, or a
+ * plaintext-equivalent one — passed the ordering check outright.
  */
-const AFFIRMATIVE_VALUES: readonly string[] = [
-  'true',
-  'yes',
-  'present',
-  'found',
-  'match',
-  'matched',
-  'matches',
-  'ok',
-  'pass',
-  'passed',
-  'satisfied',
-  'ciphertext',
-  'encrypted',
-  'enabled',
-];
+const ENCRYPTING_PROVIDER_KINDS: readonly string[] = ['aesgcm', 'aescbc', 'secretbox', 'kms'];
 
-/** Values that read as "no, it does not hold". Same closed-vocabulary rules. */
-const NEGATIVE_VALUES: readonly string[] = [
-  'false',
-  'no',
-  'absent',
-  'missing',
-  'none',
-  'not present',
-  'not found',
-  'mismatch',
-  'mismatched',
-  'fail',
-  'failed',
-  'violated',
-  'plaintext',
-  'unencrypted',
-  'disabled',
-];
+/** Longest list a provider or resource observation may carry before it is unreadable. */
+const MAX_LIST_MEMBERS = 16;
 
-/** What a reported value claims about the measurement its label names. */
-type ValueClaim = 'affirmed' | 'denied';
+/** Longest a single list member may be: the DNS label limit, which every kind respects. */
+const MAX_LIST_MEMBER_LENGTH = 63;
+
 
 /**
- * Lower-cases a label or value and collapses every run of non-alphanumeric
- * characters to a single space.
+ * Describes a measured value by its TYPE and PRESENCE, never by its content.
  *
- * Used for BOTH label routing and value tokens so the two agree on what
- * "the same string" means. Nothing else about the value is altered, and the
- * normalised form is never rendered — every value shown to the reader is the
- * verbatim one or an explicit derived sentence.
- */
-function normalise(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-}
-
-/**
- * Reads a value as a yes/no claim, or `undefined` when it is neither.
+ * THE WHOLE POINT: a string measured by this control may be a raw stored blob,
+ * and a blob produced by a BROKEN configuration contains plaintext Secret data.
+ * The previous version rendered every unrecognised string verbatim unless it
+ * happened to contain the one known canary — so any OTHER Secret data in the
+ * blob went straight to the DOM, and from there into every screenshot and DOM
+ * snapshot taken of it. Withholding only the known marker protected the test
+ * fixture rather than the data.
  *
- * A boolean is the claim directly. A string is a claim only when it matches the
- * closed vocabularies above exactly; anything else — a duration, a count, a
- * provider list, a raw blob — returns `undefined` so the caller can apply its
- * own, stricter reading. Numbers and `null` are never claims.
+ * A boolean, a number and `null` are rendered as themselves: none of them can
+ * carry a Secret's bytes, and hiding them would lose real information. `null` is
+ * reported as `null` because the hook documents it as a REPRESENTABLE measurement
+ * rather than a missing one. The words `undefined` and `NaN` can never appear —
+ * the observation type admits neither.
  */
-function readValueClaim(value: ControlObservation['value']): ValueClaim | undefined {
-  if (typeof value === 'boolean') {
-    return value ? 'affirmed' : 'denied';
-  }
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-  const token = normalise(value);
-  if (AFFIRMATIVE_VALUES.includes(token)) {
-    return 'affirmed';
-  }
-  return NEGATIVE_VALUES.includes(token) ? 'denied' : undefined;
-}
-
-/**
- * `true` when the label phrases the measurement as an ABSENCE, e.g. "plaintext
- * canary absent" or "no cachesize key".
- *
- * This is what makes a boolean readable: `true` against "canary absent" is the
- * passing state, while `true` against "canary present" is the failing one.
- * Applied ONLY by the two rows whose passing state is an absence — the canary
- * and the `cachesize` key — so a stray "not" elsewhere cannot invert an
- * unrelated reading.
- */
-function labelAssertsAbsence(label: string): boolean {
-  return /\b(absent|absence|missing|removed|omitted|not|no|none|free)\b/.test(normalise(label));
-}
-
-/**
- * Reads a whole, non-negative count.
- *
- * A number must be an integer to be a count; a string must be digits only. A
- * number-shaped string is the one coercion allowed anywhere in this file, and
- * only here, because a cardinality is unambiguous — there is no unit to lose
- * and no precision to round away. Everything else returns `undefined` and is
- * reported as indeterminate rather than guessed at.
- */
-function readCount(value: ControlObservation['value']): number | undefined {
-  if (typeof value === 'number') {
-    return Number.isInteger(value) ? value : undefined;
-  }
-  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
-    return Number.parseInt(value.trim(), 10);
-  }
-  return undefined;
-}
-
-/**
- * Renders a measured value as text that is safe to display.
- *
- * `null` is reported as such because the hook documents it as a REPRESENTABLE
- * measurement rather than a missing one, and an empty string is called out
- * instead of rendering as nothing at all. The literal words `undefined` and
- * `NaN` can never appear: the observation type admits neither.
- */
-function describeValue(value: ControlObservation['value']): string {
+function describeShape(value: ControlObservation['value']): string {
   if (value === null) {
     return 'reported as null';
   }
-  if (typeof value === 'string') {
-    return value.trim() === '' ? 'reported as an empty value' : value;
+  if (typeof value === 'boolean' || typeof value === 'number') {
+    return `reported as the ${describeType(value)} ${String(value)}`;
   }
-  return String(value);
+  if (value.length === 0) {
+    return 'reported as an empty string';
+  }
+  return `reported as a string of ${String(value.length)} characters (value withheld)`;
 }
+
+/**
+ * Renders a string verbatim ONLY when its whole shape is bounded and safe.
+ *
+ * The two rows that legitimately echo a reported string — the KMS timeout and the
+ * KMS endpoint — do so through this gate, so a payload cannot use either row as a
+ * channel for arbitrary bytes. A value that does not match its row's bounded
+ * pattern is described by {@link describeShape} instead, which still tells the
+ * reader that a value arrived and what shape it had.
+ */
+function echoIfBounded(value: string, allowed: RegExp): string | undefined {
+  return allowed.test(value) ? value : undefined;
+}
+
+/** A Go duration as the manifest writes it: digits plus one unit, nothing else. */
+const DURATION_SHAPE = /^\d{1,6}(?:ns|us|ms|s|m|h)$/;
+
+/** A unix socket path, the only endpoint form the manifest uses. */
+const UNIX_SOCKET_SHAPE = /^unix:\/\/\/[A-Za-z0-9._/-]{1,120}$/;
 
 /**
  * Splits a reported list — providers, resources — into its members.
@@ -447,12 +427,19 @@ function describeValue(value: ControlObservation['value']): string {
  * a provider named `-`. Measured, not assumed: without the strip, that value
  * parses to three members and renders as `kms, -, identity`.
  */
-function splitList(value: string): readonly string[] {
-  return value
+function splitList(value: string): readonly string[] | undefined {
+  const members = value
     .toLowerCase()
     .split(/[^a-z0-9-]+/)
     .map((member) => member.replace(/^-+|-+$/g, ''))
     .filter((member) => member !== '');
+  if (members.length === 0 || members.length > MAX_LIST_MEMBERS) {
+    return undefined;
+  }
+  // A member longer than a DNS label is not a provider or resource name, so the
+  // value is not a list at all — it is something else, possibly a blob, and it is
+  // reported by shape rather than parsed into plausible-looking members.
+  return members.some((member) => member.length > MAX_LIST_MEMBER_LENGTH) ? undefined : members;
 }
 
 /** A reading of one observation: its outcome plus the text to render for it. */
@@ -461,9 +448,71 @@ interface EvidenceReading {
   readonly observed: string;
 }
 
-/** The reading used when the payload reported nothing for a row. */
-const NOT_REPORTED: EvidenceReading = { outcome: 'indeterminate', observed: 'not reported' };
+/**
+ * Explains why a typed read produced nothing, WITHOUT disclosing a string value.
+ *
+ * Three reasons and three different sentences, because they mean different
+ * things: the payload did not measure it, the payload measured it twice and the
+ * two cannot be reconciled, or it measured it at a type this row cannot use.
+ */
+function describeMissing(
+  observations: readonly ControlObservation[] | undefined,
+  identity: string,
+  state: EvidenceAbsenceReason,
+): string {
+  if (state === 'unreported') {
+    return 'not reported';
+  }
+  if (state === 'conflict') {
+    return 'reported more than once, so which value applies cannot be determined';
+  }
+  const raw = readNullable(observations, identity);
+  return raw.state === 'reported' ? describeShape(raw.value) : 'not reported';
+}
 
+/** Builds the indeterminate reading for a failed typed read. */
+function unreadable(
+  observations: readonly ControlObservation[] | undefined,
+  identity: string,
+  state: EvidenceAbsenceReason,
+): EvidenceReading {
+  return { outcome: 'indeterminate', observed: describeMissing(observations, identity, state) };
+}
+
+/**
+ * Reads the stored-entry-count row (F-003-RQ-002, `encryption_test.go` L131).
+ *
+ * EXACTLY ONE entry is the passing state, and a real NUMBER is required: a
+ * numeric string is a different claim about the server that produced it, and this
+ * row is the gate every later row depends on, so it is the last place to start
+ * coercing.
+ *
+ * A count other than one is INDETERMINATE rather than violated. The oracle aborts
+ * here (`t.Fatalf`) precisely because every later assertion would be reading an
+ * object that was never found — the classic cause being a storage prefix
+ * hardcoded to `registry` instead of read from the live per-run configuration.
+ * That is a broken measurement, not evidence of plaintext, and reporting it as an
+ * encryption failure would blame the control for the harness's mistake.
+ */
+function readStoredEntryCount(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['stored-entry-count'];
+  const found = readNumber(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
+  }
+  if (found.value === EXPECTED_STORED_ENTRY_COUNT) {
+    return { outcome: 'satisfied', observed: `${String(found.value)} stored entry` };
+  }
+  return {
+    outcome: 'indeterminate',
+    observed:
+      `${String(found.value)} stored entries (expected exactly ` +
+      `${String(EXPECTED_STORED_ENTRY_COUNT)}); the raw read did not address the Secret's key, ` +
+      'so nothing downstream can be evaluated',
+  };
+}
 
 /**
  * Reads the ciphertext-prefix row (F-003-RQ-002, `encryption_test.go` L136).
@@ -480,25 +529,31 @@ const NOT_REPORTED: EvidenceReading = { outcome: 'indeterminate', observed: 'not
  * the reader rather than buried in this comment.
  *
  * The measured blob is never echoed back: a blob from a broken configuration
- * carries plaintext Secret data.
+ * carries plaintext Secret data, so every branch below renders a DERIVED sentence
+ * about the value rather than the value itself.
  */
-function readCiphertextPrefix(observation: ControlObservation | undefined): EvidenceReading {
-  if (observation === undefined) {
-    return NOT_REPORTED;
+function readCiphertextPrefix(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['ciphertext-prefix'];
+  const found = readNullable(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
   }
-  const claim = readValueClaim(observation.value);
-  if (claim !== undefined) {
-    return claim === 'affirmed'
-      ? { outcome: 'satisfied', observed: `reported as beginning with ${AESGCM_PREFIX}` }
-      : { outcome: 'violated', observed: `reported as NOT beginning with ${AESGCM_PREFIX}` };
+  const { value } = found;
+  if (value === null) {
+    return {
+      outcome: 'violated',
+      observed: 'reported as null: the stored value carries no transformer prefix',
+    };
   }
-  if (typeof observation.value !== 'string') {
-    return { outcome: 'indeterminate', observed: describeValue(observation.value) };
+  if (typeof value !== 'string') {
+    return { outcome: 'indeterminate', observed: describeShape(value) };
   }
-  if (observation.value.startsWith(AESGCM_PREFIX)) {
+  if (value.startsWith(AESGCM_PREFIX)) {
     return { outcome: 'satisfied', observed: `stored value begins with ${AESGCM_PREFIX}` };
   }
-  if (observation.value.includes(AESGCM_PREFIX)) {
+  if (value.includes(AESGCM_PREFIX)) {
     return {
       outcome: 'violated',
       observed: `stored value contains ${AESGCM_PREFIX} but does not begin with it`,
@@ -508,102 +563,152 @@ function readCiphertextPrefix(observation: ControlObservation | undefined): Evid
 }
 
 /**
- * Reads the plaintext-canary row (F-003-RQ-002, `encryption_test.go` L141).
+ * Reads the canary-presence row (F-003-RQ-002, `encryption_test.go` L141).
+ *
+ * ONE IDENTITY, ONE ANSWER, AND IT IS A BOOLEAN. This row reads
+ * {@link V3_OBSERVATIONS.canaryPresentInRawBlob}, whose name states its polarity:
+ * `true` means the plaintext marker was found in the raw blob, which is the
+ * failure. There is no label-phrasing heuristic any more, and there is no reading
+ * of the canary STRING as an answer — that string is a separate identity with a
+ * separate row, which is what the previous keyword matcher conflated.
  *
  * ABSENCE is the passing state, and this is the negative half of a pair: without
  * it a passing prefix check proves only that a prefix was WRITTEN, not that the
- * body was encrypted. Because the passing state is an absence, the label's
- * phrasing decides how a boolean reads — see {@link labelAssertsAbsence}.
- *
- * When a raw value is supplied it is searched for the canary with `includes`,
- * which is the correct semantic here and the mirror image of the prefix row: the
- * canary must not appear ANYWHERE in the blob, at any offset.
+ * body was encrypted.
  */
-function readPlaintextCanary(observation: ControlObservation | undefined): EvidenceReading {
-  if (observation === undefined) {
-    return NOT_REPORTED;
+function readPlaintextCanary(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['plaintext-canary'];
+  const found = readBoolean(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
   }
-  const claim = readValueClaim(observation.value);
-  if (claim !== undefined) {
-    const canaryPresent = labelAssertsAbsence(observation.label)
-      ? claim === 'denied'
-      : claim === 'affirmed';
-    return canaryPresent
-      ? { outcome: 'violated', observed: `${PLAINTEXT_CANARY} reported present in the stored value` }
-      : { outcome: 'satisfied', observed: `${PLAINTEXT_CANARY} reported absent from the stored value` };
-  }
-  if (typeof observation.value !== 'string') {
-    return { outcome: 'indeterminate', observed: describeValue(observation.value) };
-  }
-  return observation.value.includes(PLAINTEXT_CANARY)
-    ? { outcome: 'violated', observed: `${PLAINTEXT_CANARY} found in the stored value` }
-    : { outcome: 'satisfied', observed: `${PLAINTEXT_CANARY} absent from the stored value` };
+  return found.value
+    ? { outcome: 'violated', observed: `${PLAINTEXT_CANARY} reported present in the raw blob` }
+    : { outcome: 'satisfied', observed: `${PLAINTEXT_CANARY} reported absent from the raw blob` };
 }
 
 /**
- * Reads the stored-entry-count row (F-003-RQ-002, `encryption_test.go` L131).
+ * Reads which marker was searched for (context for the row above).
  *
- * EXACTLY ONE entry is the passing state. Any other count means the etcd key was
- * derived wrongly — the classic cause being a hardcoded `registry` prefix
- * instead of the live per-run one — so the reader is told the expected count
- * alongside the observed one. The oracle aborts on this assertion rather than
- * accumulating, because every later check would otherwise be reading the wrong
- * object.
+ * INFORMATIONAL, but not inert: when the reported marker is NOT the recorded
+ * canary, the absence proved above is an absence of something else, so
+ * {@link digestObservations} withholds the canary row rather than accepting a
+ * proof about the wrong string. The reported marker is only echoed when it equals
+ * the recorded constant — a value this file already names — and is otherwise
+ * described by shape.
  */
-function readStoredEntryCount(observation: ControlObservation | undefined): EvidenceReading {
-  if (observation === undefined) {
-    return NOT_REPORTED;
+function readCanaryLiteral(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['canary-literal'];
+  const found = readNullable(observations, identity);
+  if (found.state !== 'reported') {
+    return {
+      outcome: 'informational',
+      observed: describeMissing(observations, identity, found.state),
+    };
   }
-  const count = readCount(observation.value);
-  if (count !== undefined) {
-    return count === EXPECTED_STORED_ENTRY_COUNT
-      ? { outcome: 'satisfied', observed: `${String(count)} stored entry` }
-      : {
-          outcome: 'violated',
-          observed: `${String(count)} stored entries (expected exactly ${String(
-            EXPECTED_STORED_ENTRY_COUNT,
-          )})`,
-        };
+  if (found.value === PLAINTEXT_CANARY) {
+    return { outcome: 'informational', observed: `${PLAINTEXT_CANARY} - the recorded marker` };
   }
-  const claim = readValueClaim(observation.value);
-  if (claim !== undefined) {
-    return claim === 'affirmed'
-      ? {
-          outcome: 'satisfied',
-          observed: `reported as exactly ${String(EXPECTED_STORED_ENTRY_COUNT)} stored entry`,
-        }
-      : {
-          outcome: 'violated',
-          observed: `reported as NOT exactly ${String(EXPECTED_STORED_ENTRY_COUNT)} stored entry`,
-        };
-  }
-  return { outcome: 'indeterminate', observed: describeValue(observation.value) };
+  return {
+    outcome: 'informational',
+    observed: `a marker other than ${PLAINTEXT_CANARY} was searched for (${describeShape(
+      found.value,
+    )})`,
+  };
 }
 
 /**
  * Reads the plaintext round-trip row (F-003-RQ-002, `encryption_test.go` L150).
  *
- * THE SAME CONSTANT, THE OPPOSITE MEANING. The canary must be ABSENT from the
- * raw etcd blob and PRESENT when the Secret is read back through the API server;
- * together the two prove that encryption at rest is transparent to clients and
- * that the published contract is unchanged. So a reported value carrying the
- * canary satisfies THIS row while violating the canary row — which is why the
- * two are read by separate functions rather than by one shared predicate.
+ * A BOOLEAN, from its own identity. The oracle compares the value read back
+ * through the API server against the original plaintext, so the payload reports
+ * the ANSWER — and a payload that echoed the round-tripped Secret value instead
+ * would be publishing the plaintext it is meant to be proving is protected. The
+ * previous version accepted such a value as proof when it happened to contain the
+ * canary; it no longer does, and a string here is reported by shape.
  */
-function readPlaintextRoundTrip(observation: ControlObservation | undefined): EvidenceReading {
-  if (observation === undefined) {
-    return NOT_REPORTED;
+function readPlaintextRoundTrip(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['plaintext-round-trip'];
+  const found = readBoolean(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
   }
-  const claim = readValueClaim(observation.value);
-  if (claim !== undefined) {
-    return claim === 'affirmed'
-      ? { outcome: 'satisfied', observed: 'the API server returned the original plaintext' }
-      : { outcome: 'violated', observed: 'the API server did NOT return the original plaintext' };
+  return found.value
+    ? { outcome: 'satisfied', observed: 'the API server returned the original plaintext' }
+    : { outcome: 'violated', observed: 'the API server did NOT return the original plaintext' };
+}
+
+/**
+ * Reads whether the etcd key was derived from the LIVE storage prefix.
+ *
+ * AAP §0.10.2 boundary: the prefix embeds a per-run UUID, so hardcoding
+ * `registry` addresses a key that does not exist. Reported `false` is therefore
+ * INDETERMINATE and not a violation — it says the measurement is untrustworthy,
+ * not that Secrets are in plaintext — and {@link digestObservations} uses it to
+ * withhold the three rows that depend on having read the right object. That
+ * distinction is the whole reason the recorded indeterminate payload carries this
+ * observation.
+ */
+function readStoragePrefixLive(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['storage-prefix-live'];
+  const found = readBoolean(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
   }
-  if (typeof observation.value === 'string' && observation.value.includes(PLAINTEXT_CANARY)) {
-    return { outcome: 'satisfied', observed: `the API server returned ${PLAINTEXT_CANARY}` };
+  return found.value
+    ? { outcome: 'satisfied', observed: 'read from the live configuration' }
+    : {
+        outcome: 'indeterminate',
+        observed:
+          'reported as NOT read from the live configuration, so the raw read may have addressed ' +
+          'a key that does not exist',
+      };
+}
+
+/**
+ * Reads the shape of the storage prefix (context only).
+ *
+ * The value is never parsed into a prefix to compare against — it embeds a
+ * per-run UUID and changes every run, which is precisely why it must be read from
+ * the live configuration. Only its SHAPE is reported, and the bare `registry`
+ * case is called out by name because that is the hardcoded form the boundary
+ * exists to catch.
+ */
+function readStoragePrefixShape(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['storage-prefix-shape'];
+  const found = readNullable(observations, identity);
+  if (found.state !== 'reported') {
+    return {
+      outcome: 'informational',
+      observed: describeMissing(observations, identity, found.state),
+    };
   }
-  return { outcome: 'indeterminate', observed: describeValue(observation.value) };
+  const { value } = found;
+  if (typeof value !== 'string') {
+    return { outcome: 'informational', observed: describeShape(value) };
+  }
+  if (value === HARDCODED_STORAGE_PREFIX) {
+    return {
+      outcome: 'informational',
+      observed: `the bare ${HARDCODED_STORAGE_PREFIX} prefix, which is the hardcoded form`,
+    };
+  }
+  return {
+    outcome: 'informational',
+    observed: value.endsWith(`/${HARDCODED_STORAGE_PREFIX}`)
+      ? `a per-run prefix ending in /${HARDCODED_STORAGE_PREFIX}`
+      : describeShape(value),
+  };
 }
 
 /**
@@ -611,40 +716,35 @@ function readPlaintextRoundTrip(observation: ControlObservation | undefined): Ev
  *
  * The strong provider MUST be first and `identity` MUST be last, because the
  * first provider encrypts every new write while all of them are tried in order
- * when decrypting. Three readings follow from that, and each is reported with
- * the reason attached:
- *   * `identity` first — VIOLATION, and the severe one: every new write would be
- *     stored in plaintext while the document still parses and the API server
- *     still boots, leaving the control silently dead;
- *   * `identity` present but not last — VIOLATION, since a provider after the
- *     plaintext fallback can never be reached for a new write;
- *   * `identity` absent entirely — SATISFIED, and stronger than the recorded
- *     document: the manifest records at L60-63 that the fallback is removed once
- *     the storage migration completes, after which plaintext is no longer
- *     accepted at all.
+ * when decrypting.
+ *
+ * WHAT CHANGED, AND WHY IT MATTERED. The previous version treated the ABSENCE of
+ * `identity` as satisfied on its own, so ANY list without it passed — including a
+ * single unrecognised provider. "No plaintext fallback" is only stronger than the
+ * recorded document when something in the list actually encrypts, so the first
+ * member is now checked against {@link ENCRYPTING_PROVIDER_KINDS}, the closed set
+ * the API type itself declares.
+ *
+ * An unrecognised first member is INDETERMINATE rather than violated: the payload
+ * may legitimately be reporting provider NAMES (the manifest's KMS provider is
+ * named `k8s-kms`) rather than kinds, and this row must not assert a defect it
+ * cannot demonstrate. It does not pass, which is the requirement.
  */
-function readProviderOrder(observation: ControlObservation | undefined): EvidenceReading {
-  if (observation === undefined) {
-    return NOT_REPORTED;
+function readProviderOrder(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['provider-order'];
+  const found = readNullable(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
   }
-  const claim = readValueClaim(observation.value);
-  if (claim !== undefined) {
-    return claim === 'affirmed'
-      ? {
-          outcome: 'satisfied',
-          observed: `reported as strong provider first, ${IDENTITY_PROVIDER} last`,
-        }
-      : {
-          outcome: 'violated',
-          observed: `reported as NOT strong provider first, ${IDENTITY_PROVIDER} last`,
-        };
+  const { value } = found;
+  if (typeof value !== 'string') {
+    return { outcome: 'indeterminate', observed: describeShape(value) };
   }
-  if (typeof observation.value !== 'string') {
-    return { outcome: 'indeterminate', observed: describeValue(observation.value) };
-  }
-  const providers = splitList(observation.value);
-  if (providers.length === 0) {
-    return { outcome: 'indeterminate', observed: describeValue(observation.value) };
+  const providers = splitList(value);
+  if (providers === undefined) {
+    return { outcome: 'indeterminate', observed: describeShape(value) };
   }
   const rendered = providers.join(', ');
   const identityAt = providers.indexOf(IDENTITY_PROVIDER);
@@ -655,17 +755,23 @@ function readProviderOrder(observation: ControlObservation | undefined): Evidenc
     };
   }
   if (identityAt > 0 && identityAt !== providers.length - 1) {
+    return { outcome: 'violated', observed: `${rendered} - ${IDENTITY_PROVIDER} is not last` };
+  }
+  const [first] = providers;
+  if (first === undefined || !ENCRYPTING_PROVIDER_KINDS.includes(first)) {
     return {
-      outcome: 'violated',
-      observed: `${rendered} - ${IDENTITY_PROVIDER} is not last`,
+      outcome: 'indeterminate',
+      observed:
+        `${rendered} - the first provider is not one of the encrypting kinds ` +
+        `(${ENCRYPTING_PROVIDER_KINDS.join(', ')}), so it cannot be confirmed to encrypt`,
     };
   }
   return {
     outcome: 'satisfied',
     observed:
       identityAt === -1
-        ? `${rendered} - no plaintext fallback present`
-        : `${rendered} - strong provider first, ${IDENTITY_PROVIDER} last`,
+        ? `${rendered} - encrypting provider first, no plaintext fallback present`
+        : `${rendered} - encrypting provider first, ${IDENTITY_PROVIDER} last`,
   };
 }
 
@@ -676,24 +782,34 @@ function readProviderOrder(observation: ControlObservation | undefined): Evidenc
  * A bare number is not the recorded value and is reported as a violation rather
  * than helpfully assumed to mean seconds: guessing a unit is exactly the kind of
  * normalisation that would let a real drift render as a pass.
+ *
+ * A mismatching value is echoed only when its whole shape is a bounded duration,
+ * so this row cannot be used as a channel for arbitrary bytes.
  */
-function readKmsTimeout(observation: ControlObservation | undefined): EvidenceReading {
-  if (observation === undefined) {
-    return NOT_REPORTED;
+function readKmsTimeout(observations: readonly ControlObservation[] | undefined): EvidenceReading {
+  const identity = CHECK_IDENTITY['kms-timeout'];
+  const found = readNullable(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
   }
-  const claim = readValueClaim(observation.value);
-  if (claim !== undefined) {
-    return claim === 'affirmed'
-      ? { outcome: 'satisfied', observed: `reported as ${EXPECTED_KMS_TIMEOUT}` }
-      : { outcome: 'violated', observed: `reported as NOT ${EXPECTED_KMS_TIMEOUT}` };
+  const { value } = found;
+  if (value === EXPECTED_KMS_TIMEOUT) {
+    return { outcome: 'satisfied', observed: EXPECTED_KMS_TIMEOUT };
   }
-  if (observation.value === null) {
-    return { outcome: 'indeterminate', observed: describeValue(observation.value) };
+  if (typeof value === 'number') {
+    return {
+      outcome: 'violated',
+      observed: `${String(value)} names no unit (expected ${EXPECTED_KMS_TIMEOUT})`,
+    };
   }
-  const observed = String(observation.value).trim();
-  return observed === EXPECTED_KMS_TIMEOUT
-    ? { outcome: 'satisfied', observed }
-    : { outcome: 'violated', observed: `${observed} (expected ${EXPECTED_KMS_TIMEOUT})` };
+  if (typeof value !== 'string') {
+    return { outcome: 'indeterminate', observed: describeShape(value) };
+  }
+  const echoed = echoIfBounded(value, DURATION_SHAPE);
+  return {
+    outcome: 'violated',
+    observed: `${echoed ?? describeShape(value)} (expected ${EXPECTED_KMS_TIMEOUT})`,
+  };
 }
 
 /**
@@ -701,38 +817,37 @@ function readKmsTimeout(observation: ControlObservation | undefined): EvidenceRe
  *
  * ABSENCE is the passing state: `cachesize` is a KMS v1-only tunable and the API
  * server rejects it for v2, so a configuration carrying it does not boot. A
- * concrete reported value therefore means the key is SET and is a violation,
- * while the label phrasing decides how a boolean reads.
+ * reported `null` or `false` therefore satisfies the row, and any concrete value
+ * violates it.
  *
  * Note what an absent OBSERVATION means here, and what it does not: it means the
  * key was not reported on, not that it is known to be absent. That is
  * indeterminate, and treating it as satisfied would be the quiet false pass this
  * panel exists to prevent.
  */
-function readCachesizeAbsent(observation: ControlObservation | undefined): EvidenceReading {
-  if (observation === undefined) {
-    return NOT_REPORTED;
+function readCachesizeAbsent(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['cachesize-absent'];
+  const found = readNullable(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
   }
-  const claim = readValueClaim(observation.value);
-  if (claim !== undefined) {
-    const keyPresent = labelAssertsAbsence(observation.label)
-      ? claim === 'denied'
-      : claim === 'affirmed';
-    return keyPresent
-      ? {
-          outcome: 'violated',
-          observed: `${FORBIDDEN_KMS_V2_KEY} reported present; it is rejected for KMS v2`,
-        }
-      : { outcome: 'satisfied', observed: `no ${FORBIDDEN_KMS_V2_KEY} key reported` };
+  const { value } = found;
+  if (value === null || value === false) {
+    return { outcome: 'satisfied', observed: `no ${FORBIDDEN_KMS_V2_KEY} key is set` };
   }
-  if (observation.value === null) {
-    return { outcome: 'indeterminate', observed: describeValue(observation.value) };
+  if (value === true) {
+    return {
+      outcome: 'violated',
+      observed: `${FORBIDDEN_KMS_V2_KEY} reported present; it is rejected for KMS v2`,
+    };
   }
   return {
     outcome: 'violated',
-    observed: `${FORBIDDEN_KMS_V2_KEY}=${describeValue(
-      observation.value,
-    )}; it is rejected for KMS v2`,
+    observed: `${FORBIDDEN_KMS_V2_KEY} is set (${describeShape(
+      value,
+    )}); it is rejected for KMS v2`,
   };
 }
 
@@ -741,29 +856,28 @@ function readCachesizeAbsent(observation: ControlObservation | undefined): Evide
  *
  * The recorded list is `secrets` then `configmaps`, and it is compared
  * POSITIONALLY: order is part of the recording, `secrets` leads because it also
- * covers legacy ServiceAccount-token Secrets, and the fixture's tuple type
- * exists so the compiler enforces the same thing on the recorded side. A shorter
- * list is a violation rather than a partial pass — an unencrypted resource is
- * not a rounding error.
+ * covers legacy ServiceAccount-token Secrets, and the domain's tuple exists so the
+ * compiler enforces the same thing on the recorded side. A shorter list is a
+ * violation rather than a partial pass — an unencrypted resource is not a rounding
+ * error.
  */
-function readEncryptedResources(observation: ControlObservation | undefined): EvidenceReading {
-  if (observation === undefined) {
-    return NOT_REPORTED;
+function readEncryptedResources(
+  observations: readonly ControlObservation[] | undefined,
+): EvidenceReading {
+  const identity = CHECK_IDENTITY['encrypted-resources'];
+  const found = readNullable(observations, identity);
+  if (found.state !== 'reported') {
+    return unreadable(observations, identity, found.state);
+  }
+  const { value } = found;
+  if (typeof value !== 'string') {
+    return { outcome: 'indeterminate', observed: describeShape(value) };
+  }
+  const resources = splitList(value);
+  if (resources === undefined) {
+    return { outcome: 'indeterminate', observed: describeShape(value) };
   }
   const expected = EXPECTED_RESOURCES.join(', ');
-  const claim = readValueClaim(observation.value);
-  if (claim !== undefined) {
-    return claim === 'affirmed'
-      ? { outcome: 'satisfied', observed: `reported as ${expected}` }
-      : { outcome: 'violated', observed: `reported as NOT ${expected}` };
-  }
-  if (typeof observation.value !== 'string') {
-    return { outcome: 'indeterminate', observed: describeValue(observation.value) };
-  }
-  const resources = splitList(observation.value);
-  if (resources.length === 0) {
-    return { outcome: 'indeterminate', observed: describeValue(observation.value) };
-  }
   const rendered = resources.join(', ');
   const matches =
     resources.length === EXPECTED_RESOURCES.length &&
@@ -780,29 +894,42 @@ function readEncryptedResources(observation: ControlObservation | undefined): Ev
  * pass-or-fail boundary, so this row contributes nothing to the verdict. The
  * committed manifest's value is a PLACEHOLDER and is rendered as one — the real
  * KMS plugin socket is provisioned out of band and is never committed — and when
- * the payload reports no endpoint the recorded placeholder is shown instead of
- * an empty cell. A reported value that is not the placeholder is shown verbatim
- * and NOT labelled a placeholder, because saying so would be false.
+ * the payload reports no endpoint the recorded placeholder is shown instead of an
+ * empty cell. A reported value is echoed only when its whole shape is a unix
+ * socket path, and is never labelled a placeholder unless it is one.
  */
-function readKmsEndpoint(observation: ControlObservation | undefined): EvidenceReading {
-  const reported =
-    observation !== undefined && typeof observation.value === 'string' && observation.value.trim() !== ''
-      ? observation.value
-      : PLACEHOLDER_KMS_ENDPOINT;
-  return {
-    outcome: 'informational',
-    observed:
-      reported === PLACEHOLDER_KMS_ENDPOINT
-        ? `${reported} (placeholder - the real socket is provisioned out of band)`
-        : reported,
-  };
+function readKmsEndpoint(observations: readonly ControlObservation[] | undefined): EvidenceReading {
+  const identity = CHECK_IDENTITY['kms-endpoint'];
+  const found = readNullable(observations, identity);
+  if (found.state !== 'reported' || typeof found.value !== 'string' || found.value === '') {
+    return {
+      outcome: 'informational',
+      observed:
+        `${PLACEHOLDER_KMS_ENDPOINT} (placeholder from the recorded manifest; none was ` +
+        'reported)',
+    };
+  }
+  if (found.value === PLACEHOLDER_KMS_ENDPOINT) {
+    return {
+      outcome: 'informational',
+      observed: `${PLACEHOLDER_KMS_ENDPOINT} (placeholder - the real socket is provisioned out of band)`,
+    };
+  }
+  const echoed = echoIfBounded(found.value, UNIX_SOCKET_SHAPE);
+  return { outcome: 'informational', observed: echoed ?? describeShape(found.value) };
 }
 
-
-/** One reported observation this panel has no row for. */
+/**
+ * One reported observation this panel has no row for.
+ *
+ * `shape` rather than `value`, and that is the point (see {@link describeShape}):
+ * an unrecognised measurement is REPORTED so nothing is silently dropped, but its
+ * string content is never rendered, because an unrecognised observation on THIS
+ * control is exactly where a raw stored blob would arrive.
+ */
 interface EvidenceExtra {
   readonly label: string;
-  readonly value: string;
+  readonly shape: string;
 }
 
 /** Everything derived from one payload's observations, computed in one pass. */
@@ -814,39 +941,6 @@ interface EvidenceDigest {
   /** The verdict the evidence alone supports. See {@link summariseEvidence}. */
   readonly verdict: ControlVerdict;
 }
-
-/**
- * Substituted for an unrecognised observation whose value carries the canary.
- *
- * The presentation-layer counterpart of the confidentiality reasoning at the top
- * of this file: an unrecognised measurement is rendered verbatim so no evidence
- * is lost, EXCEPT when it carries the known plaintext marker, in which case the
- * fact is reported and the value is not.
- */
-const WITHHELD_VALUE = 'withheld - the reported value carries the plaintext canary';
-
-/**
- * The two rows that decide whether ciphertext at rest is PROVEN (the proof pair).
- *
- * Both must be satisfied for a pass, and this is the pair the Go oracle treats
- * as one proof: L136 establishes that the stored value is ciphertext produced by
- * the declared key, L141 that the known plaintext is nowhere in the blob. Either
- * alone is insufficient — a written prefix over an unencrypted body would pass
- * the first, and an unrelated key's ciphertext would pass the second.
- */
-const PROOF_PAIR_CHECKS: readonly EvidenceCheckId[] = ['ciphertext-prefix', 'plaintext-canary'];
-
-/**
- * How severe each verdict is, used to combine the reported verdict with the one
- * the evidence supports. `pass` is the LEAST severe, so combining can only ever
- * move the rendered verdict away from it.
- */
-const VERDICT_SEVERITY: Record<ControlVerdict, number> = {
-  pass: 0,
-  unknown: 1,
-  warn: 2,
-  fail: 3,
-};
 
 /** The headline sentence rendered for each verdict. */
 const VERDICT_HEADLINE: Record<ControlVerdict, string> = {
@@ -865,101 +959,140 @@ const OUTCOME_TEXT: Record<EvidenceOutcome, string> = {
 };
 
 /**
- * Routes each observation to at most one evidence row, first match and first
- * observation winning. See {@link EVIDENCE_KEYWORDS} for why order matters.
+ * Withheld when the measurement it depended on could not be trusted.
+ *
+ * Not "not reported": the payload DID report it, and saying otherwise would send
+ * a reader looking for a missing field instead of at the gate above it.
  */
-function classifyObservation(label: string): EvidenceCheckId | undefined {
-  const normalised = normalise(label);
-  return EVIDENCE_KEYWORDS.find((entry) =>
-    entry.keywords.some((keyword) => normalised.includes(keyword)),
-  )?.id;
+function withheldBecause(reason: string): EvidenceReading {
+  return { outcome: 'indeterminate', observed: `withheld: ${reason}` };
 }
 
 /**
- * Reduces the reported observations to the nine rows plus whatever did not
+ * Reduces the reported observations to the twelve rows plus whatever did not
  * match, then derives the verdict the evidence alone supports.
  *
- * Called with `undefined` when the payload reported no evidence at all, which is
- * a legitimate state and NOT an error: every row then reads "not reported", the
- * derived verdict is `unknown`, and {@link reconcileVerdict} leaves the reported
- * verdict standing rather than inventing a contradiction.
+ * THE ABORT GATE. The oracle asserts cardinality with `t.Fatalf` and the other
+ * three with `t.Errorf` (`encryption_test.go` L131 versus L136, L141, L150), and
+ * that asymmetry is load-bearing rather than stylistic: if the raw read did not
+ * return exactly one entry then the prefix, canary and round-trip assertions would
+ * be reading an object that was never found, so their answers mean nothing. Three
+ * situations close the gate, and each withholds those three rows with its own
+ * stated reason:
+ *
+ *   1. the stored-entry count is not exactly one;
+ *   2. the storage prefix was reported as NOT read from the live configuration,
+ *      which is the documented cause of (1);
+ *   3. the marker searched for was not the recorded canary, which makes the
+ *      canary row a proof about a different string.
+ *
+ * Called with `undefined` when the payload reported no evidence at all, which is a
+ * legitimate state and NOT an error: every row then reads "not reported" and the
+ * derived verdict is `unknown`, which {@link reconcileVerdict} refuses to render
+ * as a pass.
  */
 function digestObservations(
   observations: readonly ControlObservation[] | undefined,
 ): EvidenceDigest {
-  const index: Partial<Record<EvidenceCheckId, ControlObservation>> = {};
-  const extras: EvidenceExtra[] = [];
+  const extras: EvidenceExtra[] = (observations ?? [])
+    .filter((observation) => !RECOGNISED_IDENTITIES.includes(observation.label))
+    .map((observation) => ({
+      label: observation.label,
+      shape: describeShape(observation.value),
+    }));
 
-  for (const observation of observations ?? []) {
-    const id = classifyObservation(observation.label);
-    if (id === undefined) {
-      const carriesCanary =
-        typeof observation.value === 'string' && observation.value.includes(PLAINTEXT_CANARY);
-      extras.push({
-        label: observation.label,
-        value: carriesCanary ? WITHHELD_VALUE : describeValue(observation.value),
-      });
-      continue;
-    }
-    if (index[id] === undefined) {
-      index[id] = observation;
-    }
-  }
+  const countReading = readStoredEntryCount(observations);
+  const prefixLiveReading = readStoragePrefixLive(observations);
+  const canaryLiteralReading = readCanaryLiteral(observations);
+  // Read ONCE and narrowed properly: an unreported marker is not a mismatch (the
+  // payload simply did not say which marker it used), while a reported marker that
+  // differs from the recorded canary makes the absence proof above about a
+  // different string.
+  const literal = readNullable(observations, CHECK_IDENTITY['canary-literal']);
+  const literalIsRecorded = literal.state !== 'reported' || literal.value === PLAINTEXT_CANARY;
+
+  const gateReason =
+    countReading.outcome !== 'satisfied'
+      ? 'the raw read did not return exactly one entry for the Secret key'
+      : prefixLiveReading.outcome === 'indeterminate' &&
+          readBoolean(observations, CHECK_IDENTITY['storage-prefix-live']).state === 'reported'
+        ? 'the storage prefix was not read from the live configuration'
+        : undefined;
+
+  const gated = (reading: EvidenceReading): EvidenceReading =>
+    gateReason === undefined ? reading : withheldBecause(gateReason);
+
+  const canaryReading = literalIsRecorded
+    ? gated(readPlaintextCanary(observations))
+    : withheldBecause(`the marker searched for was not ${PLAINTEXT_CANARY}`);
 
   const rows: readonly EvidenceRow[] = [
     buildRow(
-      'ciphertext-prefix',
-      'F-003-RQ-002',
-      `stored value begins with ${AESGCM_PREFIX} - a prefix match, never equality and never a substring search`,
-      readCiphertextPrefix(index['ciphertext-prefix']),
-    ),
-    buildRow(
-      'plaintext-canary',
-      'F-003-RQ-002',
-      `${PLAINTEXT_CANARY} absent from the stored value`,
-      readPlaintextCanary(index['plaintext-canary']),
-    ),
-    buildRow(
       'stored-entry-count',
       'F-003-RQ-002',
-      `exactly ${String(EXPECTED_STORED_ENTRY_COUNT)} stored entry for the Secret's etcd key`,
-      readStoredEntryCount(index['stored-entry-count']),
+      V3_ASSERTION_TITLES.exactlyOneEntry,
+      countReading,
+    ),
+    buildRow(
+      'ciphertext-prefix',
+      'F-003-RQ-002',
+      `${V3_ASSERTION_TITLES.prefix} - a prefix match, never equality and never a substring search`,
+      gated(readCiphertextPrefix(observations)),
+    ),
+    buildRow('plaintext-canary', 'F-003-RQ-002', V3_ASSERTION_TITLES.canaryAbsent, canaryReading),
+    buildRow(
+      'canary-literal',
+      'F-003-RQ-002',
+      `the marker searched for is ${PLAINTEXT_CANARY}`,
+      canaryLiteralReading,
     ),
     buildRow(
       'plaintext-round-trip',
       'F-003-RQ-002',
-      'the API server returns the original plaintext on read',
-      readPlaintextRoundTrip(index['plaintext-round-trip']),
+      V3_ASSERTION_TITLES.roundTrip,
+      gated(readPlaintextRoundTrip(observations)),
+    ),
+    buildRow(
+      'storage-prefix-live',
+      'F-003-RQ-002',
+      'the etcd key is derived from the live storage prefix, never hardcoded',
+      prefixLiveReading,
+    ),
+    buildRow(
+      'storage-prefix-shape',
+      'F-003-RQ-002',
+      `a per-run prefix, not the bare ${HARDCODED_STORAGE_PREFIX}`,
+      readStoragePrefixShape(observations),
     ),
     buildRow(
       'provider-order',
       'F-003-RQ-003',
-      `strong provider first, ${IDENTITY_PROVIDER} last`,
-      readProviderOrder(index['provider-order']),
+      `an encrypting provider first, ${IDENTITY_PROVIDER} last or absent`,
+      readProviderOrder(observations),
     ),
     buildRow(
       'kms-timeout',
       'F-003-RQ-003',
       `timeout ${EXPECTED_KMS_TIMEOUT}`,
-      readKmsTimeout(index['kms-timeout']),
+      readKmsTimeout(observations),
     ),
     buildRow(
       'cachesize-absent',
       'F-003-RQ-003',
       `no ${FORBIDDEN_KMS_V2_KEY} key, which KMS v2 rejects`,
-      readCachesizeAbsent(index['cachesize-absent']),
+      readCachesizeAbsent(observations),
     ),
     buildRow(
       'encrypted-resources',
       'F-003-RQ-001',
       EXPECTED_RESOURCES.join(', '),
-      readEncryptedResources(index['encrypted-resources']),
+      readEncryptedResources(observations),
     ),
     buildRow(
       'kms-endpoint',
       'F-003-RQ-003',
       'a placeholder socket path in the committed manifest',
-      readKmsEndpoint(index['kms-endpoint']),
+      readKmsEndpoint(observations),
     ),
   ];
 
@@ -989,46 +1122,92 @@ function buildRow(
  * The order of these tests is the security boundary:
  *   1. ANY violated row is a `fail`. One violation is enough, and a satisfied
  *      row elsewhere never offsets it.
- *   2. Both rows of the proof pair satisfied and nothing violated is a `pass`.
- *   3. Some evidence satisfied but the proof incomplete is a `warn` — reported
- *      as partial rather than promoted to a pass.
- *   4. Nothing determinable is `unknown`. The informational endpoint row is
- *      never `satisfied`, so it cannot lift this case into `warn`.
+ *   2. ALL FOUR {@link REQUIRED_CHECKS} satisfied, and nothing violated, is a
+ *      `pass`. The previous version required only two of them — the prefix and
+ *      the canary — so a payload that reported neither a stored-entry count nor a
+ *      round trip still reached a clean pass on half the proof.
+ *   3. PART OF THE PROOF satisfied is a `warn` — reported as partial rather than
+ *      promoted to a pass. "Part of the proof" means one of the four required rows
+ *      and nothing else: a satisfied CONTEXT row is not partial evidence of
+ *      encryption. Measured, not assumed — with the looser test, a payload whose
+ *      raw read addressed the wrong key entirely still reported "partly verified"
+ *      on the strength of having read its storage prefix from the live
+ *      configuration, which says nothing whatsoever about ciphertext.
+ *   4. Nothing proven is `unknown`. The informational rows are never `satisfied`,
+ *      so they cannot lift this case either.
  */
 function summariseEvidence(rows: readonly EvidenceRow[]): ControlVerdict {
   if (rows.some((row) => row.outcome === 'violated')) {
     return 'fail';
   }
-  const proofPairSatisfied = PROOF_PAIR_CHECKS.every(
-    (id) => rows.find((row) => row.id === id)?.outcome === 'satisfied',
-  );
-  if (proofPairSatisfied) {
+  const outcomeOf = (id: EvidenceCheckId): EvidenceOutcome | undefined =>
+    rows.find((row) => row.id === id)?.outcome;
+  if (REQUIRED_CHECKS.every((id) => outcomeOf(id) === 'satisfied')) {
     return 'pass';
   }
-  return rows.some((row) => row.outcome === 'satisfied') ? 'warn' : 'unknown';
+  return REQUIRED_CHECKS.some((id) => outcomeOf(id) === 'satisfied') ? 'warn' : 'unknown';
 }
 
 /**
- * Combines the reported verdict with the one the evidence supports.
+ * Combines the reported verdict with the evidence and the reported findings.
  *
  * INVARIANT LOCKED: this function can only ever make the rendered verdict MORE
- * severe. There is no path from a reported `fail`, `warn` or `unknown` to a
- * rendered `pass`, so neither an error, nor an unrecognised verdict, nor
- * contradicting evidence can produce a false clean bill of health.
+ * severe, and A PASS MUST BE EARNED. There is no path from a reported `fail`,
+ * `warn` or `unknown` to a rendered `pass`, and no path from a reported `pass`
+ * over unproven evidence to a rendered `pass` either.
  *
- * The one deliberate asymmetry: evidence of `unknown` does not veto the reported
- * verdict. "The payload carried no evidence" is not a finding about encryption —
- * it is a finding about the payload, and it is already stated plainly in every
- * row of the evidence table. Manufacturing a downgrade from it would make the
- * absence of an optional field indistinguishable from a real regression.
+ * WHAT CHANGED. The previous version returned the reported verdict unchanged
+ * whenever the evidence was `unknown`, on the reasoning that "the payload carried
+ * no evidence" is a finding about the payload rather than about encryption. That
+ * reasoning is wrong for the direction that matters: it made a reported `pass`
+ * with NO evidence at all render as a clean pass on the most serious of the eight
+ * controls. Absent evidence is not a defect — so it yields `unknown` rather than
+ * `fail` — but it is certainly not a proof, so it cannot support a pass.
+ *
+ * A reported finding floors the verdict at `fail` on its own authority: a payload
+ * cannot claim `pass` while also reporting that something is wrong, and the
+ * finding may well concern something this panel measures nothing about.
  */
-function reconcileVerdict(reported: ControlVerdict, evidence: ControlVerdict): ControlVerdict {
-  if (evidence === 'unknown') {
-    return reported;
+function reconcileVerdict(
+  reported: ControlVerdict,
+  evidence: ControlVerdict,
+  findingCount: number,
+): ControlVerdict {
+  if (reported === 'fail' || evidence === 'fail' || findingCount > 0) {
+    return 'fail';
   }
-  return VERDICT_SEVERITY[evidence] > VERDICT_SEVERITY[reported] ? evidence : reported;
+  if (reported === 'pass') {
+    // The evidence decides: `pass` when all four assertions hold, `warn` when the
+    // proof is partial, `unknown` when nothing was proven.
+    return evidence;
+  }
+  return strictestVerdict([reported, evidence]);
 }
 
+
+/**
+ * The panel's own conservative verdict for V3, as one call over one payload.
+ *
+ * Exported so the aggregate dashboard counts, filters and summarises the SAME
+ * verdict this panel renders in its badge, rather than the raw `status.verdict`
+ * the server sent. A dashboard counting the raw verdict would report a pass beside
+ * a panel rendering FAIL — and for the one Critical-severity control of the eight,
+ * that disagreement is the worst possible place to have no single place to look.
+ *
+ * @param control - the payload for V3, or `undefined` when it was not reported.
+ * @returns the verdict this panel renders.
+ */
+export function resolveEncryptionAtRestEffectiveVerdict(
+  control: ControlStatus | undefined,
+): ControlVerdict {
+  if (control === undefined) {
+    return 'unknown';
+  }
+  const digest = digestObservations(control.evidence?.observations);
+  return strictestVerdict([
+    reconcileVerdict(control.verdict, digest.verdict, control.findings.length),
+  ]);
+}
 
 /**
  * Renders a transport or contract failure in words, alongside the server's own
@@ -1159,21 +1338,31 @@ export interface EncryptionAtRestPanelProps {
    */
   readonly status?: ControlStatus;
   /**
-   * Replaces the refresh action. Without it the button calls the result's own
-   * `refresh`, which re-issues the request; with a pre-resolved `status` and no
-   * handler the button is a no-op, because there is no request to re-issue.
+   * REPLACES the refresh action rather than joining it. Without it the button calls
+   * the result's own `refresh`, which re-issues the request; with a pre-resolved
+   * `status` and no handler there is nothing to re-request, so the button is
+   * DISABLED and carries a title saying why instead of being an enabled no-op.
    */
   readonly onRefresh?: () => void;
+  /**
+   * Whether refreshing can re-request anything at all.
+   *
+   * `false` disables this panel's refresh affordance and explains why, which is how an
+   * aggregate surface that was handed its posture directly keeps every control's button
+   * consistent with its own. Defaults to `true`, so a panel used on its own is unaffected.
+   */
+  readonly canRefresh?: boolean;
 }
 
 /**
- * The refresh action used when a pre-resolved `status` is rendered and the caller
- * supplied no handler.
+ * The placeholder occupying {@link UseControlStatusResult.refresh} when a pre-resolved
+ * `status` is rendered.
  *
  * Deliberately empty and deliberately NOT a stub: there is no request behind a
- * pre-resolved payload, so the honest behaviour is to do nothing. The button
- * still renders, stays keyboard-operable and keeps its accessible name, so the
- * affordance a real deployment shows is the affordance a caller sees.
+ * pre-resolved payload, so the honest behaviour is to do nothing. It is also never the
+ * handler the button calls — that branch resolves refresh availability from the caller's
+ * own handler, so a payload handed over directly renders a DISABLED button rather than
+ * an enabled control wired to this.
  */
 const NO_REFRESH = (): void => undefined;
 
@@ -1181,6 +1370,7 @@ const NO_REFRESH = (): void => undefined;
 interface EncryptionAtRestPanelViewProps {
   readonly result: UseControlStatusResult;
   readonly onRefresh?: () => void;
+  readonly canRefresh?: boolean;
 }
 
 /**
@@ -1200,6 +1390,7 @@ interface EncryptionAtRestPanelViewProps {
 function EncryptionAtRestPanelView({
   result,
   onRefresh,
+  canRefresh = true,
 }: EncryptionAtRestPanelViewProps): ReactElement {
   // One generated base id per instance, because the aggregate dashboard renders
   // eight panels into one document and duplicated ids would break every
@@ -1223,14 +1414,19 @@ function EncryptionAtRestPanelView({
   const digest = useMemo(() => digestObservations(control?.evidence?.observations), [control]);
 
   const verdict =
-    control === undefined ? undefined : reconcileVerdict(control.verdict, digest.verdict);
+    control === undefined
+      ? undefined
+      : reconcileVerdict(control.verdict, digest.verdict, control.findings.length);
 
   const reportedRequirements =
     control?.requirementIds !== undefined && control.requirementIds.length > 0
       ? control.requirementIds.join(', ')
       : undefined;
 
-  const refresh = onRefresh ?? result.refresh;
+  // The override REPLACES the result's own handler rather than joining it, so one
+  // press is one request; and an unavailable refresh resolves to `undefined`, which
+  // disables the affordance and explains itself instead of accepting a dead press.
+  const refresh = resolveRefreshHandler(onRefresh, result.refresh, canRefresh);
 
   return (
     <section aria-labelledby={headingId} aria-busy={result.status === 'loading'}>
@@ -1238,9 +1434,9 @@ function EncryptionAtRestPanelView({
       <p>Requirements covered: {REQUIREMENT_IDS.join(', ')}</p>
       <button
         type="button"
-        onClick={() => {
-          refresh();
-        }}
+        onClick={refresh}
+        disabled={refresh === undefined}
+        title={refresh === undefined ? REFRESH_UNAVAILABLE_TITLE : undefined}
       >
         Re-check encryption at rest
       </button>
@@ -1293,7 +1489,7 @@ function EncryptionAtRestPanelView({
           <TextListSection
             headingId={extrasHeadingId}
             heading="Other reported observations"
-            items={digest.extras.map((extra) => `${extra.label}: ${extra.value}`)}
+            items={digest.extras.map((extra) => `${extra.label}: ${extra.shape}`)}
           />
         </>
       ) : null}
@@ -1305,6 +1501,8 @@ function EncryptionAtRestPanelView({
 interface ConnectedEncryptionAtRestPanelProps {
   /** Forwarded to the view; see {@link EncryptionAtRestPanelProps.onRefresh}. */
   readonly onRefresh?: () => void;
+  /** Forwarded to the view; see {@link EncryptionAtRestPanelProps.canRefresh}. */
+  readonly canRefresh?: boolean;
 }
 
 /**
@@ -1318,9 +1516,16 @@ interface ConnectedEncryptionAtRestPanelProps {
  */
 function ConnectedEncryptionAtRestPanel({
   onRefresh,
+  canRefresh = true,
 }: ConnectedEncryptionAtRestPanelProps): ReactElement {
   const result = useControlStatus(ENCRYPTION_AT_REST_CONTROL_ID);
-  return <EncryptionAtRestPanelView result={result} onRefresh={onRefresh} />;
+  return (
+    <EncryptionAtRestPanelView
+      result={result}
+      onRefresh={onRefresh}
+      canRefresh={canRefresh}
+    />
+  );
 }
 
 /**
@@ -1345,18 +1550,23 @@ export default function EncryptionAtRestPanel({
   result,
   status,
   onRefresh,
+  canRefresh = true,
 }: EncryptionAtRestPanelProps): ReactElement {
   if (result !== undefined) {
-    return <EncryptionAtRestPanelView result={result} onRefresh={onRefresh} />;
+    return (
+      <EncryptionAtRestPanelView result={result} onRefresh={onRefresh} canRefresh={canRefresh} />
+    );
   }
   if (status !== undefined) {
+    // A payload handed over directly owns no request, so ONLY an explicit handler can
+    // refresh it. Without one the affordance is disabled and explained.
     return (
       <EncryptionAtRestPanelView
         result={{ status: 'success', controls: [status], isEmpty: false, refresh: NO_REFRESH }}
         onRefresh={onRefresh}
+        canRefresh={canRefresh && onRefresh !== undefined}
       />
     );
   }
-  return <ConnectedEncryptionAtRestPanel onRefresh={onRefresh} />;
+  return <ConnectedEncryptionAtRestPanel onRefresh={onRefresh} canRefresh={canRefresh} />;
 }
-

@@ -66,20 +66,29 @@ limitations under the License.
 // in-page runner mode, together with its screenshot and viewport matchers,
 // which AAP §0.4.1.1 and §0.8.2 place out of scope.
 //
-// The sibling specifier below is deliberately EXTENSIONLESS, and must stay so.
-// Vite 8.2.1 prints a forward-compatibility notice about it -- a future major
-// intends to load configuration natively, where an extensionless relative
-// specifier will no longer resolve -- but the notice is informational only and
-// the run still exits 0. Naming the file `./vite.config.ts` silences it and the
-// suite still passes, yet it FAILS the gate that matters: `npx tsc --noEmit -p
-// tsconfig.node.json`, which hack/verify-web.sh runs, then reports TS5097, "An
-// import path can only end with a '.ts' extension when
-// 'allowImportingTsExtensions' is enabled". Both were measured. Silencing the
-// notice would therefore mean relaxing web/tsconfig.node.json, whose own header
-// records its compiler options as invariants, so the notice is accepted instead
-// and documented here so that it is not mistaken for something to repair.
+// THE SIBLING SPECIFIER BELOW CARRIES ITS FILE EXTENSION, and that was a fix.
+//
+// It used to be extensionless, and Vite 8.2.1 printed a forward-compatibility
+// notice about it on every run: a future major intends to load configuration
+// natively, where an extensionless relative specifier will no longer resolve.
+// The notice was informational and the run exited 0, so it had been documented
+// here as accepted -- on the measured grounds that naming the file
+// `./vite.config.ts` made `npx tsc --noEmit -p tsconfig.node.json`, which
+// hack/verify-web.sh runs, report TS5097: "An import path can only end with a
+// '.ts' extension when 'allowImportingTsExtensions' is enabled".
+//
+// TS5097 names its own remedy, and that remedy costs nothing here.
+// `allowImportingTsExtensions` requires `noEmit` or `emitDeclarationOnly`, and
+// web/tsconfig.node.json already sets `noEmit: true` because it exists purely to
+// TYPECHECK the two build-tooling modules -- nothing is ever emitted from it.
+// Enabling the option there is therefore not a relaxation of a check; it is
+// telling the compiler what is already true of this project.
+//
+// Both halves were then re-measured: `tsc --noEmit -p tsconfig.node.json` exits 0,
+// and `vitest run` prints no notice at all where it previously printed three lines
+// of one. A warning eliminated rather than accepted.
 import { defineConfig, mergeConfig } from 'vitest/config';
-import viteConfig from './vite.config';
+import viteConfig from './vite.config.ts';
 
 // Composed rather than restated, so `plugins: [react()]` keeps exactly one
 // definition site. web/vite.config.ts default-exports the plain object form
@@ -175,22 +184,41 @@ export default mergeConfig(
         // commit and a typecheck input.
         reportsDirectory: './coverage',
 
-        // AAP §0.5.4 places the thresholds in this file and §0.7.1.3 sets this
-        // tier's floor at 80% line and branch. They are a DERIVED engineering
-        // judgement, not a user requirement: the prompt states no coverage
-        // number and neither does the repository, which §1.2.3 and §6.6.3.2
-        // both record as N/A.
-        thresholds: { lines: 80, branches: 80, functions: 80, statements: 80 },
-
-        // Note the absent `enabled` flag. That absence resolves a real tension
-        // in the AAP: §0.5.4 puts the thresholds above in this file, while
-        // §0.9.3 states that coverage is NOT a gate and that no job fails on a
-        // percentage, and §0.7.1.3 labels the floors advisory. Leaving
-        // collection off by default satisfies all three -- the floors are
-        // declared, and enforced wherever coverage is deliberately asked for
-        // via `--coverage` or the `test:coverage` script, and nowhere else. It
-        // also matches the repository's own posture, KUBE_COVER defaulting to
-        // n in hack/make-rules/test.sh and KUBE_WEB_COVER likewise in
+        // NO `thresholds` KEY, DELIBERATELY, AND THE ABSENCE IS THE POINT.
+        //
+        // AAP §0.7.1.3 sets this tier's advisory floor at 80% line and branch,
+        // and §0.5.4 puts the coverage configuration in this file -- but
+        // §0.9.3
+        // is unambiguous that coverage is NOT a gate and that no job may fail on
+        // a percentage. MEASURED behaviour of a declared threshold: Vitest exits
+        // 1 on an unmet floor even when every test passed, printing "ERROR:
+        // Coverage for lines (0%) does not meet global threshold (80%)". A
+        // declared threshold is therefore an ACTIVE gate, not a note.
+        //
+        // Declaring one here and neutralising it from the runner -- which is
+        // what this file and hack/make-rules/test-web.sh used to do between them
+        // -- left configuration that looks enforced, cannot be enforced through
+        // the canonical entry point, and reads differently depending on which of
+        // the two files you happen to open. Recording the floor as prose removes
+        // that contradiction: the number below has exactly one meaning, and
+        // `make test-web` and a direct `vitest run --coverage` now agree.
+        //
+        // THE ADVISORY FLOOR, FOR THE RECORD: 80% lines and 80% branches over
+        // the `include` list above, re-baselined against Vitest 4's rewritten
+        // AST-aware V8 provider, whose line and branch numbers are not
+        // comparable with earlier releases (AAP §0.2.2.2, §0.7.1.3). It is a
+        // DERIVED engineering judgement and not a user requirement: the prompt
+        // states no coverage number and neither does the repository, which
+        // tech-spec §1.2.3 and §6.6.3.2 both record as N/A. To measure against
+        // it deliberately, name it on the command line from web/:
+        //
+        //   vitest run --coverage --coverage.thresholds.lines=80 \
+        //              --coverage.thresholds.branches=80
+        //
+        // Note the absent `enabled` flag too: collection stays off unless
+        // `--coverage` or the `test:coverage` script asks for it, matching the
+        // repository's own posture of KUBE_COVER defaulting to n in
+        // hack/make-rules/test.sh and KUBE_WEB_COVER likewise in
         // hack/make-rules/test-web.sh.
       },
     },

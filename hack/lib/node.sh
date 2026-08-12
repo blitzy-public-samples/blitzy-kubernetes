@@ -31,6 +31,26 @@
 # lockfile, and provisioning converges on repeat invocation instead of
 # accumulating.
 #
+# Four properties make that claim hold rather than merely state it:
+#   * THE INSTALLED TREE IS ASSERTED, not assumed. A stamp only records that some
+#     run once installed from a lockfile with this hash, so the fast path also
+#     reconciles every locked package and every root pin against what is on disk
+#     (kube::node::internal::tree_matches_lock) and reinstalls on any mismatch.
+#   * THE SELECTED RUNTIME IS THE ONE THAT RUNS. npm and every launcher in
+#     web/node_modules/.bin begin `#!/usr/bin/env node`, so ${NODE_BIN} is put
+#     first on ${PATH} once validated, and kube::node::exec gives a caller the same
+#     guarantee for a single command.
+#   * NOTHING UNOWNED IS DELETED, AND NOTHING IS DELETED BEFORE ITS REPLACEMENT IS
+#     IN PLACE. The store is staged and then swapped in by rename, the previous
+#     tree is discarded only afterwards, and every removal goes through
+#     kube::node::internal::safe_rm, which canonicalises the path, refuses the
+#     repository, ${HOME}, filesystem roots and anything containing the checkout,
+#     and requires this library's ownership marker (or an npm-installed tree, or an
+#     empty directory).
+#   * NOTHING RACES. The mutating work is serialised with flock, because parallel
+#     clones and concurrent gates can reach one store at once and an unserialised
+#     install would replace a tree another process is reading from.
+#
 # THE VERSION OF RECORD. This repository pins no Node version anywhere - there
 # is no .nvmrc, no .tool-versions and no `engines` field (AAP §0.3.3 and
 # §0.2.1.1 measured all three). NODE_VERSION and NPM_VERSION below therefore
@@ -65,7 +85,8 @@
 # PUBLIC API
 #   kube::node::setup_env            validate + ensure_deps + activate
 #   kube::node::validate             node and npm are present and new enough
-#   kube::node::ensure_deps          install the locked set (stamp-guarded)
+#   kube::node::ensure_deps          install the locked set (stamp- and
+#                                    tree-guarded, lock-serialised)
 #   kube::node::activate             put web/node_modules/.bin on ${PATH}
 #   kube::node::dirs                 resolve the KUBE_WEB_DIR / KUBE_NODE_* paths
 #   kube::node::install              validate + ensure_deps
@@ -73,6 +94,7 @@
 #   kube::node::externalize_modules  keep web/node_modules a symlink out of tree
 #   kube::node::module_store         echo where the real node_modules lives
 #   kube::node::run                  run an npm script from web/
+#   kube::node::exec                 run one command under the SELECTED node runtime
 #   kube::node::loaded               sourcing sentinel
 #
 # Two naming families are exposed on purpose, over one implementation.
@@ -93,6 +115,14 @@ KUBE_ROOT="${KUBE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
 
 # The Node.js and npm executables. Overriding either is how a caller points this
 # tier at a runtime that is not first on ${PATH}.
+#
+# THE OVERRIDE IS HONOURED ALL THE WAY DOWN, which takes deliberate work: npm
+# itself, and every launcher in web/node_modules/.bin (eslint, tsc, vitest), begins
+# `#!/usr/bin/env node`, so each of them resolves the FIRST node on ${PATH} rather
+# than the one validated here. Validating one runtime and executing another is a
+# silent lie, so kube::node::validate prepends the selected runtime's directory to
+# ${PATH} once it has checked it, and kube::node::exec runs a single command with
+# the same guarantee for a caller who would rather not touch ${PATH} at all.
 NODE_BIN=${NODE_BIN:-node}
 NPM_BIN=${NPM_BIN:-npm}
 
@@ -137,22 +167,40 @@ export CI=true
 
 # Where the REAL node_modules tree is materialised. It lives OUTSIDE the
 # repository working tree by default and ${KUBE_WEB_DIR}/node_modules is a
-# symlink to it, because this repository's own gates walk the tree:
-# skipped_names in hack/boilerplate/boilerplate.py does not list node_modules,
-# so a real in-tree tree makes hack/verify-boilerplate.sh report every
-# unlicensed file inside it (for instance node_modules/flatted/python/flatted.py)
-# and exit 1. Neither os.walk() nor find(1) follows a symlinked directory, so
-# the symlink keeps those gates green. .gitignore covers both spellings.
+# symlink to it, because a 254-package third-party tree inside the working tree is
+# visible to every tool that walks it. hack/boilerplate/boilerplate.py now skips
+# web/node_modules explicitly, so hack/verify-boilerplate.sh alone would be
+# satisfied by an in-tree tree; the store stays out of tree for the broader reasons
+# that survive that skip - `find`-based helpers, editor and grep-based tooling,
+# `git status` noise, and the tens of thousands of files (for instance
+# node_modules/flatted/python/flatted.py) a reviewer would otherwise have to reason
+# about. Neither os.walk() nor find(1) follows a symlinked directory, so the
+# symlink keeps all of them looking at the tier itself, and .gitignore covers both
+# spellings.
 #
 # The leaf MUST be named "node_modules": Node's resolver walks real paths, so a
-# differently named leaf would stop sibling packages resolving.
+# differently named leaf would stop sibling packages resolving. That is enforced
+# rather than documented - see kube::node::internal::assert_store.
 #
 # Set KUBE_NODE_MODULES_STORE to override. Setting it to
 # ${KUBE_WEB_DIR}/node_modules materialises the tree in place, with no symlink,
-# for a checkout that is not subject to those gates. CLONE_INDEX, when a
+# for a checkout that is not subject to those tools. CLONE_INDEX, when a
 # parallel runner sets it, keeps concurrent clones from sharing (and deleting)
 # one another's store.
 KUBE_NODE_MODULES_STORE=${KUBE_NODE_MODULES_STORE:-}
+
+# How long to wait for another process's provisioning to finish before giving up,
+# in seconds. Provisioning is serialised with flock (see
+# kube::node::internal::with_lock) because several clones and several gates can
+# reach the same store at once, and an unserialised install would let one process
+# replace a tree another is reading from.
+KUBE_NODE_LOCK_TIMEOUT=${KUBE_NODE_LOCK_TIMEOUT:-900}
+
+# The file that marks a store as belonging to THIS library. Removal requires it
+# (see kube::node::internal::safe_rm), which is what makes "replace the store"
+# incapable of deleting a directory this library did not create. It is rewritten
+# after every install, because `npm ci` deletes the whole tree first.
+KUBE_NODE_STORE_MARKER_NAME=".kube-node-store"
 
 # kube::node::internal::log_error writes an actionable, ERROR:-prefixed message
 # to stderr. On return the message has been written and nothing else has
@@ -188,18 +236,67 @@ kube::node::internal::log_error() {
   return 0
 }
 
+# kube::node::internal::level echoes the verbosity level $1 when it is a plain
+# decimal integer, and the fallback $2 otherwise. On return one decimal integer
+# has been printed and nothing has been modified.
+#
+# This exists because ${KUBE_VERBOSE} and ${V} are ENVIRONMENT-CONTROLLED and were
+# previously interpolated straight into `(( ... ))`. Bash arithmetic EVALUATES its
+# operands, so a value such as `x[$(...)]` executes the command substitution inside
+# it - a read-only log call became an execution path. Every comparison below
+# therefore runs on a validated digit string, and the raw value is never handed to
+# an arithmetic context.
+kube::node::internal::level() {
+  local raw=${1:-}
+  local fallback=${2:?a fallback level is required}
+
+  if [[ "${raw}" =~ ^[0-9]+$ ]]; then
+    echo "${raw}"
+  else
+    echo "${fallback}"
+  fi
+}
+
+# kube::node::internal::verbosity_is_sane succeeds when ${KUBE_VERBOSE} and ${V}
+# are either unset/empty or plain decimal integers. On return the status says so
+# and nothing has been modified.
+#
+# It gates DELEGATION to kube::log::info and kube::log::status, which evaluate
+# `(( KUBE_VERBOSE < V ))` themselves (hack/lib/logging.sh): passing an unvalidated
+# value on to them would move the arithmetic-evaluation problem one file away
+# instead of closing it.
+kube::node::internal::verbosity_is_sane() {
+  [[ -z "${KUBE_VERBOSE:-}" || "${KUBE_VERBOSE:-}" =~ ^[0-9]+$ ]] || return 1
+  [[ -z "${V:-}" || "${V:-}" =~ ^[0-9]+$ ]] || return 1
+  return 0
+}
+
+# kube::node::internal::level_suppresses succeeds when the current ${V} exceeds the
+# current ${KUBE_VERBOSE}, i.e. when a message at that level must be suppressed. On
+# return the status says so and nothing has been modified. Both values are
+# validated before any arithmetic runs.
+kube::node::internal::level_suppresses() {
+  local verbose level
+  verbose=$(kube::node::internal::level "${KUBE_VERBOSE:-}" 2)
+  level=$(kube::node::internal::level "${V:-}" 0)
+
+  (( verbose < level ))
+}
+
 # kube::node::internal::log_status writes a top-level status line to stdout,
 # honouring ${V} and ${KUBE_VERBOSE} exactly as kube::log::status does. On
 # return the line has been written or suppressed by verbosity, and the status is
-# 0. Guarded for the same reason as log_error above.
+# 0. Guarded for the same reason as log_error above, and additionally guarded on
+# the two verbosity variables being sane integers.
 kube::node::internal::log_status() {
-  if [[ $(type -t kube::log::status) == function && -n "${KUBE_VERBOSE:-}" ]]; then
+  if [[ $(type -t kube::log::status) == function && -n "${KUBE_VERBOSE:-}" ]] &&
+    kube::node::internal::verbosity_is_sane; then
     kube::log::status "$@"
     return 0
   fi
 
   local message
-  if (( ${KUBE_VERBOSE:-2} < ${V:-0} )); then
+  if kube::node::internal::level_suppresses; then
     return 0
   fi
   for message in "$@"; do
@@ -211,15 +308,17 @@ kube::node::internal::log_status() {
 # kube::node::internal::log_info writes a non-top-level line to stdout,
 # honouring ${V} and ${KUBE_VERBOSE} exactly as kube::log::info does, so
 # `V=4 kube::node::internal::log_info ...` stays quiet on a normal run. On
-# return the line has been written or suppressed, and the status is 0.
+# return the line has been written or suppressed, and the status is 0. Guarded on
+# sane verbosity values for the reason verbosity_is_sane gives.
 kube::node::internal::log_info() {
-  if [[ $(type -t kube::log::info) == function && -n "${KUBE_VERBOSE:-}" ]]; then
+  if [[ $(type -t kube::log::info) == function && -n "${KUBE_VERBOSE:-}" ]] &&
+    kube::node::internal::verbosity_is_sane; then
     kube::log::info "$@"
     return 0
   fi
 
   local message
-  if (( ${KUBE_VERBOSE:-2} < ${V:-0} )); then
+  if kube::node::internal::level_suppresses; then
     return 0
   fi
   for message in "$@"; do
@@ -276,24 +375,311 @@ kube::node::internal::meets_floor() {
   return 0
 }
 
-# kube::node::internal::safe_rm removes the path $1, refusing values that are
-# obviously not ours. On return the path is gone, or nothing has been removed
-# and the status is non-zero. `rm -rf` against an unexpected value is the one
-# irreversible mistake a provisioner can make, so this guard is deliberate
-# rather than defensive.
+# kube::node::internal::canonical echoes the absolute, symlink-resolved form of the
+# path $1, whether or not it exists. On return one absolute path has been printed,
+# or nothing has been printed and the status is non-zero because the path is empty
+# or its parent cannot be resolved.
+#
+# Every safety decision below is taken on the CANONICAL path, never on the string a
+# caller supplied: `${store}/../../..`, a symlink to `/` and a relative spelling all
+# name something different from what they look like, and a guard that compares
+# strings is defeated by each of them.
+kube::node::internal::canonical() {
+  local path=${1:-}
+
+  [[ -n "${path}" ]] || return 1
+
+  if [[ -d "${path}" ]]; then
+    (cd "${path}" 2>/dev/null && pwd -P) && return 0
+    return 1
+  fi
+
+  local parent leaf resolved
+  parent=$(dirname "${path}")
+  leaf=$(basename "${path}")
+  if [[ "${parent}" == "${path}" ]]; then
+    echo "${path}"
+    return 0
+  fi
+  resolved=$(kube::node::internal::canonical "${parent}") || return 1
+  echo "${resolved%/}/${leaf}"
+}
+
+# kube::node::internal::is_ancestor succeeds when the canonical path $1 is $2 or
+# contains it. On return the status says so and nothing has been modified.
+kube::node::internal::is_ancestor() {
+  local candidate=${1:-}
+  local descendant=${2:-}
+
+  [[ -n "${candidate}" && -n "${descendant}" ]] || return 1
+  [[ "${candidate}" == "${descendant}" || "${descendant}" == "${candidate%/}/"* ]]
+}
+
+# kube::node::internal::assert_store succeeds when $1 is a usable node_modules
+# store. On return the status says so; a refusal has written an actionable message.
+#
+# Two properties, both load-bearing rather than stylistic:
+#   1. the LEAF is literally "node_modules". Node's resolver walks real paths, so a
+#      differently named leaf silently stops sibling packages resolving - a failure
+#      that surfaces as a module-not-found error deep inside a test run.
+#   2. the store is EITHER outside the repository working tree, OR exactly
+#      ${KUBE_WEB_DIR}/node_modules, which is the documented in-place opt out.
+#      Anything else inside the tree would be a third-party tree in an unexpected
+#      place that the repository's tooling would then walk.
+kube::node::internal::assert_store() {
+  local store=${1:-}
+
+  local canonical
+  if ! canonical=$(kube::node::internal::canonical "${store}"); then
+    kube::node::internal::log_error \
+      "KUBE_NODE_MODULES_STORE '${store}' could not be resolved to an absolute path." \
+      "Set it to a directory whose parent exists."
+    return 1
+  fi
+
+  if [[ "$(basename "${canonical}")" != "node_modules" ]]; then
+    kube::node::internal::log_error \
+      "refusing the node_modules store '${canonical}': its last path component must be" \
+      "literally 'node_modules', because Node's resolver walks real paths and a differently" \
+      "named leaf stops sibling packages resolving." \
+      "Set KUBE_NODE_MODULES_STORE=<dir>/node_modules instead."
+    return 1
+  fi
+
+  local repo_root in_tree
+  repo_root=$(kube::node::internal::canonical "${KUBE_ROOT}") || repo_root=""
+  in_tree=$(kube::node::internal::canonical "${KUBE_WEB_DIR}/node_modules") || in_tree=""
+  if [[ -n "${repo_root}" ]] &&
+    kube::node::internal::is_ancestor "${repo_root}" "${canonical}" &&
+    [[ "${canonical}" != "${in_tree}" ]]; then
+    kube::node::internal::log_error \
+      "refusing the node_modules store '${canonical}': it is inside the repository working tree" \
+      "at '${repo_root}' and is not the one in-tree path this library supports," \
+      "'${in_tree}'." \
+      "Set KUBE_NODE_MODULES_STORE to a directory outside the checkout, or to exactly that path" \
+      "to materialise the tree in place."
+    return 1
+  fi
+  return 0
+}
+
+# kube::node::internal::assert_removable succeeds when the path $1 is one this
+# library may recursively remove. On return the status says so; a refusal has
+# written an actionable message and removed nothing.
+#
+# `rm -rf` against an unexpected value is the one irreversible mistake a
+# provisioner can make, and both KUBE_WEB_DIR and KUBE_NODE_MODULES_STORE are
+# environment-controlled, so this is a hard gate rather than a sanity check. Four
+# conditions, all required:
+#
+#   1. the canonical path is not a filesystem root and has at least two
+#      components, so `/`, `/opt` and `/home` can never be targets;
+#   2. it is neither ${HOME}, nor the repository root, nor an ANCESTOR of the
+#      repository root - a store that contained the checkout would take the
+#      checkout with it;
+#   3. it is not inside the repository working tree, with exactly one exception:
+#      ${KUBE_WEB_DIR}/node_modules, the in-tree path this library owns;
+#   4. it carries this library's ownership marker, OR it is a node_modules tree
+#      (it has a .package-lock.json, which npm writes into every tree it installs),
+#      OR it is empty. A directory that is none of those three belongs to somebody
+#      else and is refused - which is what stops an operator-supplied override
+#      pointing at real data from being deleted.
+kube::node::internal::assert_removable() {
+  local target=${1:-}
+  local what=${2:-the path}
+
+  local canonical
+  if ! canonical=$(kube::node::internal::canonical "${target}"); then
+    kube::node::internal::log_error \
+      "refusing to remove ${what} '${target}': it could not be resolved to an absolute path." \
+      "This is a bug in hack/lib/node.sh or an unsafe KUBE_WEB_DIR / KUBE_NODE_MODULES_STORE value."
+    return 1
+  fi
+
+  local trimmed=${canonical#/}
+  if [[ "${canonical}" != /* || -z "${trimmed}" || "${trimmed}" != */* ]]; then
+    kube::node::internal::log_error \
+      "refusing to remove ${what} '${canonical}': it is a filesystem root or too close to one." \
+      "Set KUBE_NODE_MODULES_STORE to a dedicated directory such as /opt/blitzy/node/web/node_modules."
+    return 1
+  fi
+
+  local repo_root home_dir
+  repo_root=$(kube::node::internal::canonical "${KUBE_ROOT}") || repo_root=""
+  home_dir=$(kube::node::internal::canonical "${HOME:-/nonexistent}") || home_dir=""
+  if [[ -n "${home_dir}" && "${canonical}" == "${home_dir}" ]] ||
+    { [[ -n "${repo_root}" ]] && kube::node::internal::is_ancestor "${canonical}" "${repo_root}"; }; then
+    kube::node::internal::log_error \
+      "refusing to remove ${what} '${canonical}': it is your home directory, the repository root," \
+      "or a directory that CONTAINS the repository at '${repo_root}'." \
+      "Set KUBE_NODE_MODULES_STORE to a dedicated directory outside the working tree."
+    return 1
+  fi
+
+  local in_tree
+  in_tree=$(kube::node::internal::canonical "${KUBE_WEB_DIR}/node_modules") || in_tree=""
+  if [[ -n "${repo_root}" ]] &&
+    kube::node::internal::is_ancestor "${repo_root}" "${canonical}" &&
+    [[ "${canonical}" != "${in_tree}" ]]; then
+    kube::node::internal::log_error \
+      "refusing to remove ${what} '${canonical}': it is inside the repository working tree" \
+      "and is not the node_modules path '${in_tree}' this library owns." \
+      "Nothing was removed."
+    return 1
+  fi
+
+  if [[ ! -e "${canonical}" ]]; then
+    return 0
+  fi
+  if [[ -f "${canonical}/${KUBE_NODE_STORE_MARKER_NAME}" || -f "${canonical}/.package-lock.json" ]]; then
+    return 0
+  fi
+  if [[ -d "${canonical}" ]] && [[ -z "$(ls -A "${canonical}" 2>/dev/null)" ]]; then
+    return 0
+  fi
+
+  kube::node::internal::log_error \
+    "refusing to remove ${what} '${canonical}': it is not empty, it is not an npm-installed tree" \
+    "(no .package-lock.json) and it carries no '${KUBE_NODE_STORE_MARKER_NAME}' marker, so this" \
+    "library did not create it." \
+    "Move it aside by hand if you meant to replace it, or point KUBE_NODE_MODULES_STORE somewhere else." \
+    "Nothing was removed."
+  return 1
+}
+
+# kube::node::internal::mark_store records this library's ownership of the store $1
+# by writing ${KUBE_NODE_STORE_MARKER_NAME} into it. On return the marker exists, or
+# it does not and the status is non-zero.
+#
+# It has to be rewritten after every install: `npm ci` deletes node_modules in full
+# before installing, so the marker - like the lockfile stamp beside it - does not
+# survive one.
+kube::node::internal::mark_store() {
+  local store=${1:?a store path is required}
+
+  [[ -d "${store}" ]] || return 1
+  {
+    echo "// Created by hack/lib/node.sh for the Kubernetes React (Vitest) test tier."
+    echo "// Its presence is what permits this library to replace this tree."
+    echo "// Delete the directory rather than this file if you want it rebuilt from scratch."
+    echo "// repository=${KUBE_ROOT}"
+    echo "// clone_index=${CLONE_INDEX:-}"
+  } >"${store}/${KUBE_NODE_STORE_MARKER_NAME}" 2>/dev/null || return 1
+  return 0
+}
+
+# kube::node::internal::safe_rm removes the path $1 after
+# kube::node::internal::assert_removable has approved it. On return the path is
+# gone, or nothing has been removed and the status is non-zero.
 kube::node::internal::safe_rm() {
   local target=${1:-}
+  local what=${2:-the path}
 
-  case "${target}" in
-    '' | '/' | '.' | '..' | '~' | '*')
+  kube::node::internal::assert_removable "${target}" "${what}" || return 1
+
+  local canonical
+  canonical=$(kube::node::internal::canonical "${target}") || return 1
+  rm -rf "${canonical}"
+}
+
+# kube::node::internal::with_lock runs the function named by $2 (with any further
+# arguments) while holding an exclusive lock on the file $1. On return the function
+# has run and its status is this function's status, or the lock could not be taken
+# within ${KUBE_NODE_LOCK_TIMEOUT} seconds and the status is non-zero.
+#
+# Provisioning REPLACES a store that several processes can reach at once - parallel
+# clones sharing one store, `make verify` and `make test-web` racing, a second gate
+# starting while the first installs. Without serialisation one process can replace
+# the tree another is reading from, which is a corrupt environment that reports
+# success. The body runs in a subshell holding the lock on a dedicated file
+# descriptor, the canonical flock idiom; every effect this library has is on the
+# filesystem, so nothing is lost by the subshell.
+#
+# flock is not universally present. When it is missing the work still runs, and says
+# once that it is unserialised, because refusing to provision at all would be a
+# worse outcome than provisioning without the guard.
+kube::node::internal::with_lock() {
+  local lockfile=${1:?a lock file path is required}
+  shift
+
+  if ! command -v flock >/dev/null 2>&1; then
+    V=3 kube::node::internal::log_info \
+      "flock is not available, so provisioning is not serialised; a concurrent run could race"
+    "$@"
+    return $?
+  fi
+
+  if ! mkdir -p "$(dirname "${lockfile}")" 2>/dev/null; then
+    V=3 kube::node::internal::log_info \
+      "could not create $(dirname "${lockfile}") for the provisioning lock; continuing unserialised"
+    "$@"
+    return $?
+  fi
+
+  local timeout
+  timeout=$(kube::node::internal::level "${KUBE_NODE_LOCK_TIMEOUT}" 900)
+
+  (
+    if ! flock -w "${timeout}" 9; then
       kube::node::internal::log_error \
-        "refusing to remove the suspicious path '${target}'." \
-        "This is a bug in hack/lib/node.sh or an unsafe KUBE_WEB_DIR / KUBE_NODE_MODULES_STORE value."
-      return 1
-      ;;
-  esac
+        "timed out after ${timeout}s waiting for the npm provisioning lock ${lockfile}." \
+        "Another process is provisioning the same store. Wait for it to finish, or set" \
+        "KUBE_NODE_MODULES_STORE to a store of your own (CLONE_INDEX does this automatically for" \
+        "parallel clones)."
+      exit 1
+    fi
+    "$@"
+  ) 9>"${lockfile}"
+}
 
-  rm -rf "${target}"
+# kube::node::internal::runtime_dir echoes the directory holding the SELECTED node
+# binary. On return one absolute directory has been printed, or nothing has been
+# printed and the status is non-zero because ${NODE_BIN} could not be resolved.
+kube::node::internal::runtime_dir() {
+  local resolved
+  resolved=$(command -v "${NODE_BIN}" 2>/dev/null) || return 1
+  kube::node::internal::canonical "$(dirname "${resolved}")"
+}
+
+# kube::node::internal::prepend_runtime_path puts the selected runtime's directory
+# first on ${PATH}, exactly once. On return every `#!/usr/bin/env node` launcher -
+# npm, eslint, tsc, vitest - resolves the runtime this library validated; or the
+# runtime could not be resolved and the status is non-zero with ${PATH} unchanged.
+#
+# This is the whole point of honouring ${NODE_BIN}: validating one runtime and then
+# executing a different one, because a launcher's shebang searched ${PATH} instead,
+# is a silent lie about which Node the tier ran under. Prepending is idempotent, and
+# it is a no-op in the common case where the selected node is already first.
+kube::node::internal::prepend_runtime_path() {
+  local runtime_dir
+  runtime_dir=$(kube::node::internal::runtime_dir) || return 1
+
+  export KUBE_NODE_RUNTIME_DIR="${runtime_dir}"
+  if [[ ":${PATH}:" != *":${runtime_dir}:"* ]]; then
+    PATH="${runtime_dir}:${PATH}"
+    export PATH
+    hash -r 2>/dev/null || true
+    V=3 kube::node::internal::log_info \
+      "put the selected Node.js runtime first on PATH: ${runtime_dir}"
+  fi
+  return 0
+}
+
+# kube::node::exec runs the command "$@" with the selected runtime's directory
+# first on the CHILD's ${PATH}, leaving this shell's ${PATH} alone. On return the
+# command has run and its status is this function's status.
+#
+# For a caller that invokes a launcher by absolute path - hack/verify-web.sh and
+# hack/make-rules/test-web.sh both do, deliberately, so that ${PATH} order cannot
+# decide which eslint or vitest runs - this is how the same guarantee is obtained
+# for the runtime those launchers then look up through `env node`.
+kube::node::exec() {
+  local runtime_dir
+  if runtime_dir=$(kube::node::internal::runtime_dir); then
+    PATH="${runtime_dir}:${PATH}" "$@"
+    return $?
+  fi
+  "$@"
 }
 
 # kube::node::internal::lockfile_hash echoes a SHA-256 of the lockfile the tier
@@ -335,6 +721,106 @@ kube::node::internal::modules_present() {
   return 0
 }
 
+# kube::node::internal::tree_matches_lock succeeds when the packages installed under
+# ${KUBE_WEB_DIR}/node_modules are exactly what package.json and package-lock.json
+# describe. On return the status says so; a mismatch has written a report naming
+# every offender and nothing has been modified.
+#
+# THIS IS WHAT THE STAMP FAST PATH IS WORTH. A stamp records only that some run once
+# installed from a lockfile with this hash; it says nothing about what is in the tree
+# NOW. A store that was hand-modified, partially upgraded by a stray `npm install`,
+# or warmed by a previous batch from a different lockfile would keep its stamp and
+# quietly run a different toolchain than the one every gate reports. So the fast path
+# asserts the tree itself, and a mismatch reinstalls instead of trusting the stamp.
+#
+# `npm ls --all` is deliberately NOT used for this. MEASURED: with
+# ${KUBE_WEB_DIR}/node_modules a symlink to an out-of-tree store - the supported and
+# default layout - `npm ls --all --json` exits 1 with ELSPROBLEMS and reports every
+# installed package as `extraneous`, so it cannot distinguish a healthy tree from a
+# broken one here. Reading the lockfile and checking each package on disk is both
+# exact and immune to that, and it needs no registry access.
+#
+# Two assertions:
+#   1. every ROOT pin in package.json is installed at EXACTLY the pinned version -
+#      these 17 are the tier's toolchain, and drift in one of them is precisely the
+#      "gate speaks for a version nobody pinned" failure;
+#   2. every non-optional package the lockfile declares exists at the path the
+#      lockfile gives it, at the version it records. Optional packages are reported
+#      only when present-but-wrong, because npm legitimately skips them per platform.
+kube::node::internal::tree_matches_lock() {
+  [[ -f "${KUBE_NODE_PACKAGE_JSON}" ]] || return 1
+  [[ -f "${KUBE_NODE_PACKAGE_LOCK}" ]] || return 1
+  [[ -d "${KUBE_WEB_DIR}/node_modules" ]] || return 1
+
+  kube::node::exec "${NODE_BIN}" - \
+    "${KUBE_NODE_PACKAGE_JSON}" "${KUBE_NODE_PACKAGE_LOCK}" "${KUBE_WEB_DIR}" <<'NODE_TREE_CHECK'
+// Compare the installed npm tree with package.json and package-lock.json.
+//
+// Called by kube::node::internal::tree_matches_lock in hack/lib/node.sh. Prints one
+// line per offender to stderr and exits 1; prints nothing and exits 0 when the tree
+// matches. Uses only Node's own modules, so it runs before anything is installed.
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const [manifestPath, lockPath, webDir] = process.argv.slice(2);
+
+const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
+
+const manifest = readJson(manifestPath);
+const lock = readJson(lockPath);
+const problems = [];
+
+const installedVersion = (relativePath) => {
+  const file = path.join(webDir, relativePath, "package.json");
+  try {
+    return readJson(file).version;
+  } catch (error) {
+    return null;
+  }
+};
+
+// 1. the root pins, which are the tier's own toolchain.
+const roots = Object.assign({}, manifest.dependencies, manifest.devDependencies);
+for (const [name, spec] of Object.entries(roots)) {
+  const found = installedVersion(path.join("node_modules", name));
+  if (found === null) {
+    problems.push(`${name}@${spec} is pinned but NOT installed`);
+  } else if (found !== spec) {
+    problems.push(`${name}: installed ${found}, pinned ${spec}`);
+  }
+}
+
+// 2. every package the lockfile declares.
+for (const [entry, meta] of Object.entries(lock.packages || {})) {
+  if (!entry || !meta || !meta.version || meta.link) {
+    continue; // the root project entry, or a workspace link
+  }
+  const found = installedVersion(entry);
+  if (found === null) {
+    if (!meta.optional && !meta.devOptional) {
+      problems.push(`${entry}@${meta.version} is locked but NOT installed`);
+    }
+    continue;
+  }
+  if (found !== meta.version) {
+    problems.push(`${entry}: installed ${found}, lock records ${meta.version}`);
+  }
+}
+
+if (problems.length > 0) {
+  process.stderr.write(
+    `the installed npm packages do not match ${manifestPath} and ${lockPath}:\n`
+  );
+  for (const problem of problems) {
+    process.stderr.write(`  ${problem}\n`);
+  }
+  process.exit(1);
+}
+NODE_TREE_CHECK
+}
+
 # kube::node::dirs resolves the paths this library works with and exports
 # KUBE_NODE_MODULES_BIN. On return KUBE_WEB_DIR, KUBE_NODE_PACKAGE_JSON,
 # KUBE_NODE_PACKAGE_LOCK and KUBE_NODE_MODULES_BIN are all non-empty and
@@ -364,6 +850,11 @@ kube::node::dirs() {
 # "node_modules".
 kube::node::module_store() {
   if [[ -n "${KUBE_NODE_MODULES_STORE:-}" ]]; then
+    # An operator-supplied store is validated before it is ever returned: the leaf
+    # has to be named node_modules and the tree has to sit outside the checkout
+    # (or be exactly the in-place path). Both are enforced here rather than
+    # documented, because every later step - including a removal - trusts this value.
+    kube::node::internal::assert_store "${KUBE_NODE_MODULES_STORE}" || return 1
     echo "${KUBE_NODE_MODULES_STORE}"
     return 0
   fi
@@ -414,7 +905,7 @@ kube::node::externalize_modules() {
   fi
 
   kube::node::internal::log_status \
-    "Relocating ${in_tree} to ${store} (keeps the repository's tree-walking gates green)"
+    "Relocating ${in_tree} to ${store} (keeps the repository's tree-walking tools out of it)"
 
   if ! mkdir -p "$(dirname "${store}")"; then
     kube::node::internal::log_error \
@@ -423,31 +914,92 @@ kube::node::externalize_modules() {
     return 1
   fi
 
-  # The freshly installed tree supersedes whatever the store held.
-  kube::node::internal::safe_rm "${store}" || return 1
+  # STAGE, THEN SWAP, THEN DISCARD - in that order, and the order is the point.
+  #
+  # The previous shape deleted the store FIRST and only then moved the new tree in,
+  # so an interruption or a failed move left no store at all: a concurrent reader
+  # lost its dependency tree, and this clone lost the one it had just installed.
+  # Every step below is a rename within one directory, which is atomic, and the old
+  # store is only discarded once the new one is in place.
+  local staging="${store}.staging.$$"
+  local superseded="${store}.superseded.$$"
 
-  if ! mv "${in_tree}" "${store}"; then
+  kube::node::internal::safe_rm "${staging}" "a leftover staging tree" >/dev/null 2>&1 || true
+
+  if ! mv "${in_tree}" "${staging}"; then
     kube::node::internal::log_error \
-      "could not move ${in_tree} to ${store}." \
-      "The dependency tree is still in the repository working tree, which makes hack/verify-boilerplate.sh walk it and fail." \
+      "could not move ${in_tree} to ${staging}." \
+      "The dependency tree is still in the repository working tree, where the repository's" \
+      "tree-walking tooling will find it." \
       "Move it aside by hand, or set KUBE_NODE_MODULES_STORE=${in_tree} to keep it in place deliberately."
+    return 1
+  fi
+
+  # Claim ownership of the staged tree before it becomes the store, so the swap
+  # below and every later rebuild are permitted to touch exactly this tree.
+  kube::node::internal::mark_store "${staging}" || true
+
+  local had_previous=n
+  if [[ -e "${store}" ]]; then
+    # Approve the removal BEFORE anything is renamed, so an unowned store is
+    # reported while the tree is still whole and recoverable.
+    if ! kube::node::internal::assert_removable "${store}" "the previous node_modules store"; then
+      # Put the installed tree back where it came from: refusing to touch somebody
+      # else's store must not also cost this clone its own dependencies.
+      mv "${staging}" "${in_tree}" || true
+      return 1
+    fi
+    if ! mv "${store}" "${superseded}"; then
+      kube::node::internal::log_error \
+        "could not move the previous store ${store} aside." \
+        "Nothing was deleted; the freshly installed tree is at ${staging}."
+      mv "${staging}" "${in_tree}" || true
+      return 1
+    fi
+    had_previous=y
+  fi
+
+  if ! mv "${staging}" "${store}"; then
+    kube::node::internal::log_error \
+      "could not move ${staging} into place at ${store}." \
+      "Nothing was deleted."
+    # Restore whatever was there before, then hand the new tree back to the caller's
+    # working tree so no state is lost.
+    if [[ "${had_previous}" == y ]]; then
+      mv "${superseded}" "${store}" || true
+    fi
+    mv "${staging}" "${in_tree}" || true
     return 1
   fi
 
   if ! ln -sfn "${store}" "${in_tree}"; then
     kube::node::internal::log_error \
       "could not link ${in_tree} to ${store}, so the installed tree is no longer visible to npm or Node." \
+      "The tree itself is intact at ${store}." \
       "Create the symlink by hand, or set KUBE_NODE_MODULES_STORE=${in_tree} and reinstall."
     return 1
+  fi
+
+  # Only now, with the new store in place and linked, is the old one discarded.
+  if [[ "${had_previous}" == y ]]; then
+    kube::node::internal::safe_rm "${superseded}" "the superseded node_modules store" || true
   fi
   return 0
 }
 
 # kube::node::validate checks that this host can run the React test tier. On
-# return node and npm are both present and at or above their required versions,
-# or an actionable message naming the detected version, the required version and
-# the fix has been written to stderr and the status is non-zero. Nothing is
-# created, nothing is installed, no network is used and ${PATH} is untouched.
+# return node and npm are both present and at or above their required versions AND
+# the selected runtime's directory is first on ${PATH}, or an actionable message
+# naming the detected version, the required version and the fix has been written to
+# stderr and the status is non-zero. Nothing is created, nothing is installed and no
+# network is used.
+#
+# THE ONE THING IT CHANGES is ${PATH}, and that is deliberate rather than
+# incidental: npm and every launcher in web/node_modules/.bin begins
+# `#!/usr/bin/env node`, so without this the runtime checked here and the runtime
+# that actually executed the tests could be two different binaries whenever
+# ${NODE_BIN} names one that is not already first. The change is idempotent and is a
+# no-op in the common case.
 #
 # The floors are never relaxed to let provisioning proceed: an older runtime is
 # reported and refused, because "the tests pass on some other Node" is not the
@@ -501,6 +1053,15 @@ kube::node::validate() {
       "The React test tier requires npm ${NPM_VERSION} or greater - that is the version it was verified against." \
       "npm ships with Node.js ${node_have}, so upgrade Node.js, run 'npm install -g npm@${NPM_VERSION}', or set NPM_BIN to a newer npm." \
       "Set NPM_VERSION=<version> only if you deliberately accept an unverified npm; the floor is never lowered automatically."
+    return 1
+  fi
+
+  # The validated runtime becomes the one every `env node` launcher resolves.
+  if ! kube::node::internal::prepend_runtime_path; then
+    kube::node::internal::log_error \
+      "could not resolve the directory holding '${NODE_BIN}', so the validated runtime cannot be" \
+      "put first on PATH." \
+      "Set NODE_BIN to an executable path, for example NODE_BIN=/usr/local/bin/node."
     return 1
   fi
 
@@ -558,10 +1119,41 @@ kube::node::ensure_deps() {
   want=$(kube::node::internal::lockfile_hash) || want=""
   stamp=$(kube::node::internal::lockfile_stamp)
 
+  # The FAST PATH, and the only thing that runs outside the lock: a tree whose stamp
+  # matches AND whose installed packages still reconcile with the lockfile needs
+  # nothing done to it, and must not queue behind another clone's install.
   if [[ -n "${want}" ]] && kube::node::internal::modules_present &&
     [[ -f "${stamp}" ]] && [[ "$(cat "${stamp}" 2>/dev/null)" == "${want}" ]]; then
+    if kube::node::internal::tree_matches_lock; then
+      V=4 kube::node::internal::log_info \
+        "the locked npm dependency set from ${KUBE_NODE_PACKAGE_LOCK} is already installed"
+      return 0
+    fi
+    kube::node::internal::log_status \
+      "The stamp at ${stamp} matches but the installed packages do not; reinstalling"
+  fi
+
+  local store
+  store=$(kube::node::module_store) || return 1
+  kube::node::internal::with_lock "${store}.lock" \
+    kube::node::internal::ensure_deps_locked "${want}" "${stamp}"
+}
+
+# kube::node::internal::ensure_deps_locked is the mutating body of
+# kube::node::ensure_deps and must only be called while the provisioning lock for the
+# store is held. $1 is the expected stamp value and $2 the stamp path. On return it
+# guarantees exactly what kube::node::ensure_deps does.
+kube::node::internal::ensure_deps_locked() {
+  local want=${1:-}
+  local stamp=${2:?a stamp path is required}
+
+  # Re-checked under the lock: another process may have installed the same set while
+  # this one waited.
+  if [[ -n "${want}" ]] && kube::node::internal::modules_present &&
+    [[ -f "${stamp}" ]] && [[ "$(cat "${stamp}" 2>/dev/null)" == "${want}" ]] &&
+    kube::node::internal::tree_matches_lock; then
     V=4 kube::node::internal::log_info \
-      "the locked npm dependency set from ${KUBE_NODE_PACKAGE_LOCK} is already installed"
+      "the locked npm dependency set was installed while this run waited"
     return 0
   fi
 
@@ -571,14 +1163,16 @@ kube::node::ensure_deps() {
   # --prefix instead of a `cd`, so this never changes the caller's working
   # directory. --no-audit and --no-fund keep a provisioning step from making
   # extra registry calls and printing funding notices into a gate's output.
-  if ! "${NPM_BIN}" --prefix "${KUBE_WEB_DIR}" ci --no-audit --no-fund; then
+  # kube::node::exec so that npm - itself a `#!/usr/bin/env node` script - runs under
+  # the runtime this library validated rather than whichever node ${PATH} finds first.
+  if ! kube::node::exec "${NPM_BIN}" --prefix "${KUBE_WEB_DIR}" ci --no-audit --no-fund; then
     kube::node::internal::log_error \
       "'${NPM_BIN} --prefix ${KUBE_WEB_DIR} ci' failed, so the React test tier is not provisioned." \
       "This step needs network access to the npm registry." \
       "If the failure names an out-of-sync lockfile, then ${KUBE_NODE_PACKAGE_LOCK} and ${KUBE_NODE_PACKAGE_JSON} genuinely disagree and must be reconciled and committed; this step will not rewrite the lockfile for you." \
       "Nothing was recorded, so the install will be retried on the next run."
-    # npm can leave a partial tree behind. Keep the tree-walking gates green by
-    # externalising whatever is there, and leave no stamp calling it good.
+    # npm can leave a partial tree behind. Keep it out of the working tree, and
+    # leave no stamp calling it good.
     kube::node::externalize_modules || true
     return 1
   fi
@@ -590,6 +1184,19 @@ kube::node::ensure_deps() {
     kube::node::internal::log_error \
       "'${NPM_BIN} ci' reported success but ${KUBE_NODE_MODULES_BIN} is still missing." \
       "Remove ${KUBE_WEB_DIR}/node_modules and re-run to install from scratch."
+    return 1
+  fi
+
+  # The tree is reconciled AFTER the install as well as before it, so a stamp is only
+  # ever written over a tree that has been shown to match the lockfile. Without this,
+  # a partially applied install would be stamped as good and the fast path would
+  # trust it on every subsequent run.
+  if ! kube::node::internal::tree_matches_lock; then
+    kube::node::internal::log_error \
+      "the installed packages still do not match ${KUBE_NODE_PACKAGE_LOCK} after 'npm ci'" \
+      "(the report above names each one)." \
+      "Nothing was recorded, so the install will be retried. Remove ${KUBE_WEB_DIR}/node_modules" \
+      "and re-run to install from scratch."
     return 1
   fi
 
@@ -663,7 +1270,9 @@ kube::node::activate() {
 # Example: kube::node::run test -- --coverage
 kube::node::run() {
   kube::node::dirs
-  "${NPM_BIN}" --prefix "${KUBE_WEB_DIR}" run "$@"
+  # Through kube::node::exec, so the script runs under the runtime this library
+  # selected: npm and every launcher it invokes begin `#!/usr/bin/env node`.
+  kube::node::exec "${NPM_BIN}" --prefix "${KUBE_WEB_DIR}" run "$@"
 }
 
 # kube::node::setup_env will check that a suitable Node.js and npm are available,

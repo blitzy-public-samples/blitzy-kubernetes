@@ -101,7 +101,7 @@ import os
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 # Audit annotation prefixes, copied from the constants the mutating admission
 # dispatcher writes them with, at
@@ -137,6 +137,7 @@ AuditAnnotationsFilter = Callable[[str, str], bool]
 AuditLogSource = str | os.PathLike[str] | Iterable[str]
 
 __all__ = [
+    "AUDIT_EVENT_KIND",
     "AUTHORIZATION_DECISION_ANNOTATION_KEY",
     "MUTATION_AUDIT_ANNOTATION_PREFIX",
     "PATCH_AUDIT_ANNOTATION_PREFIX",
@@ -149,6 +150,7 @@ __all__ = [
     "audit_event_from_raw",
     "check_audit_lines",
     "check_audit_lines_filtered",
+    "redact_event",
 ]
 
 
@@ -257,14 +259,119 @@ class MissingEventsReport:
         return (
             f"missing {len(self.missing_events)} events\n"
             "\n"
-            f"- first event checked: {self.first_event_checked!r}\n"
+            f"- first event checked: {self._render_raw(self.first_event_checked)}\n"
             "\n"
-            f"- last event checked: {self.last_event_checked!r}\n"
+            f"- last event checked: {self._render_raw(self.last_event_checked)}\n"
             "\n"
             f"- number of events checked: {self.num_events_checked}\n"
             "\n"
             f"- missing events: {self.missing_events!r}"
         )
+
+    @staticmethod
+    def _render_raw(raw: RawEvent | None) -> str:
+        """Render a raw observed event for the report, WITHOUT its payload bodies.
+
+        The two raw events are the whole reason this report needs redaction. Go
+        renders them with %#v, and on a Secret create in blocking mode the
+        `requestObject` member is the Secret - so an unredacted report prints
+        credential material into a CI log while explaining why credential material
+        must not be logged. `redact_event` keeps the envelope, which is what
+        identifies the event, and replaces each payload with its type and size.
+
+        `missing_events` needs no redaction: those are EXPECTATIONS, built by the
+        test from `AuditEvent`, which models `request_object` and `response_object`
+        as booleans and holds no body at all.
+        """
+        if raw is None:
+            return "None"
+        return repr(redact_event(raw))
+
+
+#: The audit `kind` every line must declare.
+#:
+#: `audit.Codecs.UniversalDecoder(version)` decodes into an `auditinternal.Event`,
+#: which fails on a document whose kind is something else, so requiring it is part
+#: of reproducing that decoder rather than an addition to it.
+AUDIT_EVENT_KIND: Final[str] = "Event"
+
+#: The wire keys whose VALUE must never be rendered in a diagnostic.
+#:
+#: `requestObject` and `responseObject` carry the API object bodies. On a Secret
+#: event a `responseObject` is the Secret itself, and F-006-RQ-002 exists precisely
+#: because that body must not be recorded - so printing it into a CI log while
+#: reporting the violation would be the same disclosure by another route. Their
+#: PRESENCE and TYPE are what the guard asserts on, and presence and type are all a
+#: reader needs, so that is all that is ever shown.
+#:
+#: `annotations` is included because the authorization annotation can carry a
+#: reason string quoting the request, and a webhook patch annotation carries a JSON
+#: patch of the object.
+_REDACTED_WIRE_KEYS: Final[frozenset[str]] = frozenset(
+    {"requestObject", "responseObject", "annotations"}
+)
+
+#: Placeholder substituted for a redacted value.
+_REDACTED: Final[str] = "<redacted>"
+
+#: Longest raw line rendered in a diagnostic, in characters.
+#:
+#: A blocking-mode audit log line for a create carries the whole request object, so
+#: an unbounded excerpt can be many kilobytes of one CI message. The bound is
+#: generous enough to show the envelope - level, stage, verb, user, objectRef - and
+#: short enough that a failure stays readable.
+_MAX_DIAGNOSTIC_CHARS: Final[int] = 400
+
+
+def redact_event(raw: RawEvent) -> dict[str, object]:
+    """Return a copy of ``raw`` with every payload-bearing value replaced by metadata.
+
+    The envelope is preserved verbatim - level, stage, verb, user, objectRef,
+    responseStatus - because that is what identifies which event a diagnostic is
+    about. Only the members named in :data:`_REDACTED_WIRE_KEYS` are replaced, and
+    each is replaced by its JSON type and, for a mapping, its key COUNT: enough to
+    tell "present and an object with 5 keys" from "present but a boolean", which is
+    exactly the distinction the V6 guard turns on, and nothing more.
+
+    Public because a caller building its own failure message needs the same
+    redaction, and because a test can prove the redaction directly.
+    """
+    redacted: dict[str, object] = {}
+    for key, value in raw.items():
+        if key not in _REDACTED_WIRE_KEYS or value is None:
+            redacted[key] = value
+            continue
+        if isinstance(value, dict):
+            redacted[key] = f"{_REDACTED} object with {len(value)} key(s)"
+        elif isinstance(value, list):
+            redacted[key] = f"{_REDACTED} array of {len(value)} item(s)"
+        else:
+            redacted[key] = f"{_REDACTED} {type(value).__name__}"
+    return redacted
+
+
+def _redacted_line(line: str) -> str:
+    """Render one raw log line for a diagnostic: redacted if decodable, bounded always.
+
+    A line that will not decode cannot be redacted field by field, so it is
+    truncated instead. That is the honest trade: the reader needs to see the text
+    that failed to parse, and a malformed line is by definition not a document
+    whose payload members can be located.
+    """
+    try:
+        decoded = json.loads(line)
+    except ValueError:
+        decoded = None
+    if isinstance(decoded, dict):
+        rendered = json.dumps(redact_event(decoded), sort_keys=True)
+    else:
+        rendered = line
+    if len(rendered) <= _MAX_DIAGNOSTIC_CHARS:
+        return rendered
+    return (
+        f"{rendered[:_MAX_DIAGNOSTIC_CHARS]}... "
+        f"[truncated, {len(rendered)} characters total]"
+    )
 
 
 class AuditLogDecodeError(Exception):
@@ -276,9 +383,13 @@ class AuditLogDecodeError(Exception):
     on the exception: the V6 predicate escalates a decode failure by aborting
     the poll, and the diagnostic gathered so far has to survive that.
 
-    Raised only for a line that cannot be decoded. A merely-absent expectation
-    is reported through MissingEventsReport.missing_events and never raises,
-    which is what keeps the poll-until-converged loop working.
+    Raised only for a line that cannot be decoded, which covers three cases, all
+    three of which Go's UniversalDecoder(version) also fails: the line is not JSON
+    or not a JSON object; its apiVersion or kind is not the audit Event of the
+    requested version; or one of its members carries the wrong wire TYPE for the
+    field it decodes into. A merely-absent expectation is reported through
+    MissingEventsReport.missing_events and never raises, which is what keeps the
+    poll-until-converged loop working.
     """
 
     def __init__(self, message: str, report: MissingEventsReport) -> None:
@@ -289,46 +400,209 @@ class AuditLogDecodeError(Exception):
         self.report = report
 
 
-def _as_mapping(value: Any) -> RawEvent | None:
-    """Narrow a decoded JSON value to a mapping, or None if it is not one.
+def _as_mapping(value: Any, *, field_path: str) -> RawEvent | None:
+    """Narrow a decoded JSON value to a mapping; absent and null give None, anything else raises.
 
     No single Go statement to port: this stands in for the `!= nil` test Go
     applies to each pointer-to-struct field of an audit event, at audit.go 144
     (ObjectRef), 148 (ResponseStatus) and 157 (ImpersonatedUser). A field that is
     absent, or explicitly null in the log, is nil in Go and None here, so both
     skip the block that would have read it.
+
+    STRICT beyond that `!= nil` test, deliberately. This used to return None for
+    ANY non-mapping, which made `"objectRef": "secrets"` indistinguishable from an
+    absent objectRef - the projected event kept resource "" and the V6 guard, which
+    keys on `resource == "secrets"`, skipped it. Go never reaches that state: its
+    decoder cannot put a JSON string into a *ObjectReference and fails the whole
+    document, so a wrong type is rejected here rather than read as absence.
+
+    Raises:
+        AuditLogDecodeError: if the value is present, not null, and not an object.
     """
-    return value if isinstance(value, dict) else None
+    __tracebackhide__ = True
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _shape_error(
+            field_path,
+            f"expected a JSON object, got {_json_type_name(value)}",
+        )
+    return value
 
 
-def _text(mapping: RawEvent | None, key: str) -> str:
-    """Read a string field, projecting absent, null and non-mapping to "".
+def _text(mapping: RawEvent | None, key: str, *, field_path: str) -> str:
+    """Read a STRING field strictly: absent and null project to "", anything else raises.
 
-    No single Go statement to port either: it exists because Go's decoder gives
-    a missing or null JSON string the "" zero value before the composite literal
-    at audit.go 137-143 ever sees it, whereas json.loads would hand back None.
-    Every string projection funnels through here so that None never reaches an
-    AuditEvent field, where it would compare unequal to an expectation's "".
+    No single Go statement to port: this stands in for what Go's decoder does
+    before the composite literal at audit.go 137-143 ever runs. A missing or null
+    JSON string becomes the "" zero value there, which is why "" is produced here
+    too - an expectation that leaves a field unset must match an event whose field
+    is absent.
+
+    STRICT, AND THE STRICTNESS IS THE POINT. This used to end in `str(value)`,
+    which coerced a JSON number, boolean, array or object into a string: a line
+    carrying `"level": 3` projected to `"3"`, and `"resource": true` projected to
+    `"True"`. Neither is what Go does - its decoder rejects the document outright -
+    and both turn a malformed line into evidence that can then be MATCHED against
+    an expectation. For an audit-fidelity control that is the difference between
+    proving a level and proving that some string existed. `"level"` is the field
+    F-006-RQ-002 is entirely about, so coercion there is not a cosmetic issue.
+
+    Raises:
+        AuditLogDecodeError: if the value is present, not null, and not a string.
     """
+    __tracebackhide__ = True
     if mapping is None:
         return ""
     value = mapping.get(key)
     if value is None:
         return ""
-    return str(value)
+    if not isinstance(value, str):
+        raise _shape_error(
+            field_path,
+            f"expected a JSON string, got {_json_type_name(value)}",
+        )
+    return value
+
+
+def _json_type_name(value: object) -> str:
+    """Name the JSON type of ``value`` the way a wire-shape message should read.
+
+    The value itself is never included: an audit event's members can carry object
+    bodies, and a shape complaint has no need of the content it is complaining
+    about (see :data:`_REDACTED_WIRE_KEYS`).
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _shape_error(field_path: str, detail: str) -> AuditLogDecodeError:
+    """Build the exception raised for a wrong wire TYPE inside an otherwise-decodable line.
+
+    Carries an empty report rather than the caller's: this is raised from the
+    projection, which the public `audit_event_from_raw` can be called without a
+    report at all. `check_audit_lines_filtered` catches and re-raises with its own
+    partial report attached, so the caller-facing contract is unchanged.
+
+    The message names the field path and the two types and NOTHING ELSE - no value,
+    no surrounding line - because a wrong type in an audit event is often a wrong
+    type in a member that carries an API object.
+    """
+    return AuditLogDecodeError(
+        f"malformed audit event: {field_path} {detail}. Go's audit decoder rejects this "
+        "document rather than coercing it, so it is rejected here too: a coerced value is "
+        "evidence that can be matched against an expectation, which would let a malformed "
+        "line satisfy F-006-RQ-002.",
+        MissingEventsReport(),
+    )
 
 
 def _response_code(response_status: RawEvent) -> int:
-    """Project responseStatus.code, the only numeric field. audit.go 148-150.
+    """Project responseStatus.code strictly. audit.go 148-150.
 
-    Go's Code is an int32 with omitempty, so an absent code is 0. bool is a
-    subclass of int in Python, but a JSON true is not a status code, so it is
-    excluded explicitly rather than silently projecting to 1.
+    Go's Code is an int32 with omitempty, so an absent or null code is 0. Anything
+    else present must be a JSON integer: a boolean is excluded explicitly because
+    `bool` is a subclass of `int` in Python, and a float or a string is rejected
+    rather than truncated, matching Go's decoder - which parses an int32 field from
+    the literal text with strconv and fails on "403" or 403.5 alike.
+
+    This matters beyond tidiness: the V2 and V7 controls assert an exact 403, so a
+    code that arrived as the string "403" and was silently coerced to 403 would let
+    a malformed line satisfy a denial assertion.
+
+    Raises:
+        AuditLogDecodeError: if `code` is present, not null, and not a JSON integer.
     """
+    __tracebackhide__ = True
     value = response_status.get("code")
-    if isinstance(value, bool) or not isinstance(value, int | float):
+    if value is None:
         return 0
-    return int(value)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _shape_error(
+            "responseStatus.code",
+            f"expected a JSON integer, got {_json_type_name(value)}",
+        )
+    return value
+
+
+def _joined_groups(groups: Any) -> str:
+    """Canonicalise impersonatedUser.groups into one comparable string. audit.go 158-160.
+
+    Sort then join, exactly as `sort.Strings` followed by `strings.Join(..., ",")`
+    does. The sort is not cosmetic: an expectation carries one canonical string, so
+    skipping it would make matching depend on the order the server happened to
+    serialise the groups in. sorted() also leaves the raw mapping untouched, where
+    Go's in-place sort mutates the very event that first_event_checked and
+    last_event_checked expose.
+
+    Absent and null both give "", because Go runs the join unconditionally inside
+    the `e.ImpersonatedUser != nil` block and `strings.Join(nil, ",")` is "".
+
+    STRICT on shape. This used to be guarded by `if isinstance(groups, list)` with
+    `str(group)` over the members, which meant `"groups": "system:masters"` was read
+    as absence and `"groups": [1, 2]` became "1,2". Go's Groups is a []string: a
+    string there fails to decode, and so does a numeric member. Both are rejected.
+
+    Raises:
+        AuditLogDecodeError: if groups is present, not null, and not an array of
+            strings.
+    """
+    __tracebackhide__ = True
+    if groups is None:
+        return ""
+    if not isinstance(groups, list):
+        raise _shape_error(
+            "impersonatedUser.groups",
+            f"expected a JSON array of strings, got {_json_type_name(groups)}",
+        )
+    for position, group in enumerate(groups):
+        if not isinstance(group, str):
+            raise _shape_error(
+                f"impersonatedUser.groups[{position}]",
+                f"expected a JSON string, got {_json_type_name(group)}",
+            )
+    return ",".join(sorted(groups))
+
+
+def _annotation_text(name: str, value: Any) -> str:
+    """Read one annotation value strictly. Go's Annotations is a map[string]string.
+
+    A JSON null gives "": unmarshalling null into a map's string value leaves that
+    value at its zero, and the key is still present, which is why an annotation
+    present-but-null must project to "" rather than being dropped.
+
+    Anything else non-string is rejected. This used to be `str(value)`, which turned
+    `{"authorization.k8s.io/decision": true}` into the string "True" - an
+    authorize_decision that is neither "allow" nor "forbid" but is nonetheless a
+    non-empty string, so it read as a decision having been recorded. Go rejects the
+    document instead: `json: cannot unmarshal bool into Go value of type string`.
+
+    The annotation NAME is included in the message and the value is not: annotation
+    values carry admission webhook patches, which are request-body fragments.
+
+    Raises:
+        AuditLogDecodeError: if the value is present, not null, and not a string.
+    """
+    __tracebackhide__ = True
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise _shape_error(
+            f"annotations[{name}]",
+            f"expected a JSON string, got {_json_type_name(value)}",
+        )
+    return value
 
 
 @contextmanager
@@ -364,7 +638,7 @@ def _decode_failure(line: str, version: str) -> str:
     reader of a CI failure is often not the author of the test.
     """
     return (
-        f"failed decoding buf: {line}, apiVersion: {version}"
+        f"failed decoding buf: {_redacted_line(line)}, apiVersion: {version}"
         " (F-006-RQ-002: sensitive-resource audit fidelity is asserted from the"
         " audit log, so a line that will not decode invalidates the check)"
     )
@@ -395,6 +669,17 @@ def _decode_line(line: str, version: str, report: MissingEventsReport) -> RawEve
         # Valid JSON, but a scalar or a list is not an audit event.
         raise AuditLogDecodeError(_decode_failure(line, version), report)
     if decoded.get("apiVersion") != version:
+        raise AuditLogDecodeError(_decode_failure(line, version), report)
+    if decoded.get("kind") != AUDIT_EVENT_KIND:
+        # The other half of what UniversalDecoder(version) enforced, and it was
+        # missing. Go decodes through the audit scheme, which resolves a document
+        # by its FULL GroupVersionKind: apis/audit/install/install.go registers
+        # Event and EventList under audit.k8s.io/v1, so a line carrying
+        # `"kind": "EventList"`, an empty kind, or no kind at all does not decode
+        # into an Event and audit.go 109 returns the error. Checking apiVersion
+        # alone accepted every one of those, and an EventList - whose `items` the
+        # projection never reads - projected to a wholly empty AuditEvent that
+        # then matched nothing while being counted as a checked event.
         raise AuditLogDecodeError(_decode_failure(line, version), report)
     return decoded
 
@@ -489,7 +774,16 @@ def check_audit_lines_filtered(
             # Every line, so this ends up holding the last one. audit.go 111-114.
             report.last_event_checked = raw
 
-            event = audit_event_from_raw(raw, custom_annotations_filter)
+            try:
+                event = audit_event_from_raw(raw, custom_annotations_filter)
+            except AuditLogDecodeError as exc:
+                # The projection raises for a wrong wire TYPE, which Go's decoder
+                # would have rejected at audit.go 106-110 before any projection ran.
+                # It has no report of its own to hand back, so the partial report
+                # gathered so far is attached here, keeping the caller-facing
+                # contract identical to a JSON or version failure: one exception
+                # type, always carrying a report.
+                raise AuditLogDecodeError(str(exc), report) from exc
             expectations.mark(event)
             report.all_events.append(event)
             index += 1
@@ -515,24 +809,39 @@ def audit_event_from_raw(
     not content tests. An empty-but-present responseObject on a Secret event is
     the regression the V6 guard exists to catch, and a truthiness test would
     report it as absent.
+
+    Every member is read at its declared wire type and a mismatch raises rather
+    than being coerced, because Go reaches this function only through a decoder
+    that has already rejected any such document. See _text, _as_mapping,
+    _response_code, _joined_groups and _annotation_text for the individual rules.
+
+    Raises:
+        AuditLogDecodeError: if any member carries the wrong wire type for the
+            field it projects onto. Raised with an empty report, since this
+            function has no scan state; check_audit_lines_filtered re-raises with
+            its own partial report attached.
     """
     event = AuditEvent(
-        level=_text(raw, "level"),
-        stage=_text(raw, "stage"),
-        request_uri=_text(raw, "requestURI"),
-        verb=_text(raw, "verb"),
+        level=_text(raw, "level", field_path="level"),
+        stage=_text(raw, "stage", field_path="stage"),
+        request_uri=_text(raw, "requestURI", field_path="requestURI"),
+        verb=_text(raw, "verb", field_path="verb"),
         # e.User is a value rather than a pointer in Go, so an absent user is
         # the zero UserInfo and its Username is "".
-        user=_text(_as_mapping(raw.get("user")), "username"),
+        user=_text(
+            _as_mapping(raw.get("user"), field_path="user"),
+            "username",
+            field_path="user.username",
+        ),
     )
 
-    object_ref = _as_mapping(raw.get("objectRef"))
+    object_ref = _as_mapping(raw.get("objectRef"), field_path="objectRef")
     if object_ref is not None:
-        event.namespace = _text(object_ref, "namespace")
+        event.namespace = _text(object_ref, "namespace", field_path="objectRef.namespace")
         # The field the V6 guard keys on: `e.Resource == "secrets"`.
-        event.resource = _text(object_ref, "resource")
+        event.resource = _text(object_ref, "resource", field_path="objectRef.resource")
 
-    response_status = _as_mapping(raw.get("responseStatus"))
+    response_status = _as_mapping(raw.get("responseStatus"), field_path="responseStatus")
     if response_status is not None:
         event.code = _response_code(response_status)
 
@@ -544,27 +853,24 @@ def audit_event_from_raw(
     if raw.get("requestObject") is not None:
         event.request_object = True
 
-    impersonated = _as_mapping(raw.get("impersonatedUser"))
+    impersonated = _as_mapping(raw.get("impersonatedUser"), field_path="impersonatedUser")
     if impersonated is not None:
-        event.impersonated_user = _text(impersonated, "username")
-        groups = impersonated.get("groups")
-        if isinstance(groups, list):
-            # Sort then join, canonicalising exactly as sort.Strings followed by
-            # strings.Join does at audit.go 159-160. The sort is not cosmetic: an
-            # expectation carries one canonical string, so skipping it would make
-            # matching depend on the order the server happened to serialise the
-            # groups in. sorted() also leaves the raw mapping untouched, where
-            # Go's in-place sort mutates the very event that
-            # first_event_checked and last_event_checked expose.
-            event.impersonated_groups = ",".join(sorted(str(group) for group in groups))
+        event.impersonated_user = _text(
+            impersonated, "username", field_path="impersonatedUser.username"
+        )
+        event.impersonated_groups = _joined_groups(impersonated.get("groups"))
 
-    annotations = _as_mapping(raw.get("annotations"))
+    annotations = _as_mapping(raw.get("annotations"), field_path="annotations")
     if annotations is None:
         # Go indexes a nil map at audit.go 162, which yields "" and routes
         # nothing, leaving all three maps nil.
         return event
 
-    event.authorize_decision = _text(annotations, AUTHORIZATION_DECISION_ANNOTATION_KEY)
+    event.authorize_decision = _text(
+        annotations,
+        AUTHORIZATION_DECISION_ANNOTATION_KEY,
+        field_path=f"annotations[{AUTHORIZATION_DECISION_ANNOTATION_KEY}]",
+    )
 
     # Accumulated locally and assigned once, so each map stays None unless
     # something actually lands in it. This is Go's lazy
@@ -575,8 +881,11 @@ def audit_event_from_raw(
     mutation: dict[str, str] | None = None
     custom: dict[str, str] | None = None
     for key, value in annotations.items():
-        name = str(key)
-        text = "" if value is None else str(value)
+        # json.loads only ever produces string keys for an object, so `key` is
+        # already a str; naming it keeps the loop readable next to Go's
+        # `for k, v := range e.Annotations`.
+        name = key
+        text = _annotation_text(name, value)
         # Order matters and follows audit.go 164-179: the patch prefix, then the
         # mutation prefix, then the caller's filter. The filter has to stay last
         # or it could claim a webhook annotation that belongs in one of the two

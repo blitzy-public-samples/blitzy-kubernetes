@@ -159,6 +159,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -189,6 +190,7 @@ __all__ = [
     "StreamReduction",
     "Verdict",
     "build_manifest",
+    "check_go_verdict_domain",
     "default_baseline_path",
     "derive_verdicts_from_source_inventory",
     "go_rewrite_subtest_name",
@@ -844,6 +846,22 @@ def reduce_event_stream(lines: Iterable[str], *, source: str = "<stream>") -> St
         raw_test = event.get("Test")
         if raw_test is None or raw_test == "":
             # The package-level summary. Recorded separately; never a verdict.
+            previous_status = package_status.get(package)
+            if previous_status is not None:
+                # A conforming stream emits exactly ONE terminal action per package.
+                # A second one means the package was listed twice on the command
+                # line, or two streams were concatenated - and because this is a
+                # mapping, the later action SILENTLY OVERWRITES the earlier. A
+                # `fail` followed by a `pass` therefore erased the failure, which is
+                # the precise shape #21 exists to close: the run's own summary said
+                # the package failed and the manifest recorded it as clean.
+                raise BaselineError(
+                    f"line {index + 1} of {source} reports a SECOND terminal action for "
+                    f"package {package!r}: {previous_status!r} then {action!r}. Exactly one "
+                    f"is expected per package, and keeping the later one would let a `fail` "
+                    f"be overwritten by a `pass`. Re-run the oracle with each package listed "
+                    f"once, and do not concatenate streams."
+                )
             package_status[package] = action
             continue
         if not isinstance(raw_test, str):
@@ -1461,6 +1479,138 @@ def derive_verdicts_from_source_inventory(
     return tuple(verdicts)
 
 
+def check_go_verdict_domain(
+    reduction: StreamReduction,
+    *,
+    packages: Sequence[str],
+    require_requested: bool,
+) -> None:
+    """Prove a reduced Go stream describes a COMPLETE, PASSING verdict domain.
+
+    Called on both Go routes before anything is appended to the rows, because the
+    two failures it closes are invisible afterwards.
+
+    FOUR OBLIGATIONS, each closing a shape that previously produced a manifest:
+
+    1. AT LEAST ONE REAL GO VERDICT. A stream that yields none - a package with no
+       test files, a `-run` filter that matched nothing, a `go vet`-only
+       invocation, an empty file - used to be rescued by the appended non-Go
+       baseline row, and :func:`build_manifest` only ever rejected ZERO rows. The
+       result was a one-row manifest, written without complaint, that satisfied
+       every parity assertion vacuously: the contract quantifies over the recorded
+       verdicts, so a baseline holding one Python case asserts nothing about the
+       648 Go cases it silently dropped. The non-Go row is a SUPPLEMENT to a
+       measured Go domain and may never be the whole of one.
+    2. EVERY PACKAGE THAT PRODUCED VERDICTS REPORTS A TERMINAL ACTION. A package
+       whose tests appear but whose summary does not is a stream that ended
+       mid-package - exactly how a killed, truncated or partially redirected run
+       manifests when the truncation happens to land on a line boundary, where
+       :func:`reduce_event_stream`'s JSON check cannot see it.
+    3. EVERY TERMINAL ACTION IS ``pass``. This is the case the reduction was
+       already computing and the caller was throwing away: a package that reports
+       `fail` while every one of its verdicts reports `pass` means the failure was
+       a BUILD ERROR, a ``TestMain`` abort or a panic outside any test. The rows
+       look perfect. Recording them would pin a baseline taken from a run the
+       toolchain itself called failed. The run route's exit-code check does not
+       cover this, because a package-level failure does not always give `go test` a
+       non-zero exit in a multi-package run, and the stream route has no exit code
+       at all.
+    4. EVERY REQUESTED PACKAGE IS PRESENT. A misspelled or silently-empty package
+       contributes nothing, and a domain that is missing a package cannot be told
+       apart from a domain where that package's behaviours never existed.
+
+    Args:
+        reduction: The reduced stream.
+        packages: The package PATTERNS whose presence is required by obligation 4,
+            in whatever spelling the caller used. Each is normalised through
+            :func:`import_path_for_package_spec` before comparison, because the
+            runner passes repository-relative patterns (``./cluster/gce/gci/``)
+            while the stream reports import paths
+            (``k8s.io/kubernetes/cluster/gce/gci``) - comparing the two directly
+            makes obligation 4 fire on every well-formed run, which is how this was
+            first caught.
+        require_requested: Whether obligation 4 applies. True for a run this
+            process launched, where ``packages`` IS the ``go test`` argument list.
+            False for a caller-supplied stream whose package list was not stated,
+            where the recorded scope is whatever the stream happens to describe.
+
+    Raises:
+        BaselineError: On any of the four, naming what was seen.
+    """
+    if not reduction.verdicts:
+        raise BaselineError(
+            f"the Go oracle produced ZERO verdicts from {reduction.source} "
+            f"({reduction.event_count} events decoded, package summaries: "
+            f"{dict(sorted(reduction.package_status.items())) or 'none'}). "
+            f"Refusing to build a baseline from it, with or without the non-Go row: a "
+            f"manifest whose only row is the Python boilerplate case satisfies every "
+            f"parity assertion VACUOUSLY, because the contract is quantified over the "
+            f"recorded verdicts. Check that the packages actually contain tests, that the "
+            f"stream is the whole stream, and that no filter excluded everything."
+        )
+
+    packages_with_verdicts = {verdict.package for verdict in reduction.verdicts}
+    unsummarised = sorted(packages_with_verdicts - set(reduction.package_status))
+    if unsummarised:
+        raise BaselineError(
+            f"{len(unsummarised)} package(s) in {reduction.source} reported verdicts but no "
+            f"terminal package action: {unsummarised}. `go test -json` closes every package "
+            f"with one, so its absence means the stream ENDED MID-PACKAGE - a killed, "
+            f"disk-full or partially redirected run whose truncation landed on a line "
+            f"boundary, where a JSON check cannot see it. Every verdict after that point is "
+            f"missing, and a missing verdict is indistinguishable from a behaviour that "
+            f"never existed. Re-capture the stream."
+        )
+
+    non_passing = sorted(
+        f"{package}={status}"
+        for package, status in reduction.package_status.items()
+        if status != "pass"
+    )
+    if non_passing:
+        failing_verdicts = [v.go_id for v in reduction.verdicts if v.action != "pass"]
+        raise BaselineError(
+            f"{len(non_passing)} package(s) in {reduction.source} did not pass: "
+            f"{non_passing}. Non-passing verdicts: "
+            f"{failing_verdicts[:20] or 'NONE - every individual test passed'}"
+            f"{' (and more)' if len(failing_verdicts) > 20 else ''}. "
+            f"A package that fails while all of its tests pass is a BUILD ERROR, a TestMain "
+            f"abort or a panic outside any test: the rows look perfect and the run was not. "
+            f"The measured baseline is 100 percent pass with zero failures and zero skips, "
+            f"so this must be fixed rather than recorded."
+        )
+
+    if not require_requested:
+        return
+
+    # Normalised, and de-duplicated afterwards: `cluster/gce/gci` and
+    # `./cluster/gce/gci/` are the same package asked for twice.
+    requested = tuple(
+        dict.fromkeys(
+            path for path in (import_path_for_package_spec(spec) for spec in packages) if path
+        )
+    )
+    summarised = set(reduction.package_status) | packages_with_verdicts
+    # A recursive pattern names a SUBTREE, so any package beneath it satisfies it.
+    # Requiring the root itself to report an outcome would fail every `/...` run,
+    # since the root directory usually holds no tests of its own.
+    absent = [
+        package
+        for package in requested
+        if package not in summarised
+        and not any(seen.startswith(f"{package}/") for seen in summarised)
+    ]
+    if absent:
+        raise BaselineError(
+            f"{len(absent)} requested package(s) produced no outcome in {reduction.source}: "
+            f"{absent}. Packages seen: {sorted(summarised)}. A requested package that "
+            f"contributes nothing is either misspelled or holds no tests, and either way the "
+            f"manifest's declared domain would be narrower than the domain that was asked "
+            f"for - which the parity contract cannot tell apart from those behaviours never "
+            f"having existed."
+        )
+
+
 def _non_go_baseline_verdict() -> Verdict:
     """The single non-Go baseline row.
 
@@ -1748,6 +1898,7 @@ def validate_manifest(manifest: object) -> None:
     for index, row in enumerate(rows):
         verdicts.append(_validated_row(row, index))
 
+    _validate_row_uniqueness(verdicts)
     _validate_row_order(verdicts)
     _validate_counts(manifest["counts"], verdicts)
     _validate_packages(manifest["packages"], verdicts)
@@ -1822,6 +1973,43 @@ def _validated_row(row: object, index: int) -> Verdict:
         action=str(action),
         elapsed=None if elapsed is None else float(elapsed),
     )
+
+
+def _validate_row_uniqueness(verdicts: Sequence[Verdict]) -> None:
+    """Require every ``(package, test, subtest)`` triple to appear exactly once.
+
+    INVARIANT LOCKED: every recorded identity is reachable. The contract keys on the
+    triple, so a duplicate makes one row of the pair unprovable - and if the two
+    carry different actions, WHICH one the contract compares against is decided by
+    a dictionary insertion order rather than by anything a reader can see.
+
+    THIS CHECK IS SEPARATE FROM THE ORDERING CHECK ON PURPOSE, because the ordering
+    check cannot substitute for it. :func:`_validate_row_order` compares the row
+    order against ``sorted(rows)``, and sorting a list that already holds adjacent
+    duplicates returns it unchanged - so a duplicated row is not merely missed, it
+    is INVISIBLE to that comparison. ``counts`` cannot catch it either: they are
+    computed from the same rows, so a duplicated row is counted twice on both sides
+    and the totals agree. :func:`build_manifest` did reject duplicates, but a
+    manifest reaching ``--check``, or read back from disk, or assembled by a caller
+    using the library API directly, never passed through it - which is exactly the
+    path a hand-edited artifact takes.
+    """
+    counted = Counter(verdict.triple for verdict in verdicts)
+    duplicates = sorted(triple for triple, seen in counted.items() if seen > 1)
+    if duplicates:
+        rendered = [
+            f"{package} :: {test}{'/' + subtest if subtest else ''} (x{counted[triple]})"
+            for triple in duplicates
+            for package, test, subtest in [triple]
+        ]
+        raise BaselineError(
+            f"{len(duplicates)} duplicated (package, test, subtest) identit(ies) in "
+            f"verdicts: {rendered[:20]}"
+            f"{' (and more)' if len(rendered) > 20 else ''}. The parity contract keys on "
+            f"that triple, so one row of each pair is unreachable, and if the two disagree "
+            f"on `action` the comparison silently depends on which was indexed last. "
+            f"Regenerate the manifest rather than de-duplicating by hand."
+        )
 
 
 def _validate_row_order(verdicts: Sequence[Verdict]) -> None:
@@ -2104,14 +2292,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_packages(requested: Sequence[str] | None) -> tuple[str, ...]:
-    """Choose the package list: CLI, then environment, then the measured scope."""
+def _resolve_packages(requested: Sequence[str] | None) -> tuple[tuple[str, ...], bool]:
+    """Choose the package list: CLI, then environment, then the measured scope.
+
+    Returns:
+        ``(packages, explicit)``. ``explicit`` is True when the caller NAMED the
+        packages, on the command line or through the environment, and False when the
+        measured default scope was used. The distinction matters to
+        :func:`check_go_verdict_domain`: a named package that produced no outcome is
+        a misspelling or an empty package and must abort, whereas the full default
+        scope cannot be required of a caller-supplied stream that was legitimately
+        captured from one package.
+    """
     if requested:
-        return split_package_specs(requested)
+        return split_package_specs(requested), True
     from_env = os.environ.get(ENV_PACKAGES, "").strip()
     if from_env:
-        return split_package_specs([from_env])
-    return DEFAULT_PACKAGES
+        return split_package_specs([from_env]), True
+    return DEFAULT_PACKAGES, False
 
 
 def _resolve_output(requested: Path | None, repo_root: Path) -> Path:
@@ -2131,31 +2329,146 @@ def _resolve_output(requested: Path | None, repo_root: Path) -> Path:
     return default_baseline_path(repo_root)
 
 
+def _flag_name(argument: str) -> str:
+    """Reduce ``-count=1`` / ``--count=1`` / ``-count`` to the bare name ``count``.
+
+    Go's flag package accepts one or two leading dashes interchangeably and both
+    ``-flag=value`` and ``-flag value``, so a check keyed on the literal spelling is
+    a check with three trivial bypasses. Everything is normalised to the name alone
+    before any decision is taken.
+    """
+    stripped = argument.lstrip("-")
+    return stripped.split("=", 1)[0]
+
+
+#: The ONLY `go test` flags this generator will forward, by bare name.
+#:
+#: AN ALLOW-LIST RATHER THAN A DENY-LIST, and the difference is the whole fix. The
+#: previous deny-list held exactly one entry, `-run`, which left every other way of
+#: changing WHICH tests run wide open - and each of them produces a smaller manifest
+#: with no error, because a verdict that was never emitted is indistinguishable from
+#: a behaviour that never existed:
+#:
+#:   * `-skip` excludes by pattern, the exact complement of `-run`.
+#:   * `-list` PRINTS test names and runs nothing, so the stream carries no verdicts.
+#:   * `-bench` / `-benchtime` / `-benchmem` select benchmarks; §0.8.2 puts the 137
+#:     benchmark files and the one fuzz target outside the parity domain outright.
+#:   * `-fuzz` runs a fuzz target instead of the suite.
+#:   * `-short` makes `testing.Short()` true, and a test that calls `t.Skip` under it
+#:     turns from a `pass` verdict into a `skip` - a CHANGED result, which is the one
+#:     thing the contract exists to catch.
+#:   * `-c` compiles the test binary without running it. Zero verdicts.
+#:   * `-tags` excludes whole test FILES at build time, silently.
+#:   * `-cpu=1,2` runs every test once per value, which produces duplicate triples.
+#:   * `-failfast` stops at the first failure, truncating the domain.
+#:   * `-count=0` runs nothing; `-count=2` duplicates every triple.
+#:
+#: The allowed set is confined to flags that cannot change the identity or the
+#: presence of a verdict. `-count` is allowed only as exactly 1, which is the value
+#: §0.9.2 requires anyway for determinism, and `-timeout`, `-p`, `-parallel`, `-v`,
+#: `-race` and `-mod=vendor` change how the run is executed, never what it contains.
+_ALLOWED_GO_TEST_FLAGS: Final[frozenset[str]] = frozenset(
+    {"count", "mod", "p", "parallel", "race", "timeout", "v", "json"}
+)
+
+#: The one value `-count` may take. See :data:`_ALLOWED_GO_TEST_FLAGS`.
+_REQUIRED_COUNT_VALUE: Final[str] = "1"
+
+
 def _resolve_extra_go_args(forwarded: Sequence[str]) -> tuple[str, ...]:
-    """Collect extra `go test` arguments from the environment and from argv.
+    """Collect extra `go test` arguments, forwarding only the demonstrably benign.
 
-    INVARIANT LOCKED: an argument the runner forwards reaches ``go test`` rather
-    than aborting the run - and is announced, so a typo that lands here is visible
-    instead of being silently handed to the toolchain.
+    INVARIANT LOCKED: no forwarded argument can change WHICH tests run or WHETHER a
+    verdict is emitted. Anything outside :data:`_ALLOWED_GO_TEST_FLAGS` is refused
+    with the reason, rather than being handed to the toolchain to shrink the
+    manifest quietly.
 
-    ``-run`` is refused outright: narrowing the oracle drops verdicts from the
-    manifest, and a verdict missing from the manifest is indistinguishable from a
-    behaviour that never existed.
+    Positional arguments are refused too: a bare package path here would be added
+    to the ones ``--packages`` resolved, silently widening a domain that the
+    manifest then declares as though it had been chosen.
+
+    Raises:
+        BaselineError: On any argument that is not an allowed flag, and on
+            ``-count`` with a value other than 1.
     """
     collected: list[str] = []
     from_env = os.environ.get(ENV_EXTRA_ARGS, "").strip()
     if from_env:
         collected.extend(from_env.split())
     collected.extend(forwarded)
+
+    # A bare `--` is argparse's end-of-options marker and is the natural way a
+    # caller separates forwarded `go test` flags from this script's own. It reaches
+    # here through parse_known_args, carries no meaning for `go test`, and is
+    # dropped rather than refused - refusing it would reject the documented
+    # invocation shape for a token with no effect.
+    collected = [argument for argument in collected if argument != "--"]
+
+    expecting_value_for = ""
     for argument in collected:
-        if argument == "-run" or argument.startswith(("-run=", "--run=", "--run")):
+        if expecting_value_for:
+            # The separated form, `-timeout 30m`. The flag itself was already
+            # allowed, so its value rides along - except for -count, checked below.
+            if expecting_value_for == "count" and argument != _REQUIRED_COUNT_VALUE:
+                raise BaselineError(
+                    f"refusing the oracle argument `-count {argument}`: only "
+                    f"`-count={_REQUIRED_COUNT_VALUE}` is permitted. 0 runs nothing and "
+                    f"anything above 1 repeats every test, producing duplicate "
+                    f"(package, test, subtest) triples that the contract cannot key on."
+                )
+            expecting_value_for = ""
+            continue
+
+        if not argument.startswith("-"):
             raise BaselineError(
-                f"refusing the oracle argument {argument!r}: a -run filter excludes tests, "
-                f"and every excluded test is a verdict missing from the baseline, which the "
-                f"parity contract cannot tell apart from a behaviour that never existed. "
-                f"Narrow the run with --packages instead, which narrows the manifest's "
-                f"declared domain honestly."
+                f"refusing the oracle argument {argument!r}: only `go test` FLAGS may be "
+                f"forwarded, and a positional argument here is read by the toolchain as an "
+                f"extra package. That widens the run without widening what --packages "
+                f"resolved, so the manifest would declare a domain nobody chose. Pass "
+                f"packages with --packages."
             )
+
+        name = _flag_name(argument)
+        if name not in _ALLOWED_GO_TEST_FLAGS:
+            raise BaselineError(
+                f"refusing the oracle argument {argument!r}: `-{name}` is not in the "
+                f"allow-list {sorted(_ALLOWED_GO_TEST_FLAGS)}. Selection, listing, skipping, "
+                f"benchmark and fuzz flags are refused because every test they exclude is a "
+                f"verdict missing from the baseline, which the parity contract cannot tell "
+                f"apart from a behaviour that never existed - and a flag that merely LOOKS "
+                f"harmless is refused too, because the cost of being wrong is a silently "
+                f"smaller gate. Narrow the run with --packages instead, which narrows the "
+                f"manifest's declared domain honestly."
+            )
+
+        if "=" in argument:
+            value = argument.split("=", 1)[1]
+            if name == "count" and value != _REQUIRED_COUNT_VALUE:
+                raise BaselineError(
+                    f"refusing the oracle argument {argument!r}: only "
+                    f"`-count={_REQUIRED_COUNT_VALUE}` is permitted. 0 runs nothing and "
+                    f"anything above 1 repeats every test, producing duplicate "
+                    f"(package, test, subtest) triples that the contract cannot key on."
+                )
+            if name == "mod" and value != "vendor":
+                raise BaselineError(
+                    f"refusing the oracle argument {argument!r}: this repository vendors its "
+                    f"dependencies and §0.9.4.2 requires `-mod=vendor`, so any other value "
+                    f"would attempt a download the build is not permitted to make."
+                )
+            continue
+
+        # A boolean flag needs no value; the rest take the next token.
+        if name not in {"v", "race", "json"}:
+            expecting_value_for = name
+
+    if expecting_value_for:
+        raise BaselineError(
+            f"refusing the oracle arguments {collected}: `-{expecting_value_for}` expects a "
+            f"value and none followed it. An incomplete flag would consume whatever `go test` "
+            f"saw next, which here is a package path."
+        )
+
     if collected:
         _log(f"forwarding extra `go test` arguments: {collected}")
     return tuple(collected)
@@ -2214,6 +2527,7 @@ def _collect_verdicts(
     *,
     repo_root: Path,
     packages: Sequence[str],
+    packages_explicit: bool,
     forwarded: Sequence[str],
 ) -> tuple[tuple[Verdict, ...], str, str]:
     """Obtain verdicts by the selected route, and report which route was taken.
@@ -2245,6 +2559,15 @@ def _collect_verdicts(
         _log(
             f"reduced {reduction.event_count} events from {label} -> "
             f"{len(reduction.verdicts)} verdicts"
+        )
+        # BEFORE the non-Go row is appended, never after: the whole point is that a
+        # stream yielding no Go verdicts must not be rescued into a one-row
+        # manifest. `require_requested` is False here because a caller-supplied
+        # stream was captured from a package list this process never chose - unless
+        # the caller stated one, in which case honouring it is what catches a
+        # stream that does not contain what was asked for.
+        check_go_verdict_domain(
+            reduction, packages=packages, require_requested=packages_explicit
         )
         verdicts = list(reduction.verdicts)
         if args.include_non_go_baseline:
@@ -2281,6 +2604,11 @@ def _collect_verdicts(
         extra_args=forwarded,
         go_binary=args.go_binary,
     )
+    # `packages` IS the argument list this process handed to `go test`, so every
+    # entry must have produced an outcome. A zero-exit run can still be missing a
+    # package - `go test` reports "no test files" and exits 0 - and it can still
+    # hold a package-level failure whose tests all passed.
+    check_go_verdict_domain(reduction, packages=packages, require_requested=True)
     verdicts = list(reduction.verdicts)
     if args.include_non_go_baseline:
         verdicts.append(_non_go_baseline_verdict())
@@ -2317,12 +2645,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.check:
             return _run_check(output.expanduser())
 
-        packages = _resolve_packages(args.packages)
+        packages, packages_explicit = _resolve_packages(args.packages)
         extra_go_args = _resolve_extra_go_args(forwarded)
         verdicts, provenance, source_label = _collect_verdicts(
             args,
             repo_root=repo_root,
             packages=packages,
+            packages_explicit=packages_explicit,
             forwarded=extra_go_args,
         )
         manifest = build_manifest(

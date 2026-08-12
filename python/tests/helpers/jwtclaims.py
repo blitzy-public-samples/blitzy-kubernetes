@@ -129,10 +129,10 @@ WHAT THIS MODULE IS NOT
 # plan never partitions the pair, so no split is invented here.
 
 import base64
-import binascii
+import hashlib
 import json
 from datetime import datetime
-from typing import Protocol
+from typing import Final, Protocol
 
 import jwt
 
@@ -167,6 +167,18 @@ _JSON_NULL = "null"
 # The joint requirement identifier for V4, prefixed to every failure message so
 # a CI failure reads as a requirement violation rather than a value mismatch.
 _RQ = "F-004-RQ-001/002"
+
+# The padding character of the STANDARD and URL-SAFE base64 alphabets, which the
+# RAW (unpadded) alphabet Go uses for a JWS segment does not contain. Named
+# because rejecting it is a fidelity requirement, not a convenience: see
+# _decode_segment.
+_BASE64_PAD = "="
+
+# How many hex characters of a SHA-256 digest an observed-value fingerprint
+# carries. 12 hex characters are 48 bits, which is far beyond enough to
+# distinguish the handful of candidate values a reader of a V4 failure would
+# hypothesise, while being no use at all for recovering an unknown claim.
+_DIGEST_PREFIX_CHARS: Final[int] = 12
 
 
 def _render_path(parts: tuple[str, ...]) -> str:
@@ -209,6 +221,47 @@ def _describe_json_type(value: object) -> str:
     if isinstance(value, dict):
         return f"a JSON object with {len(value)} key(s)"
     return f"a value of Python type {type(value).__name__}"
+
+
+def _describe_observed(text: str) -> str:
+    """Fingerprint an OBSERVED claim serialisation without disclosing it.
+
+    Used for the ``saw:`` half of a ``check_payload`` mismatch. The ``want:``
+    half is written by the test author and is echoed verbatim; the ``saw:`` half
+    came out of a real token and is not, because it may be exactly the material
+    the token was issued to protect - a bearer sub-claim, an impersonated
+    subject, or an audience naming an internal service.
+
+    Three facts are reported, and together they are enough to diagnose every
+    mismatch the V4 surface can produce without printing the value:
+
+    * The JSON TYPE. This alone resolves the largest class of V4 failures,
+      because the regression V4 exists to catch is a non-null ``pod`` or
+      ``secret`` sub-claim - and ``type=JSON null`` versus
+      ``type=a JSON string`` says so completely. A null is fully determined by
+      its type, so nothing is withheld in that case at all.
+    * The LENGTH in characters of the serialisation, which separates "wrong
+      value" from "wrong shape" and, for the audience, an empty array from a
+      populated one.
+    * A TRUNCATED SHA-256 of the serialisation. This makes the report
+      falsifiable rather than merely descriptive: a reader who suspects a
+      specific value can hash their candidate and compare, so the actual value
+      is recoverable BY SOMEONE WHO ALREADY KNOWS IT and by nobody else. The
+      command that reproduces it is in the message, so no tooling knowledge is
+      assumed.
+
+    The digest is over the exact serialisation bytes, so it is stable across
+    runs and comparable between the two suites.
+    """
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:_DIGEST_PREFIX_CHARS]
+    # The text is valid JSON by construction: it is either _JSON_NULL or the
+    # output of _dump_json. json.loads is used rather than tracking the value
+    # through get_sub_object's return so that this stays a pure function of the
+    # serialisation, which is what the digest is taken over.
+    return (
+        f"{_describe_json_type(json.loads(text))}, "
+        f"{len(text)} character(s), sha256:{digest}"
+    )
 
 
 def _dump_json(value: object) -> str:
@@ -278,12 +331,20 @@ def _decode_segment(segment: str) -> bytes:
     svcaccttoken_test.go L1316. Two details are easy to get wrong and both are
     handled explicitly:
 
-    * PADDING. ``RawURLEncoding`` is the UNPADDED alphabet, while Python's
-      decoders require the input length to be a multiple of four. A base64
-      segment is short by two "=" when its length mod 4 is 2, by one when it is
-      3, and by none when it is 0, so the segment is re-padded before decoding.
-      Omitting this raises ``binascii.Error`` on roughly three quarters of real
-      tokens, which reads as a flaky test rather than as a bug.
+    * PADDING, IN BOTH DIRECTIONS. ``RawURLEncoding`` is the UNPADDED alphabet,
+      while Python's decoders require the input length to be a multiple of four.
+      A base64 segment is short by two "=" when its length mod 4 is 2, by one
+      when it is 3, and by none when it is 0, so the segment is re-padded before
+      decoding. Omitting this raises ``binascii.Error`` on roughly three
+      quarters of real tokens, which reads as a flaky test rather than as a bug.
+      The converse also holds and is enforced first: a segment that ARRIVES
+      padded is rejected, because "=" is outside the raw alphabet and Go fails
+      such a segment (measured:
+      ``base64.RawURLEncoding.DecodeString("eyJhIjoxfQ==")`` is
+      ``illegal base64 data at input byte 12``). Re-padding an already-padded
+      segment appends nothing when its length is already a multiple of four, so
+      without the explicit check Python would accept a serialisation Go's
+      verifier refuses.
     * STRICTNESS. ``base64.urlsafe_b64decode`` silently DISCARDS characters
       outside the alphabet - measured:
       ``base64.urlsafe_b64decode("ab*d=")`` returns ``b"i\\xb7"`` - so a corrupt
@@ -294,18 +355,67 @@ def _decode_segment(segment: str) -> bytes:
     """
     __tracebackhide__ = True
 
+    if _BASE64_PAD in segment:
+        # PADDING IS NOT MERELY UNNECESSARY HERE, IT IS INVALID. RawURLEncoding
+        # is the unpadded alphabet: "=" is outside it, so
+        # base64.RawURLEncoding.DecodeString("eyJhIjoxfQ==") returns
+        # `illegal base64 data at input byte 12` and getPayload's t.Fatalf fires.
+        # This has to be checked BEFORE the re-padding below, because that step
+        # would append to whatever padding was already there and, for a segment
+        # already padded to a multiple of four, append nothing at all - leaving
+        # base64.b64decode(validate=True) to accept the padded input happily.
+        # A padded segment is therefore accepted where Go rejects it, and a
+        # token is a credential: a helper that reads a serialisation Go's
+        # verifier would refuse is a helper that can pass V4 on a token the
+        # server would never have issued.
+        raise AssertionError(
+            f"{_RQ}: the token payload segment ({len(segment)} characters) contains "
+            f"base64 padding ({_BASE64_PAD!r}), which is not part of the unpadded "
+            "base64url alphabet a JWS compact serialisation uses. Go's "
+            "base64.RawURLEncoding rejects it, so it is rejected here. The segment is "
+            "deliberately not reported: it is credential material."
+        )
+
+    if not segment.isascii():
+        # CHECKED BEFORE THE SEGMENT REACHES A THIRD-PARTY FRAME, for two reasons.
+        #
+        # Correctness: base64.b64decode raises a BARE ValueError - "string
+        # argument should contain only ASCII characters", from
+        # _bytes_from_decode_data - rather than the binascii.Error the handler
+        # below is written for, so a non-ASCII segment escaped this function
+        # entirely and surfaced as an unhandled ValueError instead of the legible
+        # assertion Go's `illegal base64 data at input byte 0` corresponds to.
+        #
+        # Hygiene, and this is the sharper reason: that ValueError is raised from
+        # inside base64.py with the SEGMENT bound as a local, so any traceback
+        # renderer that shows frame locals prints credential material. Refusing
+        # here means the segment is never passed to a frame this module does not
+        # control.
+        raise AssertionError(
+            f"{_RQ}: the token payload segment ({len(segment)} characters) contains "
+            "non-ASCII characters, which cannot occur in base64url. Go's "
+            "base64.RawURLEncoding rejects the first such byte. The segment is "
+            "deliberately not reported: it is credential material."
+        )
+
     # -len(s) % 4 is 0, 3, 2, 1 for lengths 0, 1, 2, 3 mod 4. A length of 1 mod
     # 4 is not producible by any base64 encoder, and the deliberately strict
-    # decode below rejects it rather than guessing, exactly as Go does.
-    padded = segment + "=" * (-len(segment) % 4)
+    # decode below rejects it rather than guessing, exactly as Go does. The
+    # padding added here exists ONLY to satisfy Python's decoder, which requires
+    # a length that is a multiple of four; the segment itself must arrive
+    # unpadded, which the check above enforces.
+    padded = segment + _BASE64_PAD * (-len(segment) % 4)
     try:
         return base64.b64decode(padded, altchars=b"-_", validate=True)
-    except binascii.Error as exc:
-        # binascii.Error subclasses ValueError; catching the precise type keeps
-        # a genuine programming error from being swallowed as bad input. Its
-        # messages carry no input bytes - "Only base64 data is allowed",
+    except ValueError as exc:
+        # binascii.Error, which is what an alphabet or padding violation raises,
+        # subclasses ValueError. ValueError is caught rather than the narrower
+        # type because base64 also raises the base class directly for input it
+        # rejects before decoding, and EVERY such rejection must arrive as this
+        # assertion rather than as an unhandled exception from another module.
+        # The messages carry no input bytes - "Only base64 data is allowed",
         # "Incorrect padding", "Invalid base64-encoded string: ..." - so
-        # including it leaks nothing while keeping the failure diagnosable.
+        # including one leaks nothing while keeping the failure diagnosable.
         raise AssertionError(
             f"{_RQ}: failed to base64url-decode the token payload segment "
             f"({len(segment)} characters): {exc}. The segment is deliberately "
@@ -564,8 +674,13 @@ def check_payload(token: str, want: str, *parts: str) -> None:
     Raises:
         AssertionError: If the claim does not serialise to ``want``, or for any
             reason ``get_payload`` or ``get_sub_object`` raises. The message
-            reports the single claim value it was asked about, which is what
-            makes a failure diagnosable, and nothing else from the token.
+            reports the claim PATH, the wanted value verbatim, and a
+            non-disclosing fingerprint of what was actually seen - its JSON
+            type, its length and a truncated SHA-256 - never the observed value
+            itself. See ``_describe_observed``: the fingerprint is enough to
+            diagnose every mismatch the V4 claim surface can produce, and a
+            reader who suspects a particular value can confirm it by hashing
+            their own candidate.
     """
     __tracebackhide__ = True
 
@@ -583,8 +698,24 @@ def check_payload(token: str, want: str, *parts: str) -> None:
 
     got = get_sub_object(get_payload(token), *parts)
     if got != want:
+        # The OBSERVED value is fingerprinted, never printed. Go interpolates it
+        # (`t.Errorf("unexpected payload: %v", ...)`) and can afford to: its
+        # output goes to a developer's terminal or to a Prow artifact bucket
+        # behind the same access control as the cluster. This suite's failures
+        # go wherever its JUnit XML is published, and a claim value can be the
+        # credential itself - a bearer sub-claim, or an audience naming an
+        # internal service. `want` is echoed verbatim because the test author
+        # wrote it into the source; `saw` is not, because the token produced it.
+        # See _describe_observed for why the fingerprint still diagnoses every
+        # mismatch V4 can produce.
         raise AssertionError(
-            f"{_RQ}: unexpected payload at {_render_path(parts)}.\nsaw:\t{got}\nwant:\t{want}"
+            f"{_RQ}: unexpected payload at {_render_path(parts)}."
+            f"\nsaw:\t{_describe_observed(got)}"
+            f"\nwant:\t{want}"
+            f"\nThe observed value is fingerprinted rather than printed: it came out of a"
+            f" token and is credential material. To test a hypothesis, hash your candidate"
+            f" the same way:\n\tprintf %s '<candidate>' | sha256sum | cut -c1-"
+            f"{_DIGEST_PREFIX_CHARS}"
         )
 
 

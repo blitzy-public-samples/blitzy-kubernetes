@@ -293,10 +293,34 @@ for target in "${targets[@]}"; do
 done
 readonly check_src_project check_node_project
 
+# THE MANIFESTS THIS GATE SPEAKS FOR MUST EXIST.
+#
+# This point is reached only when there is at least one web input to check (the
+# empty-tier case has already exited 0 above), and from there an absent
+# package.json or lockfile is a HARD FAILURE. Without them there is no pinned
+# eslint and no pinned tsc for the gate to speak for, `npm ci` cannot install a
+# reproducible tree at all, and the version assertions below would have nothing
+# to compare against - so the gate would report on whatever versions happened to
+# be lying in node_modules.
+if [[ ! -f "${KUBE_NODE_PACKAGE_JSON}" ]]; then
+  kube::log::usage \
+    "ERROR: ${#targets[@]} web path(s) exist under ${KUBE_WEB_DIR}, but ${KUBE_NODE_PACKAGE_JSON} is missing." \
+    "That manifest pins eslint and typescript, so without it this gate cannot know which versions it speaks for." \
+    "Restore web/package.json from version control before running this gate."
+  exit 1
+fi
+
+if [[ ! -f "${KUBE_NODE_PACKAGE_LOCK}" ]]; then
+  kube::log::usage \
+    "ERROR: ${#targets[@]} web path(s) exist under ${KUBE_WEB_DIR}, but ${KUBE_NODE_PACKAGE_LOCK} is missing." \
+    "'npm ci' installs from the lockfile and cannot run without one, so the gates cannot be provisioned reproducibly." \
+    "Restore web/package-lock.json from version control before running this gate."
+  exit 1
+fi
+
 # manifest_pin prints the version web/package.json pins for the npm package
 # ${1}. On return that version has been printed, or nothing has been printed
-# because the manifest does not exist or does not pin it - neither of which is an
-# error here, only an absence of evidence.
+# because the manifest does not pin it.
 #
 # The dependency blocks of web/package.json hold one `"name": "version"` pair per
 # line, so a line-anchored sed is enough and this gate acquires no dependency on
@@ -339,7 +363,17 @@ for pin in "eslint:${ESLINT_VERSION}" "typescript:${TYPESCRIPT_VERSION}"; do
   package="${pin%%:*}"
   expected="${pin##*:}"
   pinned="$(manifest_pin "${package}")"
-  if [[ -n "${pinned}" && "${pinned}" != "${expected}" ]]; then
+  if [[ -z "${pinned}" ]]; then
+    # web/package.json exists (kube::node::dirs resolved it) but pins nothing for
+    # this tool, so nothing enforces which version gets installed. Fatal for the
+    # same reason a mismatch is: the gate would speak for whatever npm resolved.
+    kube::log::usage \
+      "ERROR: ${KUBE_NODE_PACKAGE_JSON} pins no version for ${package}, so this gate cannot speak for a" \
+      "known version of it. Add \"${package}\": \"${expected}\" to that manifest, which is the single" \
+      "source of truth for what 'npm ci' installs."
+    failed_gates+=("${package}-version-pin")
+    res=1
+  elif [[ "${pinned}" != "${expected}" ]]; then
     kube::log::usage \
       "ERROR: ${package} is pinned at ${pinned} in ${KUBE_NODE_PACKAGE_JSON}," \
       "but hack/verify-web.sh expects ${expected}, so this gate no longer speaks for" \
@@ -407,12 +441,20 @@ tool_version() {
 }
 
 # assert_gate_available reports whether the gate ${1}, pinned at ${2}, can run,
-# having been given its installed version as ${3}. On return the status says so;
-# an absent gate has produced an ERROR:-prefixed explanation and a gate whose
-# version has drifted from the pin has produced a WARNING and is still declared
-# usable. This is hack/verify-shellcheck.sh L78-86's detect-then-decide shape:
-# findings from a near version are far more use than no findings at all, and the
-# warning keeps the drift visible instead of silent.
+# having been given its installed version as ${3}. On return the status says so,
+# and an absent gate or a version that has drifted from the pin has produced an
+# ERROR:-prefixed explanation naming the fix.
+#
+# AN EXACT-VERSION MISMATCH IS FATAL, NOT A WARNING. hack/verify-shellcheck.sh
+# L78-86 can afford a detect-then-decide posture because it reports findings from
+# whatever shellcheck it finds; this gate cannot, because its verdict is what
+# `make verify` reports. TypeScript in particular changes what it accepts between
+# releases - and it is the ONLY gate covering .ts and .tsx here, since eslint 10
+# cannot parse them - so approving on a different tsc means approving code the
+# pinned tsc may reject. The pinned version is what `npm ci` installs from
+# ${KUBE_NODE_PACKAGE_LOCK}, so a mismatch means the tree is stale rather than
+# that the developer is unlucky, and reinstalling it is a one-line fix rather
+# than a reason to lower the bar.
 assert_gate_available() {
   local gate=$1
   local pinned=$2
@@ -428,9 +470,11 @@ assert_gate_available() {
 
   if [[ "${installed}" != "${pinned}" ]]; then
     kube::log::usage \
-      "WARNING: using ${gate} ${installed}, but ${pinned} is pinned in ${KUBE_NODE_PACKAGE_JSON}." \
-      "Findings below may differ from the ones this gate speaks for. Rebuild with:" \
-      "rm -rf ${KUBE_WEB_DIR}/node_modules && hack/verify-web.sh"
+      "ERROR: ${gate} ${installed} is installed, but ${pinned} is pinned in ${KUBE_NODE_PACKAGE_JSON}," \
+      "so this gate would speak for a tool that is not the one this tier pins." \
+      "Findings from a different version are not interchangeable: neither approval nor rejection carries over." \
+      "Reinstall the locked tree with: rm -rf ${KUBE_WEB_DIR}/node_modules && hack/verify-web.sh"
+    return 1
   fi
   return 0
 }
@@ -533,8 +577,25 @@ check_project() {
   local project_result=0
 
   if [[ ! -f "${web_root}/${project}" ]]; then
+    if ${has_inputs}; then
+      # THE PROJECT FILE MUST EXIST ONCE ITS INPUTS DO. Skipping here would leave
+      # .ts and .tsx entirely unchecked - eslint 10 cannot parse them and
+      # web/eslint.config.js ignores them for that reason - so the gate would
+      # approve TypeScript that nothing had typechecked. An absent tsconfig is
+      # also not a state the tier can legitimately reach: both projects are
+      # committed, so this means one was deleted or moved.
+      kube::log::usage \
+        "ERROR: there are inputs for ${description} under ${KUBE_WEB_DIR}, but ${KUBE_WEB_DIR}/${project} is missing," \
+        "so those inputs would go completely untypechecked - and tsc is the ONLY gate that covers .ts and .tsx here." \
+        "Restore ${project} from version control before running this gate."
+      failed_gates+=("tsc(${project}-missing)")
+      if [[ "${res}" -eq 0 ]]; then
+        res=1
+      fi
+      return 0
+    fi
     kube::log::status \
-      "no ${project} under ${KUBE_WEB_DIR}; skipping the typecheck of ${description} (migration in progress)"
+      "no ${project} under ${KUBE_WEB_DIR} and no inputs for it; skipping the typecheck of ${description} (migration in progress)"
     return 0
   fi
   if ! ${has_inputs}; then
