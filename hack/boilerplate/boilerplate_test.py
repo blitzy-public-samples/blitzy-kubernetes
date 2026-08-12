@@ -14,40 +14,88 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Gate test for the Apache-2.0 licence-header scanner (``boilerplate.py``).
+
+Provenance: AAP §0.4.3 / §0.5.3 (express this test as a plain pytest function
+and grow its expected list for the new ``.ts``/``.tsx`` fixtures) and tech-spec
+§6.6.3.4 (every Blitzy-authored or Blitzy-modified test carries an inline
+provenance citation plus a comment naming the invariant it locks).
+
+Run it from the ``hack/boilerplate`` directory::
+
+    $ python3 -m pytest boilerplate_test.py
+
+It also runs unchanged from the repository root, because the fixture directory
+is resolved relative to ``__file__`` rather than to the current directory::
+
+    $ python3 -m pytest hack/boilerplate/boilerplate_test.py
+"""
+
+import importlib
 import os
 import sys
-import unittest
+import types
 
-from io import StringIO
+# Directory holding the pass/fail header fixtures. Resolved from __file__ so the
+# test is independent of the caller's working directory (AAP §0.7.2 isolation).
+FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test")
 
-import boilerplate
+# The complete set of fixtures the scanner must report as badly-headed, sorted.
+# Sort order is fail.go < fail.py < fail.ts < fail.tsx < fail_2026.go because
+# "." (46) sorts before "_" (95) and "ts" is a prefix of "tsx". The "././"
+# double prefix is produced by normalize_files(), which joins args.rootdir (".")
+# onto each walked path ("./fail.go").
+EXPECTED_FAILING_FILES = [
+    "././fail.go",
+    "././fail.py",
+    "././fail.ts",
+    "././fail.tsx",
+    "././fail_2026.go",
+]
 
-class TestBoilerplate(unittest.TestCase):
+
+def test_boilerplate(monkeypatch, capsys):
+    """Locks the invariant that the Apache-2.0 header gate detects exactly the
+    known-bad fixtures and no others, across .go, .py, .ts and .tsx.
+
+    Both halves of the assertion matter: ``main()`` must still report success
+    (it reports offenders on stdout rather than through its exit status), and
+    the reported set must equal EXPECTED_FAILING_FILES exactly. An exact
+    equality is deliberate - a subset, superset, membership or length check
+    would let a silently undetected bad header, or a falsely accused good one,
+    slip through.
     """
-    Note: run this test from the hack/boilerplate directory.
+    # boilerplate.py calls parse_args() at module level, so it inherits the host
+    # process's argv on import. Under `pytest -q` that aborts collection with
+    # SystemExit(2): "unrecognized arguments: -q". Sanitise argv FIRST, then
+    # (re)import so parse_args() re-runs against the clean argv, and only then
+    # patch the parsed args.
+    monkeypatch.setattr(sys, "argv", ["boilerplate.py"])
+    monkeypatch.chdir(FIXTURE_DIR)
 
-    $ python -m unittest boilerplate_test
-    """
+    if "boilerplate" in sys.modules:
+        boilerplate = importlib.reload(sys.modules["boilerplate"])
+    else:
+        boilerplate = importlib.import_module("boilerplate")
 
-    def test_boilerplate(self):
-        os.chdir("test/")
+    # Scan only the fixture directory, taking the reference headers from its
+    # parent. These are the same four values the pre-pytest version supplied.
+    monkeypatch.setattr(
+        boilerplate,
+        "args",
+        types.SimpleNamespace(
+            filenames=[],
+            rootdir=".",
+            boilerplate_dir="../",
+            verbose=True,
+        ),
+    )
 
-        class Args:
-            filenames = []
-            rootdir = "."
-            boilerplate_dir = "../"
-            verbose = True
+    ret = boilerplate.main()
+    assert ret == 0
 
-        # capture stdout
-        old_stdout = sys.stdout
-        sys.stdout = StringIO()
+    # main() prints one offending path per line; split() normalises the
+    # scanner's non-deterministic emission order and any trailing whitespace.
+    output = sorted(capsys.readouterr().out.split())
 
-        boilerplate.args = Args
-        ret = boilerplate.main()
-        self.assertEqual(ret, 0)
-
-        output = sorted(sys.stdout.getvalue().split())
-
-        sys.stdout = old_stdout
-
-        self.assertEqual(output, ["././fail.go", "././fail.py", "././fail_2026.go"])
+    assert output == EXPECTED_FAILING_FILES

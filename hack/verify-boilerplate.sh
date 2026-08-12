@@ -16,6 +16,32 @@
 
 # This script checks boilerplate header for all files.
 # Usage: `hack/verify-boilerplate.sh`.
+#
+# A single file may be checked by passing its path, e.g.
+# `hack/verify-boilerplate.sh web/src/App.tsx`: arguments are forwarded
+# verbatim to hack/boilerplate/boilerplate.py.
+#
+# Coverage is driven by the reference templates that sit beside that checker,
+# named hack/boilerplate/boilerplate.<ext>.txt. boilerplate.py's get_refs()
+# globs them and takes each extension from the file name, so dropping in a
+# template is all it takes to register one -- there is no extension list in
+# this wrapper to edit. `.ts` and `.tsx` are covered by boilerplate.ts.txt and
+# boilerplate.tsx.txt.
+#
+# Headers on newly added files must be year-less: `Copyright The Kubernetes
+# Authors.` with no year. boilerplate.py's get_dates() still accepts a year up
+# to 2025 on files that already carry one -- which is why this script's own
+# 2014 header passes -- but a newly added file must not include one.
+#
+# For `.ts` and `.tsx` the header must be the literal first bytes of the file:
+# no shebang, no leading blank line, no `"use client";` and no
+# `/* eslint-disable */` above it. boilerplate.py strips build constraints only
+# for Go and shebangs only for shell and Python, so nothing is stripped for
+# TypeScript and anything preceding the header fails the check.
+#
+# Generated and vendored trees -- web/node_modules, python/.venv, __pycache__
+# and the pre-existing entries -- are excluded through boilerplate.py's
+# skipped_names, not here.
 
 set -o errexit
 set -o nounset
