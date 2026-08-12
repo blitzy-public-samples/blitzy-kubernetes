@@ -1,0 +1,61 @@
+# Copyright The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Python test-tier dependencies for the pytest suite that ports the Go
+# security-regression surface (V1-V8).
+#
+# AAP  §0.6.1.1 (Python Test Stack)  /  tech-spec §6.6.1 (test tiers)
+#
+# Every version below is an EXACT pin. Do not relax a pin without re-reading
+# the rationale recorded in AAP §0.3.4 / §0.6.1.4:
+#   * pytest is pinned to 9.1.1 (NOT 9.1.0): 9.1.0 regressed loading of
+#     initial conftest.py files under the invocation directory.
+#   * kubernetes is pinned to 34.1.0 - the exact-minor match for the
+#     v1.34.0-blitzy server under test. Client 36.x sits in the partially
+#     supported (+-) compatibility cell, and 36.0.0 shipped a defect that
+#     dropped the Authorization header (fixed in 36.0.1) - precisely the
+#     defect class the V1/V4/V7 parity tests exercise.
+#   * etcd3gw is used for the raw ciphertext-at-rest read (V3): legacy
+#     `etcd3` tops out at 0.12.0 and is unmaintained.
+#
+# Install (from the repository root):
+#   source hack/lib/python.sh && kube::python::install
+# or directly:
+#   python/.venv/bin/python -m pip install -r python/requirements-test.txt
+
+# --- test framework and plugins -------------------------------------------
+pytest==9.1.1
+pytest-cov==7.1.0
+pytest-mock==3.15.1
+pytest-xdist==3.8.0
+pytest-timeout==2.4.0
+pytest-randomly==4.1.0
+pytest-asyncio==1.4.0
+coverage==7.15.4
+
+# --- system-under-test clients --------------------------------------------
+kubernetes==34.1.0
+etcd3gw==2.7.0
+PyJWT==2.13.0
+PyYAML==6.0.3
+
+# --- determinism, property testing, HTTP ----------------------------------
+freezegun==1.5.5
+hypothesis==6.165.3
+httpx==0.28.1
+respx==0.23.1
+
+# --- lint / type gates invoked by hack/verify-python.sh -------------------
+ruff==0.16.2
+mypy==2.3.0
