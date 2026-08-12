@@ -1,20 +1,12 @@
 {
-  "name": "blitzy-kubernetes-web",
+  "name": "kubernetes-security-posture-web",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
-  "description": "React (Vitest 4 + React Testing Library 16, jsdom) test tier for the blitzy-kubernetes security-posture surface (controls V1-V8). AAP 0.6.1.2 / 0.4.6.",
-  "license": "Apache-2.0",
-  "engines": {
-    "node": ">=22.12.0",
-    "npm": ">=10.0.0"
-  },
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest",
-    "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:junit": "vitest run --reporter=default --reporter=junit",
+    "test:ui": "vitest --ui",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },

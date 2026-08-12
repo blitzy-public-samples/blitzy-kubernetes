@@ -12,50 +12,146 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Python test-tier dependencies for the pytest suite that ports the Go
-# security-regression surface (V1-V8).
+# Pinned dependency manifest for the Python (pytest) test tier.
 #
-# AAP  §0.6.1.1 (Python Test Stack)  /  tech-spec §6.6.1 (test tiers)
+# AAP §0.6.1.1 / tech-spec §0.3.4
 #
-# Every version below is an EXACT pin. Do not relax a pin without re-reading
-# the rationale recorded in AAP §0.3.4 / §0.6.1.4:
-#   * pytest is pinned to 9.1.1 (NOT 9.1.0): 9.1.0 regressed loading of
-#     initial conftest.py files under the invocation directory.
-#   * kubernetes is pinned to 34.1.0 - the exact-minor match for the
-#     v1.34.0-blitzy server under test. Client 36.x sits in the partially
-#     supported (+-) compatibility cell, and 36.0.0 shipped a defect that
-#     dropped the Authorization header (fixed in 36.0.1) - precisely the
-#     defect class the V1/V4/V7 parity tests exercise.
-#   * etcd3gw is used for the raw ciphertext-at-rest read (V3): legacy
-#     `etcd3` tops out at 0.12.0 and is unmaintained.
+# INVARIANT LOCKED BY THIS FILE: the exactly-pinned test toolchain of the
+# pytest tier that ports the Go security-regression surface for controls V1
+# through V8. Every distribution below is pinned with `==` to one version that
+# was verified by live installation into an isolated virtual environment,
+# followed by `pip check` reporting "No broken requirements found."
 #
-# Install (from the repository root):
-#   source hack/lib/python.sh && kube::python::install
-# or directly:
-#   python/.venv/bin/python -m pip install -r python/requirements-test.txt
+# Exact pins are the repository's own discipline, not a preference: go.mod
+# (lines 36, 45, 46, 56, 61, 70, 161), hack/tools/go.mod (lines 65, 80) and
+# hack/lib/etcd.sh line 19 all pin one version precisely, and this file does
+# not introduce the first version range into a tree that uses none. pytest 9
+# additionally promotes its own removal warnings to errors with no grace
+# period, so an inexact pin would let a future release fail the suite during
+# collection rather than during a deliberate upgrade.
+#
+# CONSUMED BY - the filename is a hard contract, hyphen not underscore, and
+# directly under python/; renaming it breaks the installer:
+#   hack/lib/python.sh              kube::python::install resolves
+#                                   ${KUBE_ROOT}/python/requirements-test.txt,
+#                                   installs it into python/.venv and then
+#                                   runs `pip check`
+#   hack/verify-python.sh           runs the ruff and mypy pinned below; this
+#                                   file is their single source of truth
+#   hack/make-rules/test-python.sh  `make test-python` runs pytest from the
+#                                   same virtual environment
+#
+# Python floor: 3.10, because pytest 9 dropped 3.9 after its end of life. The
+# floor is declared by KUBE_PYTHON_MIN_VERSION in hack/lib/python.sh; this
+# migration deliberately ships no .python-version file.
+#
+# To change a version, edit this file and nothing else. These distributions
+# enter no Go module graph, so go.mod, go.sum, go.work and vendor/ remain
+# frozen, and none of them is a pinned external artifact (no container image,
+# no downloaded binary), so build/dependencies.yaml needs no entry for them.
 
-# --- test framework and plugins -------------------------------------------
+# --- test framework and plugins ----------------------------------------------
+
+# Test framework. Supplies the native `pytest.Subtests` fixture, the analogue
+# of Go's `t.Errorf` accumulate-and-continue semantics, which reports every
+# finding in a single run instead of aborting at the first one. Required by the
+# V1, V6-unit and V6-integration ports, where a bare assert is reserved for the
+# `t.Fatalf` cases that must abort.
+# DO NOT MOVE TO 9.1.0: that release regressed the loading of initial
+# conftest.py files under the invocation directory. The entire fixture
+# architecture of this suite lives in conftest.py files, so 9.1.0 breaks it.
 pytest==9.1.1
+
+# Coverage plugin. Coverage is a secondary, derived signal for this migration:
+# it is collected and reported, never gated on a percentage.
 pytest-cov==7.1.0
+
+# The `mocker` fixture, used sparingly to match the repository's own posture -
+# no mock-generation library is vendored, and testify/mock appears in only 14
+# of its 2,853 test files.
 pytest-mock==3.15.1
+
+# Parallel execution. One half of the deliberate substitute for Go's race
+# detector, which is on by default for unit runs (KUBE_RACE defaults to
+# "-race" in hack/make-rules/test.sh) and has no Python analogue. The suite is
+# required to pass under `-n auto`; removing this removes that proof.
 pytest-xdist==3.8.0
+
+# Turns a hang into a failure instead of a wedged job. Substitute for
+# go.uber.org/goleak, which runs at Go package teardown and likewise has no
+# Python analogue. Enforced by the `timeout` setting in python/pyproject.toml.
 pytest-timeout==2.4.0
+
+# Test-order randomisation: the executable proof that no test depends on
+# another test's ordering or on state another test leaked.
 pytest-randomly==4.1.0
+
+# Async support for the polling and watch helpers. python/pyproject.toml sets
+# asyncio_mode = "strict", so the plugin must be present for those tests to be
+# collected at all.
 pytest-asyncio==1.4.0
+
+# Coverage measurement engine beneath pytest-cov.
 coverage==7.15.4
 
-# --- system-under-test clients --------------------------------------------
+# --- Kubernetes, etcd, JWT and YAML clients ----------------------------------
+
+# Kubernetes API client used by the integration tier.
+# DO NOT UPGRADE TO 36.x. The client versions as vY.Z.P tracking Kubernetes
+# v1.Y.Z, and the system under test builds as v1.34.0-blitzy, so 34.1.0 is the
+# exact-minor match. The published compatibility matrix marks client 36.y.z as
+# fully supported only against Kubernetes 1.36 and merely partially supported
+# against 1.35 and below, meaning the client may expose APIs the server does
+# not have and the server may expose APIs the client cannot use. Worse, client
+# 36.0.0 shipped a defect in which no Authorization header was attached under
+# load_incluster_config() or load_kube_config(), so requests were rejected as
+# system:anonymous; it was fixed in 36.0.1. That is precisely the defect class
+# the V1, V4 and V7 parity tests exercise, since all three authenticate as a
+# specific principal.
+# Naming note for callers: V1TokenRequest does not exist in this client. The
+# models are AuthenticationV1TokenRequest, V1TokenRequestSpec and
+# V1TokenRequestStatus.
 kubernetes==34.1.0
+
+# Raw etcd reads for the V3 ciphertext-at-rest assertion, which has to bypass
+# the API server entirely to prove the stored blob is encrypted. Chosen
+# because the legacy `etcd3` distribution tops out at 0.12.0 and is
+# unmaintained, and `python-etcd3` does not resolve on PyPI.
 etcd3gw==2.7.0
+
+# JWT claim decoding for V4: the audience binding, the expiry boundary and the
+# exact claim shape are read without verifying the signature, matching the
+# intent of the Go original.
 PyJWT==2.13.0
+
+# Decoding of the committed manifests and of the configuration the shipped
+# shell generators produce, for the config-schema tier.
 PyYAML==6.0.3
 
-# --- determinism, property testing, HTTP ----------------------------------
+# --- determinism and property-based testing ----------------------------------
+
+# Deterministic time, used everywhere except the V4 expiry assertion, which
+# must stay a real wall-clock comparison for its window to mean anything.
 freezegun==1.5.5
+
+# Property-based testing of the audit level ordering, asserted as a strict
+# total order so that no future edit can silently downgrade a level.
 hypothesis==6.165.3
+
+# --- HTTP --------------------------------------------------------------------
+
+# HTTP client for direct API-surface probes.
 httpx==0.28.1
+
+# Declarative HTTP mocking for httpx, replacing bespoke fake servers.
 respx==0.23.1
 
-# --- lint / type gates invoked by hack/verify-python.sh -------------------
+# --- lint and type gates -----------------------------------------------------
+
+# Lint gate. hack/verify-python.sh runs `ruff check` with no fix flag, by
+# design: the gate reports violations, it never rewrites a file.
 ruff==0.16.2
+
+# Type gate. hack/verify-python.sh runs mypy over python/ using the
+# configuration in python/pyproject.toml.
 mypy==2.3.0
