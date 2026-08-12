@@ -215,6 +215,81 @@ test-integration:
 	KUBE_TEST_ARGS='$(value KUBE_TEST_ARGS)' hack/make-rules/test-integration.sh $(WHAT)
 endif
 
+define TEST_PYTHON_HELP_INFO
+# Run the Python (pytest) test tier under python/.
+#
+# The tier ports the Go security-regression surface for controls V1-V8.
+# See AAP 0.4.1 (test strategy) and 0.9.1.1 (commands).
+#
+# Args:
+#   KUBE_PYTHON_TEST_MARKERS: pytest -m expression, e.g. "not integration".
+#   KUBE_PYTHON_TEST_WORKERS: pytest-xdist workers ("auto" or a number; 0 = off).
+#   KUBE_PYTHON_COVER: Set to 'y' to collect coverage (reported, not gated).
+#   KUBE_JUNIT_REPORT_DIR: When set, JUnit XML is written to $$KUBE_JUNIT_REPORT_DIR/python.xml.
+#
+# Example:
+#   make test-python
+#   make test-python KUBE_PYTHON_TEST_MARKERS="not integration"
+#   make test-python KUBE_PYTHON_TEST_WORKERS=auto KUBE_PYTHON_COVER=y
+endef
+.PHONY: test-python
+ifeq ($(PRINT_HELP),y)
+test-python:
+	echo "$$TEST_PYTHON_HELP_INFO"
+else
+test-python:
+	hack/make-rules/test-python.sh
+endif
+
+define TEST_WEB_HELP_INFO
+# Run the React (Vitest) test tier under web/.
+#
+# Runs in jsdom; browser mode and visual regression are out of scope.
+# See AAP 0.4.1 (test strategy) and 0.9.1.2 (commands).
+#
+# Args:
+#   KUBE_WEB_COVER: Set to 'y' to collect V8 coverage (reported, not gated).
+#   KUBE_JUNIT_REPORT_DIR: When set, JUnit XML is written to $$KUBE_JUNIT_REPORT_DIR/web.xml.
+#
+# Example:
+#   make test-web
+#   make test-web KUBE_WEB_COVER=y
+endef
+.PHONY: test-web
+ifeq ($(PRINT_HELP),y)
+test-web:
+	echo "$$TEST_WEB_HELP_INFO"
+else
+test-web:
+	hack/make-rules/test-web.sh
+endif
+
+define TEST_PARITY_HELP_INFO
+# Regenerate the Go baseline manifest and run the parity contract.
+#
+# The parity contract asserts that every verdict recorded by the Go oracle is
+# reproduced by its ported Python/React counterpart. Needs a runnable Go
+# toolchain, and an etcd binary for the integration packages.
+# See AAP 0.4.5 (parity harness).
+#
+# Args:
+#   KUBE_PARITY_PACKAGES: Go packages whose verdicts the baseline records.
+#   KUBE_PARITY_BASELINE: Path of the generated baseline manifest.
+#   KUBE_PARITY_SKIP_REGEN: Set to 'y' to assert against the committed baseline.
+#
+# Example:
+#   make test-parity
+#   make test-parity KUBE_PARITY_SKIP_REGEN=y
+endef
+.PHONY: test-parity
+ifeq ($(PRINT_HELP),y)
+test-parity:
+	echo "$$TEST_PARITY_HELP_INFO"
+else
+test-parity:
+	hack/make-rules/test-parity.sh
+endif
+
 define TEST_E2E_NODE_HELP_INFO
 # Build and run node end-to-end tests.
 #
