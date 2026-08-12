@@ -80,6 +80,34 @@ network_closure.sh
 /www/master/npm-debug.log
 /www/master/shared/config/development.json
 
+# React (Vitest) test tier under web/ - AAP 0.5.4
+# node_modules is materialised out-of-tree and exposed as a symlink by
+# hack/lib/node.sh so repository-wide walkers (hack/boilerplate/boilerplate.py,
+# hack/verify-shellcheck.sh) never descend into it.
+/web/node_modules
+/web/node_modules/
+/web/coverage/
+/web/dist/
+/web/.vite/
+/web/vitest-report/
+*.tsbuildinfo
+
+# Python (pytest) test tier under python/ - AAP 0.5.4
+# .venv is materialised out-of-tree and exposed as a symlink by
+# hack/lib/python.sh for the same reason as web/node_modules above.
+/python/.venv
+/python/.venv/
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
 # Karma output
 /www/test_out
 
