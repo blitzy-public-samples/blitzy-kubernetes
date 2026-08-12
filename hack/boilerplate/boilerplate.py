@@ -140,6 +140,10 @@ skipped_names = [
     "test/e2e/generated/bindata.go",
     "hack/boilerplate/test",
     "staging/src/k8s.io/kubectl/pkg/generated/bindata.go",
+    # generated dependency and cache dirs of the python/ and web/ test trees
+    "web/node_modules",
+    "python/.venv",
+    "__pycache__",
 ]
 
 
