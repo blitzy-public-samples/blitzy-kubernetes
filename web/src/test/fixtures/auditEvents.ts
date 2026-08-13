@@ -233,12 +233,17 @@ const AUDIT_SECRET_SYNTHETIC_DATA_VALUE = 'dmFs';
 // "evidence over assumption" for no gain, since no assertion in this tier reads
 // them.
 //
-// RESPONSE bodies carry AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED instead of any
-// object, because the oracle records only that one existed. They previously reused
-// the corresponding REQUEST object, which no server returns -- a create response
-// carries the server-populated fields a request cannot have, and a delete response
-// is a `Status` or the deleted object rather than the target. That made invented
-// content indistinguishable from recorded wire data in a file named `fixtures`.
+// RESPONSE bodies are CAPTURED API-SERVER OUTPUT -- see the capture note on
+// {@link AUDIT_RBAC_RESPONSE_CAPTURE} below. They are the bytes a real
+// kube-apiserver wrote into a real audit log at `RequestResponse` for exactly the
+// six measured operations. Two earlier attempts at this field were both wrong and
+// are recorded here so neither is retried: reusing the corresponding REQUEST
+// object (which no server returns), and then a self-describing presence MARKER
+// (which is not an API-server response either, and which put a
+// `audit.k8s.io`-shaped key nobody ships into the real `responseObject` wire
+// field). The oracle records only that a body existed, so nothing here is
+// parity-relevant -- but a fixture that occupies a wire field must hold wire
+// data, and now it does.
 //
 // Consumers read body PRESENCE and never contents, which is exactly the fact the
 // oracle supports.
@@ -326,33 +331,171 @@ function auditRoleBindingBody(namespace: string): AuditPayload {
 const AUDIT_DELETE_OPTIONS_BODY: AuditPayload = { kind: 'DeleteOptions' };
 
 /**
- * The body recorded where the oracle measured PRESENCE and nothing else.
+ * The `metadata.managedFields[].manager` the capture produced.
  *
- * WHY A SELF-DESCRIBING MARKER RATHER THAN A PLAUSIBLE BODY. `test/utils/audit.go`
- * L151-156 reduces every audited body to a BOOLEAN -- `if e.ResponseObject != nil {
- * event.ResponseObject = true }` -- so the oracle records that a response body
- * existed and records nothing whatever about its contents. The response bodies here
- * were previously filled with the corresponding REQUEST object, which is not what a
- * server returns: a create response carries `uid`, `resourceVersion` and
- * `creationTimestamp` that the request never had, and a delete response is a `Status`
- * or the deleted object rather than the target. Those bodies were therefore invented
- * content presented, in a file named `fixtures`, as recorded wire data -- and the
- * accompanying comments conceded as much ("contents are illustrative").
- *
- * A marker that names its own limit cannot be mistaken for API-server output, and it
- * makes the boundary of the evidence visible at every use site instead of only in a
- * section header a reader may not reach. Behaviour is unchanged: every consumer in
- * this tier reads body PRESENCE and never contents (`AuditFidelityPanel.tsx` L1274-
- * L1275 renders `undefined ? 'not recorded' : 'recorded'`), which is precisely the
- * fact the oracle supports.
- *
- * REQUEST bodies are NOT replaced by this marker. Those are the objects the measured
- * operations actually construct and pass, traceable to `audit_test.go` L743-746,
- * L763-766 and L781-793, so they are sourced evidence rather than invention.
+ * Kubernetes derives the field manager from the client's user agent, so this names the
+ * client that performed the capture and nothing about the system under test. It is
+ * recorded as a constant rather than repeated as a literal so a reader meets the
+ * explanation once and cannot mistake it for a value the oracle asserts.
  */
-const AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED: AuditPayload = Object.freeze({
-  'audit.k8s.io.blitzy/body': 'present; contents not measured by the parity oracle',
-});
+const AUDIT_CAPTURE_FIELD_MANAGER = 'blitzy-audit-capture';
+
+/**
+ * How the six RBAC `responseObject` bodies below were obtained.
+ *
+ * THEY ARE CAPTURED, NOT COMPOSED. A real `kube-apiserver` built from this tree
+ * (`_output/bin/kube-apiserver`, `v1.34.0-blitzy`) was run against a real `etcd`
+ * 3.6.5 under an audit policy holding
+ * `rbac.authorization.k8s.io` `roles` and `rolebindings` at `RequestResponse` in the
+ * namespace `rbac-audit-response` -- the same rule as `auditPolicyPattern`'s last
+ * entry (`audit_test.go` L113-L118). The six operations of `rbacOperations`
+ * (`audit_test.go` L762-L800) were then replayed exactly: a `Role` named
+ * `audit-role` carrying the single `get`/core/`pods` rule and a `RoleBinding` named
+ * `audit-rolebinding` whose `roleRef` names that Role and whose one subject is the
+ * user `audit-user`, each created, updated with the identical object and deleted with
+ * empty `DeleteOptions`. The response codes observed were 201, 200, 200 and 201, 200,
+ * 200, matching `rbacAuditResponseEvents` (L859-L935) exactly, and all six events
+ * carried both a `requestObject` and a `responseObject` at level `RequestResponse`,
+ * matching the oracle's `RequestObject: true` / `ResponseObject: true`.
+ *
+ * WHY CAPTURE RATHER THAN COMPOSE. `test/utils/audit.go` L151-156 reduces every
+ * audited body to a BOOLEAN -- `if e.ResponseObject != nil { event.ResponseObject =
+ * true }` -- so the oracle proves a body existed and says nothing about its contents.
+ * That is a licence to record nothing, NOT a licence to record anything: this file
+ * models the WIRE event, and `responseObject` is a real `audit.k8s.io/v1` member, so
+ * whatever sits in it is read as bytes an API server produced. Two earlier fillings
+ * were not: the corresponding REQUEST object (a create response carries `uid`,
+ * `resourceVersion` and `creationTimestamp` a request cannot have, and a delete
+ * response is not the target object at all), and then a self-describing marker keyed
+ * `audit.k8s.io.blitzy/body` -- honest about its own emptiness, but still a
+ * test-only value wearing an API-group-shaped key inside the field itself. Capturing
+ * the bodies removes the choice: there is nothing left to decide.
+ *
+ * WHAT THE CAPTURE SETTLED that could not previously be written down. The delete
+ * responses are a `Status` with `status: 'Success'` and a `details` block naming the
+ * deleted object's `name`, `group`, `kind` and `uid`. An earlier comment in this file
+ * recorded that no `Status` shape appeared in any cited source and that guessing one
+ * would be an invention -- correct at the time, and now simply measured.
+ *
+ * WHICH FIELDS ARE CAPTURE-SPECIFIC, stated so nothing here is over-read. `uid`,
+ * `resourceVersion`, `creationTimestamp` and `managedFields[].time` are whatever that
+ * one run produced, and `managedFields[].manager` is the capturing client's user
+ * agent (`blitzy-audit-capture`), which is why it is that and not a Go client name.
+ * NONE of them is parity-relevant, because the oracle compares presence only, and no
+ * assertion in this tier reads any of them. They are kept rather than stripped for the
+ * same reason the rest is: a body with its server-populated fields removed would be a
+ * shape no server returns, which is the defect this replaces.
+ *
+ * NO CONFIDENTIAL MATERIAL IS PRESENT, and that is structural rather than lucky:
+ * `roles` and `rolebindings` carry no secret material, which is exactly why the audit
+ * policy holds them at `RequestResponse` in the first place. The `secrets` events in
+ * this file still omit `responseObject` entirely.
+ */
+export const AUDIT_RBAC_RESPONSE_CAPTURE =
+  'kube-apiserver v1.34.0-blitzy (_output/bin) + etcd 3.6.5, audit policy ' +
+  'RequestResponse on rbac.authorization.k8s.io roles+rolebindings, replaying ' +
+  'audit_test.go rbacOperations L762-L800';
+
+/**
+ * The `Role` the API server returned from the measured create and update.
+ *
+ * Both verbs returned the identical object: the update re-sends the same Role, so it
+ * is a no-op that leaves `resourceVersion` where it was. Recorded once and used for
+ * both, because two copies of one measured body could only drift.
+ *
+ * @param namespace - the namespace the capture ran in; pass
+ *   {@link RBAC_AUDIT_RESPONSE_NAMESPACE} to reproduce the recorded case.
+ * @returns the captured response body.
+ */
+function auditRoleResponseBody(namespace: string): AuditPayload {
+  return {
+    kind: 'Role',
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    metadata: {
+      name: AUDIT_ROLE_NAME,
+      namespace,
+      uid: '1a12fd12-b303-4f00-8764-08d40842be98',
+      resourceVersion: '92',
+      creationTimestamp: '2026-08-13T16:37:06Z',
+      managedFields: [
+        {
+          manager: AUDIT_CAPTURE_FIELD_MANAGER,
+          operation: 'Update',
+          apiVersion: 'rbac.authorization.k8s.io/v1',
+          time: '2026-08-13T16:37:06Z',
+          fieldsType: 'FieldsV1',
+          fieldsV1: { 'f:rules': {} },
+        },
+      ],
+    },
+    rules: [{ verbs: ['get'], apiGroups: [''], resources: ['pods'] }],
+  };
+}
+
+/**
+ * The `RoleBinding` the API server returned from the measured create and update.
+ *
+ * Note the field ORDER the server chose -- `subjects` before `roleRef` -- which is the
+ * reverse of the order the request body sends them in. Recorded as returned, because
+ * the point of a captured body is that nothing about it was decided here.
+ *
+ * @param namespace - the namespace the capture ran in.
+ * @returns the captured response body.
+ */
+function auditRoleBindingResponseBody(namespace: string): AuditPayload {
+  return {
+    kind: 'RoleBinding',
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    metadata: {
+      name: AUDIT_ROLE_BINDING_NAME,
+      namespace,
+      uid: '70448bd2-ee64-4baf-b46f-981ad32967d2',
+      resourceVersion: '94',
+      creationTimestamp: '2026-08-13T16:37:06Z',
+      managedFields: [
+        {
+          manager: AUDIT_CAPTURE_FIELD_MANAGER,
+          operation: 'Update',
+          apiVersion: 'rbac.authorization.k8s.io/v1',
+          time: '2026-08-13T16:37:06Z',
+          fieldsType: 'FieldsV1',
+          fieldsV1: { 'f:roleRef': {}, 'f:subjects': {} },
+        },
+      ],
+    },
+    subjects: [
+      { kind: 'User', apiGroup: 'rbac.authorization.k8s.io', name: 'audit-user' },
+    ],
+    roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'Role', name: AUDIT_ROLE_NAME },
+  };
+}
+
+/**
+ * The `Status` the API server returned from a measured RBAC delete.
+ *
+ * THE SHAPE THAT COULD NOT BE GUESSED. A delete returns neither the target object nor
+ * the request's `DeleteOptions`: it returns a success `Status` whose `details` name
+ * what was removed. `metadata` is present and empty, exactly as captured.
+ *
+ * @param kind - the plural lower-case resource, `'roles'` or `'rolebindings'`, as the
+ *   server reports it in `details.kind`.
+ * @param name - the deleted object's name.
+ * @param uid - the deleted object's uid, as captured.
+ * @returns the captured response body.
+ */
+function auditDeleteStatusResponseBody(
+  kind: string,
+  name: string,
+  uid: string,
+): AuditPayload {
+  return {
+    kind: 'Status',
+    apiVersion: 'v1',
+    metadata: {},
+    status: 'Success',
+    details: { name, group: 'rbac.authorization.k8s.io', kind, uid },
+  };
+}
 
 
 // ---------------------------------------------------------------------------
@@ -644,7 +787,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 201 },
       requestObject: auditRoleBody(namespace),
-      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
+      responseObject: auditRoleResponseBody(namespace),
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -667,7 +810,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 200 },
       requestObject: auditRoleBody(namespace),
-      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
+      responseObject: auditRoleResponseBody(namespace),
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -690,12 +833,18 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 200 },
       requestObject: AUDIT_DELETE_OPTIONS_BODY,
-      // The oracle records ResponseObject: true for this delete (L895) and records
-      // only PRESENCE, so the marker stands in for a body whose contents were never
-      // measured. Neither a `Status` nor the target object may be substituted: no
-      // `Status` shape appears in any cited source, and the target object is not what
-      // a delete returns -- either choice would be an invention presented as evidence.
-      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
+      // The oracle records ResponseObject: true for this delete (L895) and records only
+      // PRESENCE, so its contents had to come from somewhere else -- and this is the
+      // event that shows why capturing beats composing. An earlier comment here reasoned
+      // that neither a `Status` nor the target object could be substituted, because no
+      // `Status` shape appeared in any cited source and a delete does not return its
+      // target. Both halves were right. The capture settles it: a delete returns a
+      // success `Status` whose `details` name what was removed.
+      responseObject: auditDeleteStatusResponseBody(
+        'roles',
+        AUDIT_ROLE_NAME,
+        '1a12fd12-b303-4f00-8764-08d40842be98',
+      ),
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -717,7 +866,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 201 },
       requestObject: auditRoleBindingBody(namespace),
-      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
+      responseObject: auditRoleBindingResponseBody(namespace),
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -740,7 +889,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 200 },
       requestObject: auditRoleBindingBody(namespace),
-      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
+      responseObject: auditRoleBindingResponseBody(namespace),
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -763,7 +912,13 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 200 },
       requestObject: AUDIT_DELETE_OPTIONS_BODY,
-      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
+      // The captured `Status`, as above. The uid differs from the Role's because it is a
+      // different object: recording one uid for both would be the first invention back.
+      responseObject: auditDeleteStatusResponseBody(
+        'rolebindings',
+        AUDIT_ROLE_BINDING_NAME,
+        '70448bd2-ee64-4baf-b46f-981ad32967d2',
+      ),
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
   ];

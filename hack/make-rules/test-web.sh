@@ -467,6 +467,50 @@ kube::test::web::flag_name() {
   echo "${stripped%%.*}"
 }
 
+# kube::test::web::takes_value returns 0 when the Vitest option named $1 carries a
+# value, and non-zero otherwise. Nothing is modified.
+#
+# WHY THIS EXISTS. Vitest accepts BOTH `--opt=value` and `--opt value`, and the two
+# spellings mean the same thing to its parser. A policy that reads a value only from
+# `${arg#*=}` therefore inspects one of them and waves the other through, which is not
+# a narrower check but no check at all: `--testTimeout=0` was refused while
+# `--testTimeout 0` removed the same bound silently. Every option whose VALUE decides
+# whether it is acceptable has to be listed here so both spellings reach the same
+# policy.
+#
+# `-t` and `--testNamePattern` are listed too, and they are the reason this is a
+# separate predicate rather than a case arm. Their values are never policed -- a name
+# filter can only narrow the run -- but they must be CONSUMED, or a pattern that
+# happens to look like an option is inspected as one and a legitimate
+# `-t --watch-behaviour` is refused for a flag nobody passed.
+kube::test::web::takes_value() {
+  case "$1" in
+    watch|w|testTimeout|hookTimeout|teardownTimeout|reporter|maxWorkers|t|testNamePattern)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+# kube::test::web::is_option_like returns 0 when the token $1 reads as an option rather
+# than as a value. Nothing is modified.
+#
+# A leading `-` is the signal, with ONE deliberate exception: a negative number is a
+# value, not an option. Without the exception `--testTimeout -1` would leave its value
+# unconsumed and unexamined -- and -1 disables the timeout in Vitest exactly as 0 does,
+# so that is the one bypass this predicate exists to close. A bare `-` is treated as a
+# value because it is not an option either.
+kube::test::web::is_option_like() {
+  case "$1" in
+    -[0-9]*|-.[0-9]*)
+      return 1 ;;
+    -?*)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
 # kube::test::web::reject_forbidden_args refuses any caller-supplied Vitest option
 # that would let this gate SUCCEED WITHOUT RUNNING THE SPECS, wait for input
 # forever, or remove a bound the tier depends on. On return either every argument
@@ -485,10 +529,13 @@ kube::test::web::flag_name() {
 #     over that verdict - kube::test::web::spec_count, the empty-tier exemption
 #     gated on KUBE_WEB_ALLOW_NO_TESTS and refused in CI - and a caller-supplied
 #     flag would bypass every bit of it.
-#   * REMOVING THE PER-TEST BOUND. `--testTimeout=0` and `--hookTimeout=0` mean NO
-#     timeout in Vitest, so a hung test or a hung `beforeAll` waits forever. Those
-#     bounds (10000 ms each in web/vitest.config.ts) are the React tier's analogue
-#     of pytest-timeout.
+#   * REMOVING THE PER-TEST BOUND. `--testTimeout 0` and `--hookTimeout 0` - in either
+#     spelling, and for zero or any negative value - mean NO timeout in Vitest, so a
+#     hung test or a hung `beforeAll` waits forever. Those bounds (10000 ms each in
+#     web/vitest.config.ts) are the React tier's analogue of pytest-timeout, and the
+#     1800-second outer ceiling is a poor substitute: it turns a wedged test from a
+#     ten-second failure into half an hour of silence. `--teardownTimeout` is refused
+#     on the same terms.
 #   * OUT-OF-SCOPE RUNNERS. `--browser`, `--browser.enabled` and `--standalone`
 #     switch to Browser Mode or a standalone server. AAP §0.8.2 puts browser
 #     automation, cross-browser testing and visual regression outside this project
@@ -504,18 +551,57 @@ kube::test::web::flag_name() {
 # path filter narrow the run, but Vitest exits 1 when a filter matches no spec, and
 # this runner treats that as the genuine failure it is - so a mistyped filter fails
 # rather than passing quietly. `--bail` can only make the gate stricter.
+#
+# BOTH SPELLINGS ARE POLICED, and the loop below is indexed rather than `for arg in`
+# for exactly that reason. Vitest accepts `--opt=value` and `--opt value`
+# interchangeably, and this policy used to read a value only from `${arg#*=}` - so
+# every value-dependent rule inspected one spelling and waved the other through.
+# `--testTimeout 0`, `--hookTimeout 0` and `--reporter basic` all passed a gate that
+# refused `--testTimeout=0`, `--hookTimeout=0` and `--reporter=basic`. That is not a
+# narrower check, it is an absent one: the first two removed the 10-second per-test and
+# per-hook bounds and left only the 1800-second outer ceiling, so a hung test burned
+# half an hour before anything noticed, and the third reached the removed reporter's
+# opaque startup crash by the one route the runner had promised to name clearly.
+# kube::test::web::takes_value now normalises the two forms to one value before any rule
+# reads it, and the value token is CONSUMED so it cannot then be re-inspected as an
+# option in its own right.
 kube::test::web::reject_forbidden_args() {
-  local arg name reason value
+  local -a args=("$@")
+  local -i index=0
+  local -i count=${#args[@]}
+  local arg name reason value spelling
 
-  for arg in "$@"; do
+  while (( index < count )); do
+    arg=${args[index]}
     name=$(kube::test::web::flag_name "${arg}")
     reason=""
+
+    # ONE NORMALISATION, THEN THE RULES. `value` is the option's value however it was
+    # spelled, or the empty string when it genuinely has none; `spelling` is what a
+    # diagnostic quotes back, so a refusal names what the caller actually typed rather
+    # than a reconstruction of it.
+    value=""
+    spelling=${arg}
+    if kube::test::web::takes_value "${name}"; then
+      if [[ "${arg}" == *=* ]]; then
+        value=${arg#*=}
+      elif (( index + 1 < count )) && ! kube::test::web::is_option_like "${args[index + 1]}"; then
+        value=${args[index + 1]}
+        spelling="${arg} ${value}"
+        # Consumed: the value is this option's, not an argument of its own.
+        index+=1
+      fi
+    fi
+
     case "${name}" in
       watch|w)
         # `--watch=false` is the explicit OFF form and is harmless; only a watching
-        # value is refused, so a caller may be redundantly explicit.
-        value="true"
-        [[ "${arg}" == *=* ]] && value=${arg#*=}
+        # value is refused, so a caller may be redundantly explicit. A BARE `--watch`
+        # is a watching value, which is why the default below is "true" rather than
+        # the empty string.
+        if [[ -z "${value}" ]]; then
+          value="true"
+        fi
         if [[ "${value}" != "false" && "${value}" != "0" ]]; then
           reason="it makes Vitest watch for file changes and never return, so in CI it consumes the whole wall-clock allowance in silence"
         fi
@@ -528,16 +614,17 @@ kube::test::web::reject_forbidden_args() {
         reason="browser automation, cross-browser testing and visual regression are outside this project (AAP §0.8.2) and this tier is fixed to jsdom (AAP §0.4.1.1); the provider package is deliberately not installed, so a browser run fails obscurely rather than clearly" ;;
       passWithNoTests)
         reason="it makes 'every spec was deleted' indistinguishable from 'every spec passed', bypassing the empty-tier handling this runner exists to provide (use KUBE_WEB_ALLOW_NO_TESTS=y locally, which is refused in CI)" ;;
-      testTimeout|hookTimeout)
-        if [[ "${arg}" == *=* ]]; then
-          value=${arg#*=}
-          if [[ "${value}" =~ ^-?[0-9]+$ ]] && [[ "${value}" -le 0 ]]; then
-            reason="a ${name} of ${value} means NO timeout in Vitest, so a hung test or hook waits forever; that bound is this tier's analogue of pytest-timeout"
-          fi
+      testTimeout|hookTimeout|teardownTimeout)
+        # ZERO AND EVERY NEGATIVE MEAN "NO TIMEOUT" in Vitest, so both are refused, and
+        # the value is read from the normalisation above rather than from `=` alone.
+        # teardownTimeout is here for the same reason as the other two: a teardown that
+        # never returns wedges the run just as thoroughly as a test that never returns.
+        if [[ "${value}" =~ ^-?[0-9]+$ ]] && (( value <= 0 )); then
+          reason="a ${name} of ${value} means NO timeout in Vitest, so a hung test, hook or teardown waits forever; that bound is this tier's analogue of pytest-timeout"
         fi
         ;;
       reporter)
-        if [[ "${arg}" == *=basic ]]; then
+        if [[ "${value}" == "basic" ]]; then
           reason="the 'basic' reporter was REMOVED in Vitest 4 (AAP §0.2.2.2) and fails at load with ERR_LOAD_URL / loadCustomReporterModule, which reads like a configuration error rather than a bad flag; use 'default'"
         fi
         ;;
@@ -545,13 +632,17 @@ kube::test::web::reject_forbidden_args() {
 
     if [[ -n "${reason}" ]]; then
       kube::log::usage \
-        "ERROR: refusing the Vitest argument '${arg}': ${reason}." \
+        "ERROR: refusing the Vitest argument '${spelling}': ${reason}." \
         "This gate exists to prove the React tier RAN and PASSED, so an argument that can" \
         "produce a zero exit status - or no exit at all - without that being true is rejected" \
-        "before Vitest starts. Nothing was run. Remove the argument, or narrow the run with a" \
+        "before Vitest starts. Both spellings are checked: '--option=value' and" \
+        "'--option value' mean the same thing to Vitest and are refused alike." \
+        "Nothing was run. Remove the argument, or narrow the run with a" \
         "path filter or -t, both of which fail when they match nothing."
       return 1
     fi
+
+    index+=1
   done
   return 0
 }

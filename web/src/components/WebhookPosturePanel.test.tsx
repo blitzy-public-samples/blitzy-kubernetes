@@ -59,6 +59,7 @@ import {
   MAX_SAFE_VALUE_LENGTH,
   SAFE_OVERSIZED_TEXT,
   SAFE_REDACTED,
+  SAFE_UNRECOGNISED_REASON,
 } from '../domain/safeText';
 import {
   WEBHOOK_ADMISSION_REVIEW_VERSIONS,
@@ -1079,6 +1080,67 @@ describe('WebhookPosturePanel — external text is bounded and redacted', () => 
     // and `httpStatus` is a number, so neither is external text.
     expect(container).toHaveTextContent(`failure kind ${CONTROL_STATUS_ERRORS.forbidden.kind}`);
     expect(container).toHaveTextContent('HTTP status 403');
+  });
+
+  it('claims no server reason when no response carried one', () => {
+    // ABSENT IS NOT UNRECOGNISED. `describeStatusReason` maps every non-allowlisted value
+    // -- `undefined` included -- to `[unrecognised reason]`, which is correct for something
+    // the server sent and a fabrication for a field that never arrived. `reason` is read
+    // from a Kubernetes `Status` body, so a `network` failure has none: the alert used to
+    // read "reason [unrecognised reason]", telling an operator the API server had answered
+    // with something unreadable when nothing had answered at all. On the one failure class
+    // where the fault is NOT at the API server, that sentence pointed straight at it.
+    const { container } = renderWithProviders(
+      <WebhookPosturePanel
+        result={{ status: 'error', error: CONTROL_STATUS_ERRORS.network, refresh: vi.fn() }}
+      />,
+    );
+
+    // Asserted with `hasOwn` rather than by reading the field, because the fixture models
+    // absence by OMITTING the key -- which its `as const` type then reflects, so reading
+    // `.reason` would not even compile. That is the fact under test: the key is not there.
+    expect(
+      Object.hasOwn(CONTROL_STATUS_ERRORS.network, 'reason'),
+      'the network fixture must carry no reason at all',
+    ).toBe(false);
+    expect(container.textContent ?? '').not.toContain(SAFE_UNRECOGNISED_REASON);
+    expect(container.textContent ?? '').not.toContain('reason ');
+    // The rest of the sentence is unaffected: the failure is still announced and still
+    // renders no verdict.
+    expect(screen.getByRole('alert')).toHaveTextContent('did not complete');
+    expect(container).toHaveTextContent(`failure kind ${CONTROL_STATUS_ERRORS.network.kind}`);
+    expect(renderedVerdict(container)).toBeNull();
+  });
+
+  it('still names an unrecognised reason as unrecognised when the server sent one', () => {
+    // THE OTHER HALF, and the reason the guard is a presence test rather than a deletion.
+    // A reason that DID arrive and is not in the allowlist must be reported as
+    // unrecognised, never echoed: it is external text on a live alert. Without this case,
+    // deleting the clause outright would satisfy the assertion above.
+    const { container } = renderWithProviders(
+      <WebhookPosturePanel
+        result={{
+          status: 'error',
+          error: { ...CONTROL_STATUS_ERRORS.serverError, reason: 'NotAKubernetesReason' },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(container).toHaveTextContent(`reason ${SAFE_UNRECOGNISED_REASON}`);
+    expect(container.textContent ?? '').not.toContain('NotAKubernetesReason');
+  });
+
+  it('renders an allowlisted reason verbatim', () => {
+    // The third state, so the presence guard cannot be mistaken for a blanket suppression:
+    // a reason the allowlist knows is shown as the server wrote it.
+    const { container } = renderWithProviders(
+      <WebhookPosturePanel
+        result={{ status: 'error', error: CONTROL_STATUS_ERRORS.forbidden, refresh: vi.fn() }}
+      />,
+    );
+
+    expect(container).toHaveTextContent(`reason ${String(CONTROL_STATUS_ERRORS.forbidden.reason)}`);
   });
 
   it('says a wholly credential-shaped message was withheld, not that none arrived', () => {

@@ -86,6 +86,7 @@ import {
 } from '../test/fixtures/controlStatus';
 import { renderWithProviders } from '../test/utils/renderWithProviders';
 import EtcdTransportPanel, {
+  ETCD_MTLS_CREDENTIAL_VARS,
   resolveEtcdTransportEffectiveVerdict,
 } from './EtcdTransportPanel';
 
@@ -432,6 +433,149 @@ describe('EtcdTransportPanel — the mutual-TLS branch needs all three credentia
     const status = claimingPass(replacing(MUTUAL_TLS_PROVEN, V8_OBSERVATIONS.etcdServers, 2379));
 
     expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
+  });
+
+  it('never describes its evidence as the compatibility or direct-invocation path', () => {
+    // THE RENAMED-HELPER DEFECT, locked so it cannot recur. The silence check that runs on
+    // this branch was repurposed FROM the compatibility default -- that path was believed to
+    // print nothing, and its silence was taken as what told it apart from an operator's
+    // explicit opt-in. The shell disproves it, so the caller was moved; but the helper's
+    // title and its three detail sentences still described the shim, and `PostureDetail`
+    // renders both into the measurement list. A mutual-TLS payload therefore rendered
+    // evidence naming a DIFFERENT V8 branch -- one with a different endpoint, a different
+    // flag set and a different verdict -- which is precisely the class of mislabelling this
+    // panel exists to prevent in the deployments it reports on.
+    //
+    // Asserted over the WHOLE evidence region rather than over one measurement, so a future
+    // edit cannot reintroduce the wording anywhere on this branch, and asserted on the three
+    // words that name the other branch rather than on an exact sentence, so legitimate
+    // rewording stays free.
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_PASSING} />,
+    );
+    const evidence = container.querySelector('[data-region="branch-evidence"]');
+
+    expect(evidence?.getAttribute('data-branch')).toBe('mutual-tls');
+    for (const wording of ['compatibility', 'direct-invocation', 'direct invocation', 'shim']) {
+      expect
+        .soft(
+          evidence?.textContent?.toLowerCase() ?? '',
+          `F-008-RQ-001: mutual-TLS evidence must not describe itself with "${wording}", ` +
+            'which names the compatibility-default branch',
+        )
+        .not.toContain(wording);
+    }
+  });
+
+  it('states the silence it requires as the all-credentials branch writing nothing', () => {
+    // The positive half of the assertion above: it is not enough that the wrong branch goes
+    // unnamed, the right one has to be named. Without this, deleting the explanation
+    // entirely would satisfy the negative check.
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_PASSING} />,
+    );
+    const silence = container.querySelector(
+      `[data-measurement="${V8_OBSERVATIONS.diagnostic}"]`,
+    );
+
+    expect(silence?.getAttribute('data-result')).toBe('satisfied');
+    expect(silence?.textContent).toContain('mutual-TLS branch');
+    expect(silence?.textContent).toContain('all-credentials branch');
+  });
+});
+
+describe('EtcdTransportPanel — the recorded diagnostics are the shell diagnostics', () => {
+  // WHY THIS SUITE EXISTS. The recorded V8 payloads present their `diagnostic` values as the
+  // operator output `configure-etcd-params` produced. Two of the three had been paraphrased:
+  // the warning lost the shell's `ALL of` and the six credential variable names it writes out
+  // in full, and the fail-closed error lost the parenthesised variable list and its closing
+  // remedy sentence. Meanwhile the panel's own scenario table carried the correct sentences,
+  // so two artifacts in one tier described one shell branch differently -- and the one that
+  // presented itself as measured evidence was the wrong one. An operator greps a boot log for
+  // these words; a shortened copy is a claim about a run that never happened (AAP §0.10.2).
+  //
+  // The full sentences now have exactly one definition site, `domain/securityConstants.ts`,
+  // read by both the panel and the fixtures. What is asserted here is the property that made
+  // the drift detectable in the first place: every recorded diagnostic must CONTAIN the
+  // substring constant the measurements match on. Containment rather than equality, because
+  // the substrings exist precisely so a future rewording of the surrounding prose does not
+  // turn into a false failure -- but a diagnostic that no longer carries its phrase is a
+  // diagnostic the panel can no longer recognise.
+
+  it.each([
+    ['the plaintext-fallback warning', 1, ETCD_PLAINTEXT_WARNING_MESSAGE],
+    ['the plaintext opt-in warning', 2, ETCD_PLAINTEXT_WARNING_MESSAGE],
+    ['the fail-closed error', 3, ETCD_FAIL_CLOSED_MESSAGE],
+    ['the partial-credential error', 4, ETCD_PARTIAL_CREDENTIALS_MESSAGE],
+  ])('records %s carrying the phrase the panel matches on', (_name, index, phrase) => {
+    const recorded = ETCD_TRANSPORT_STATES[index]?.diagnostic;
+
+    expect(typeof recorded, 'the state records a diagnostic').toBe('string');
+    expect(String(recorded)).toContain(phrase);
+  });
+
+  it('records the six credential variable names the shell writes out in full', () => {
+    // THE HALF THAT WAS LOST. The substring constants are the invariant phrases and none of
+    // them contains a variable name, so containment alone would still pass against the
+    // shortened paraphrase. This is the assertion that would have caught it: the shell names
+    // every variable it looked for, and that naming is the actionable half of the message --
+    // it tells an operator what to set.
+    const warning = String(ETCD_TRANSPORT_STATES[2].diagnostic);
+    const failClosed = String(ETCD_TRANSPORT_STATES[3].diagnostic);
+
+    for (const variable of ETCD_MTLS_CREDENTIAL_VARS) {
+      expect
+        .soft(warning, `F-008-RQ-002: the recorded warning must name ${variable}`)
+        .toContain(variable);
+      expect
+        .soft(failClosed, `F-008-RQ-003: the recorded fail-closed error must name ${variable}`)
+        .toContain(variable);
+    }
+  });
+
+  it('records ONE warning text for both plaintext branches, from one definition site', () => {
+    // Identity, not equality of two spellings: both states must be the SAME string, because
+    // the shell reaches one `echo` from one branch guard. An inline second copy of the
+    // sentence sat on the opt-in payload's `warnings` array and had drifted from this one,
+    // which is how the "one definition site" claim in the fixture became false.
+    expect(ETCD_TRANSPORT_STATES[1].diagnostic).toBe(ETCD_TRANSPORT_STATES[2].diagnostic);
+    expect(V8_ETCD_TRANSPORT_WARNING.warnings).toEqual(
+      V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT.warnings,
+    );
+    expect(V8_ETCD_TRANSPORT_WARNING.warnings[0]).toBe(ETCD_TRANSPORT_STATES[2].diagnostic);
+  });
+
+  it('keeps the two abort diagnostics distinct, so a partial set is never read as permitted', () => {
+    // The one thing byte-exactness must NOT do is make the two `exit 1` branches look alike.
+    // They are different branches with different remedies: the all-absent branch consults the
+    // opt-out, the partial branch does not consult it at all.
+    expect(ETCD_TRANSPORT_STATES[3].diagnostic).not.toBe(ETCD_TRANSPORT_STATES[4].diagnostic);
+    expect(String(ETCD_TRANSPORT_STATES[4].diagnostic)).not.toContain(ETCD_FAIL_CLOSED_MESSAGE);
+    expect(String(ETCD_TRANSPORT_STATES[3].diagnostic)).not.toContain(
+      ETCD_PARTIAL_CREDENTIALS_MESSAGE,
+    );
+  });
+
+  it('renders a diagnostic in full instead of redacting it for length', () => {
+    // THE SIDE EFFECT OF BYTE-EXACTNESS, closed here. The shell's sentences are 247, 408 and
+    // 285 characters, because each names all six variables; the scalar observation formatter
+    // REDACTS outright above 200. Sent through that rule the evidence cell read `[redacted]`
+    // -- the panel claiming it had withheld a credential where the shell had printed an
+    // ordinary message, destroying the evidence AAP §0.10.2 requires this branch to show. The
+    // diagnostic is prose and is now formatted as prose, which applies the same
+    // credential-shape redaction against a prose-sized bound.
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_FAIL_CLOSED} />,
+    );
+    const cell = container.querySelector('.etcd-transport-panel__evidence tbody tr:last-child');
+
+    expect(container.querySelector('.etcd-transport-panel__evidence')?.textContent).toContain(
+      ETCD_FAIL_CLOSED_MESSAGE,
+    );
+    expect(
+      container.querySelector('.etcd-transport-panel__evidence')?.textContent,
+    ).not.toContain(SAFE_REDACTED);
+    expect(cell).not.toBeNull();
   });
 });
 

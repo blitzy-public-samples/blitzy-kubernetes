@@ -675,9 +675,21 @@ function describeFailure(failure: AuditEventsError): string {
       : `HTTP status ${failure.httpStatus}.`,
   );
 
-  const reason = describeStatusReason(failure.reason);
-  if (reason.length > 0) {
-    parts.push(`Reason: ${reason}.`);
+  // ABSENT IS NOT UNRECOGNISED. `describeStatusReason` maps everything that is not an
+  // allowlisted `StatusReason` -- `undefined` included -- to `[unrecognised reason]`,
+  // which is the right answer for a value the server sent and the wrong one for a field
+  // that never arrived. `reason` comes from a Kubernetes `Status` body, so it is absent
+  // on every failure that produced no response: this alert used to say "Reason:
+  // [unrecognised reason]." for a network error or a timeout, asserting that the server
+  // had supplied something unreadable when no server had answered. That is the same
+  // fabrication the `httpStatus` note above describes, and it is corrected the same way
+  // -- read from PRESENCE, and say nothing when there is nothing to say. The two
+  // unconditional sentences either side still carry the whole meaning of the alert.
+  if (failure.reason !== undefined) {
+    const reason = describeStatusReason(failure.reason);
+    if (reason.length > 0) {
+      parts.push(`Reason: ${reason}.`);
+    }
   }
   const message = safeProse(failure.message);
   if (message.length > 0) {

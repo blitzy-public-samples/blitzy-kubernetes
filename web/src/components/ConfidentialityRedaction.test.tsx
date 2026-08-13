@@ -50,6 +50,7 @@ import {
   MAX_SAFE_PROSE_INPUT_LENGTH,
   SAFE_OVERSIZED_TEXT,
   SAFE_REDACTED,
+  SAFE_UNRECOGNISED_REASON,
 } from '../domain/safeText';
 import { AUDIT_EVENTS_DEFAULT_PAGE_SIZE, type AuditEvent } from '../hooks/useAuditEvents';
 import {
@@ -727,6 +728,45 @@ describe('ConfidentialityRedaction — external text is bounded and redacted', (
     expect(container).toHaveTextContent('No conclusion about recorded response bodies');
   });
 
+  it.each([
+    ['a network failure', 'network' as const],
+    ['a deadline that elapsed', 'timeout' as const],
+  ])('claims no server reason for %s, where no response existed', (_name, kind) => {
+    // ABSENT IS NOT UNRECOGNISED. `describeStatusReason` maps every non-allowlisted value,
+    // `undefined` included, to `[unrecognised reason]` -- right for something the server
+    // sent, a fabrication for a field that never arrived. `reason` is read from a
+    // Kubernetes `Status` body, so these two kinds have none by definition: the alert used
+    // to read "Reason: [unrecognised reason]." and assert that a server had answered
+    // unreadably when no server had answered. It is the same defect the `httpStatus: 0`
+    // sentinel caused on the line above it, and it is fixed the same way -- from PRESENCE.
+    const { container } = renderWithProviders(
+      <ConfidentialityRedaction events={[]} error={{ kind, message: 'unreachable' }} />,
+    );
+
+    expect(text(container)).not.toContain(SAFE_UNRECOGNISED_REASON);
+    expect(text(container)).not.toContain('Reason:');
+    // The local sentences either side still carry the whole meaning of the alert, and the
+    // kind-specific sentence still says why no status is shown.
+    expect(container).toHaveTextContent('Audit events could not be read.');
+    expect(container).toHaveTextContent('No HTTP response was received');
+    expect(container).toHaveTextContent('No conclusion about recorded response bodies');
+  });
+
+  it('still names an unrecognised reason as unrecognised when the server sent one', () => {
+    // THE OTHER HALF, so the guard cannot degrade into blanket suppression. A reason that
+    // DID arrive and is not allowlisted must be reported as unrecognised and never echoed:
+    // it is external text on a live alert region.
+    const { container } = renderWithProviders(
+      <ConfidentialityRedaction
+        events={[]}
+        error={{ kind: 'http', httpStatus: 500, reason: 'NotAKubernetesReason', message: 'boom' }}
+      />,
+    );
+
+    expect(container).toHaveTextContent(`Reason: ${SAFE_UNRECOGNISED_REASON}.`);
+    expect(text(container)).not.toContain('NotAKubernetesReason');
+  });
+
   it('bounds an oversized failure message rather than rendering it', () => {
     const { container } = renderWithProviders(
       <ConfidentialityRedaction
@@ -889,27 +929,48 @@ describe('ConfidentialityRedaction — a body that cannot be serialized is still
 });
 
 // ---------------------------------------------------------------------------
-// The recorded fixtures claim only what the oracle measured (finding P).
+// The recorded fixtures hold WIRE data in wire fields (finding P, then F1).
 // ---------------------------------------------------------------------------
 
-describe('the recorded audit fixtures carry presence, not invented bodies', () => {
+describe('the recorded audit fixtures hold captured API-server bodies', () => {
   /**
-   * WHY THIS LIVES IN A SPEC AND NOT ONLY IN A COMMENT. `test/utils/audit.go`
-   * L151-156 reduces every audited body to a BOOLEAN --
-   * `if e.ResponseObject != nil { event.ResponseObject = true }` -- so the parity
-   * oracle records that a response body existed and records NOTHING about its
-   * contents. The fixtures previously filled each `responseObject` with the
-   * corresponding REQUEST object, which no server returns: a create response carries
-   * the `uid`, `resourceVersion` and `creationTimestamp` a request cannot have, and a
-   * delete response is a `Status` or the deleted object rather than the target.
+   * WHY THIS LIVES IN A SPEC AND NOT ONLY IN A COMMENT, and what it has been through.
    *
-   * That put invented content, in a file named `fixtures`, where a reader would take
-   * it for recorded wire data. A comment saying "contents are illustrative" does not
-   * stop the next author from asserting against it; this does.
+   * `test/utils/audit.go` L151-156 reduces every audited body to a BOOLEAN --
+   * `if e.ResponseObject != nil { event.ResponseObject = true }` -- so the parity
+   * oracle proves a response body existed and says NOTHING about its contents. That is
+   * a licence to record nothing; it is not a licence to record anything, because
+   * `responseObject` is a real `audit.k8s.io/v1` member and whatever sits in it reads
+   * as bytes an API server produced.
+   *
+   * Two fillings have been rejected. The first was the corresponding REQUEST object,
+   * which no server returns: a create response carries the `uid`, `resourceVersion`
+   * and `creationTimestamp` a request cannot have, and a delete response is not the
+   * target object at all. The second was a self-describing presence marker keyed
+   * `audit.k8s.io.blitzy/body` -- honest about its own emptiness, and still a
+   * test-only value wearing an API-group-shaped key INSIDE the wire field, which a
+   * reader and this component alike would take for a server's own output.
+   *
+   * The bodies are now CAPTURED: a real kube-apiserver built from this tree, under an
+   * audit policy holding RBAC at `RequestResponse`, replaying the six measured
+   * operations. So the assertions below no longer describe a stand-in. They describe
+   * what a captured body has to look like — a Kubernetes object envelope, of the kind
+   * the verb actually returns, with nothing of this repository's invention in it.
    */
-  const PRESENCE_MARKER_KEY = 'audit.k8s.io.blitzy/body';
+  const FABRICATION_MARKER = /blitzy/i;
 
-  it('records every response body as an explicit presence marker', () => {
+  /** Every key anywhere in `value`, so a fabricated key cannot hide in a nested object. */
+  function everyKeyOf(value: unknown): string[] {
+    if (Array.isArray(value)) {
+      return value.flatMap(everyKeyOf);
+    }
+    if (typeof value !== 'object' || value === null) {
+      return [];
+    }
+    return Object.entries(value).flatMap(([key, nested]) => [key, ...everyKeyOf(nested)]);
+  }
+
+  it('records every response body as a Kubernetes object envelope', () => {
     const withResponseBodies = ALL_OBSERVED_AUDIT_EVENTS.filter(
       (candidate) => candidate.responseObject !== undefined,
     );
@@ -923,20 +984,88 @@ describe('the recorded audit fixtures carry presence, not invented bodies', () =
 
     for (const observed of withResponseBodies) {
       const body = observed.responseObject as Record<string, unknown>;
-      expect(
-        Object.keys(body),
-        `${observed.auditID} records a response body with invented contents; the oracle ` +
-          'measures presence only',
-      ).toEqual([PRESENCE_MARKER_KEY]);
-      expect(String(body[PRESENCE_MARKER_KEY])).toContain('not measured');
+      // `kind` and `apiVersion` are what every API-server response carries and what
+      // neither rejected filling had: the marker had no envelope at all, and a request
+      // object's envelope would not match the verb's response.
+      expect
+        .soft(
+          typeof body['kind'],
+          `F-006-RQ-002: ${observed.auditID} records a response body with no kind, so it ` +
+            'is not an API-server response',
+        )
+        .toBe('string');
+      expect
+        .soft(
+          typeof body['apiVersion'],
+          `F-006-RQ-002: ${observed.auditID} records a response body with no apiVersion`,
+        )
+        .toBe('string');
+    }
+  });
+
+  it('records the kind each verb actually returns, including Status on delete', () => {
+    // THE ASSERTION THAT CANNOT BE SATISFIED BY COMPOSING. A create and an update
+    // return the object; a delete returns a success `Status` whose `details` name what
+    // was removed. That last shape is the one an earlier comment in the fixture
+    // correctly refused to guess, and it is now measured, so it can be asserted.
+    for (const observed of ALL_OBSERVED_AUDIT_EVENTS) {
+      const body = observed.responseObject as Record<string, unknown> | undefined;
+      if (body === undefined) {
+        continue;
+      }
+      const expected =
+        observed.verb === 'delete'
+          ? 'Status'
+          : observed.objectRef?.resource === 'roles'
+            ? 'Role'
+            : 'RoleBinding';
+      expect
+        .soft(
+          body['kind'],
+          `F-006-RQ-002: the recorded ${observed.verb} on ${String(
+            observed.objectRef?.resource,
+          )} must carry the kind the API server returns`,
+        )
+        .toBe(expected);
+      if (observed.verb === 'delete') {
+        expect.soft(body['status'], 'a delete returns a success Status').toBe('Success');
+        expect
+          .soft(
+            (body['details'] as Record<string, unknown> | undefined)?.['name'],
+            'the Status details name the deleted object',
+          )
+          .toBe(observed.objectRef?.name);
+      }
+    }
+  });
+
+  it('carries no key of this repository\u2019s own invention in any recorded body', () => {
+    // THE F1 DEFECT, locked. A fabricated key is detectable by name, and the search is
+    // recursive so it cannot be reintroduced one level down. This holds for request
+    // bodies too: both fields are wire members and neither is a place to leave a note.
+    for (const observed of ALL_OBSERVED_AUDIT_EVENTS) {
+      for (const [field, body] of [
+        ['requestObject', observed.requestObject],
+        ['responseObject', observed.responseObject],
+      ] as const) {
+        for (const key of everyKeyOf(body)) {
+          expect
+            .soft(
+              FABRICATION_MARKER.test(key),
+              `F-006-RQ-002: ${observed.auditID} carries the fabricated key "${key}" in ` +
+                `${field}, which is a real audit.k8s.io/v1 wire member`,
+            )
+            .toBe(false);
+        }
+      }
     }
   });
 
   it('still omits the response body entirely on every secrets event', () => {
-    // THE CONFIDENTIALITY GUARD IS UNAFFECTED, and must be: the marker replaces
-    // invented CONTENT, it does not weaken the rule that a `secrets` event carries no
-    // response body at all. Omitted rather than present-and-marked, so a presence
-    // check still means something.
+    // THE CONFIDENTIALITY GUARD IS UNAFFECTED, and must be: capturing real bodies for
+    // the RBAC events does not weaken the rule that a `secrets` event carries no
+    // response body at all. Omitted rather than present-and-empty, so a presence check
+    // still means something.
     for (const observed of ALL_OBSERVED_AUDIT_EVENTS) {
       if (observed.objectRef?.resource !== 'secrets') {
         continue;
@@ -949,11 +1078,12 @@ describe('the recorded audit fixtures carry presence, not invented bodies', () =
   });
 
   it('keeps request bodies as the objects the measured operations construct', () => {
-    // CONTROL, and the boundary of the fix: REQUEST bodies are traceable to
+    // CONTROL, and the boundary of the change: REQUEST bodies are traceable to
     // `audit_test.go` L743-746, L763-766 and L781-793 -- they are the arguments the
-    // measured operations actually pass -- so they are sourced evidence and are NOT
-    // replaced by the marker. A blanket replacement would have discarded real
-    // evidence along with the invented kind.
+    // measured operations actually pass -- so they remain the sourced objects and are
+    // NOT replaced by a captured response. Replacing them would discard real evidence
+    // and would also delete the accepted trade-off the V6 level exists to make
+    // visible: a Secret write DOES log its `.data` in the request body.
     const secretWrite = ALL_OBSERVED_AUDIT_EVENTS.find(
       (candidate) => candidate.objectRef?.resource === 'secrets' && candidate.verb === 'create',
     );
@@ -963,6 +1093,12 @@ describe('the recorded audit fixtures carry presence, not invented bodies', () =
     expect(requestBody['kind'], 'the recorded request body is the real Secret object').toBe(
       'Secret',
     );
-    expect(Object.keys(requestBody)).not.toEqual([PRESENCE_MARKER_KEY]);
+    expect(requestBody['data'], 'the accepted trade-off is still visible').toBeDefined();
+    // A request body carries no server-populated fields, which is exactly why it could
+    // never have stood in for a response.
+    expect(
+      (requestBody['metadata'] as Record<string, unknown>)['uid'],
+      'a request object cannot carry a server-assigned uid',
+    ).toBeUndefined();
   });
 });

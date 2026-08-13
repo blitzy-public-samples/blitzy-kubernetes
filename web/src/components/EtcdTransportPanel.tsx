@@ -28,7 +28,7 @@ limitations under the License.
 //   shell behaviour of `configure-etcd-params`, and its two measured origins
 //   are cited on every constant below:
 //
-//     * cluster/gce/gci/configure-kubeapiserver.sh L18-L70 — the shipped
+//     * cluster/gce/gci/configure-kubeapiserver.sh L18-L91 — the shipped
 //       generator `configure-etcd-params`, which this file never re-implements
 //       (AAP §0.8.2 lists the Bash hardening scripts as out of scope for
 //       modification, and AAP §0.4.1.1 keeps the shell tier invoking the real
@@ -76,9 +76,9 @@ limitations under the License.
 //   `partial-credentials` is `fail` under the SAME semantics rather than in
 //   spite of them, and the evidence is in the shell rather than in taste:
 //   `ETCD_APISERVER_ALLOW_INSECURE` is consulted ONLY in the all-absent branch
-//   (configure-kubeapiserver.sh L41). No opt-out reaches the partial branch,
+//   (configure-kubeapiserver.sh L58). No opt-out reaches the partial branch,
 //   whose message is the imperative "Please provide all mTLS credential"
-//   (L49). A half-configured deployment is an operator misconfiguration that
+//   (L70). A half-configured deployment is an operator misconfiguration that
 //   the control catches, not a posture the control tolerates — so it is
 //   reported as a failure, never as a partial pass.
 //
@@ -117,12 +117,22 @@ import {
   safePathBasename,
   safeProse,
 } from '../domain/safeText';
-// The three shell diagnostics, matched as substrings against the SAME constants the shell
-// tier asserts, so one grep finds the phrase in both suites (M10).
+// The three shell diagnostics, in both of the forms this panel needs and from ONE
+// definition site each (AAP §0.5.5). The `_MESSAGE` constants are the invariant
+// substrings the measurements MATCH ON, quoted identically by the pytest shell tier so
+// one grep finds the phrase in both suites (M10). The `_WARNING`/`_ERROR` constants are
+// the COMPLETE sentences the shell writes, transcribed byte for byte from
+// configure-kubeapiserver.sh L60/L65/L70, and are what the scenario table renders: an
+// operator searches a boot log for those exact words. Reading both from the shared
+// domain module is what stops the rendered text and the recorded fixture text drifting
+// apart, which is precisely what had happened.
 import {
+  ETCD_FAIL_CLOSED_ERROR,
   ETCD_FAIL_CLOSED_MESSAGE,
+  ETCD_PARTIAL_CREDENTIALS_ERROR,
   ETCD_PARTIAL_CREDENTIALS_MESSAGE,
   ETCD_PLAINTEXT_ENDPOINT,
+  ETCD_PLAINTEXT_FALLBACK_WARNING,
   ETCD_PLAINTEXT_WARNING_MESSAGE,
   ETCD_TLS_ENDPOINT,
 } from '../domain/securityConstants';
@@ -179,7 +189,7 @@ export const ETCD_MTLS_CREDENTIAL_VARS = [
 
 /**
  * The environment variable that selects between the fail-closed branch and the
- * plaintext fallback (configure-kubeapiserver.sh L41).
+ * plaintext fallback (configure-kubeapiserver.sh L58).
  *
  * Both GCE reference profiles default it to `false` — measured at
  * cluster/gce/config-default.sh L446 and cluster/gce/config-test.sh L492, each
@@ -263,7 +273,7 @@ export interface EtcdTransportScenario {
    */
   readonly operatorMessage: string | null;
   /**
-   * `1` when the branch calls `exit 1` (configure-kubeapiserver.sh L46, L50),
+   * `1` when the branch calls `exit 1` (configure-kubeapiserver.sh L66, L71),
    * `null` when the function returns and `start-kube-apiserver` continues.
    */
   readonly exitCode: 1 | null;
@@ -307,17 +317,16 @@ const ETCD_MTLS_FLAGS: readonly EtcdTransportFlag[] = [
 
 /**
  * The diagnostic the plaintext-fallback branch writes
- * (configure-kubeapiserver.sh L43), verbatim.
+ * (configure-kubeapiserver.sh L60), verbatim.
  *
  * Shared by the two scenarios that reach that branch — the explicit opt-out and
  * the unset toggle — because the shell writes ONE message for both. Two copies
- * could drift apart and would misrepresent the script.
+ * could drift apart and would misrepresent the script, so the sentence is read
+ * from the shared domain module rather than written a second time here: the
+ * recorded V8 payloads read the SAME constant, which is what keeps the text this
+ * panel renders and the text the fixtures record provably identical.
  */
-const PLAINTEXT_FALLBACK_WARNING =
-  'WARNING: ALL of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ' +
-  'ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ' +
-  'ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, ' +
-  'mTLS between etcd server and kube-apiserver is not enabled.';
+const PLAINTEXT_FALLBACK_WARNING = ETCD_PLAINTEXT_FALLBACK_WARNING;
 
 /**
  * The plaintext endpoint both fallback scenarios configure (L42).
@@ -387,14 +396,11 @@ export const ETCD_TRANSPORT_SCENARIOS: readonly EtcdTransportScenario[] = [
     endpoint: null,
     etcdServersFlag: null,
     tlsFlags: [],
-    operatorMessage:
-      'ERROR: ALL etcd mTLS credentials (ETCD_APISERVER_CA_KEY, ' +
-      'ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ' +
-      'ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY, ' +
-      'ETCD_APISERVER_CLIENT_CERT) are missing and ' +
-      'ETCD_APISERVER_ALLOW_INSECURE is not set to true; refusing to fall back ' +
-      'to plaintext etcd for a hardened profile. Provide etcd mTLS ' +
-      'credentials, or set ETCD_APISERVER_ALLOW_INSECURE=true for local/dev.',
+    // Read from the shared domain module, byte for byte as the shell writes it
+    // (configure-kubeapiserver.sh L65). The recorded fail-closed payload reads the
+    // same constant, so the sentence rendered here and the sentence recorded as
+    // measured evidence cannot differ.
+    operatorMessage: ETCD_FAIL_CLOSED_ERROR,
     exitCode: 1,
     outcome:
       'configure-etcd-params calls exit 1 and kube-apiserver never starts. The ' +
@@ -435,7 +441,7 @@ export const ETCD_TRANSPORT_SCENARIOS: readonly EtcdTransportScenario[] = [
     condition:
       'None of the six credentials is set and ETCD_APISERVER_ALLOW_INSECURE is ' +
       'unset entirely, so the function-local ":-true" default in the shell ' +
-      'takes effect (configure-kubeapiserver.sh L41).',
+      'takes effect (configure-kubeapiserver.sh L58).',
     verdict: 'warn',
     verdictReason:
       'The same plaintext transport as the explicit opt-out, reached without ' +
@@ -453,7 +459,7 @@ export const ETCD_TRANSPORT_SCENARIOS: readonly EtcdTransportScenario[] = [
       'load the GCE profiles — specifically the in-tree unit tests ' +
       'apiserver_etcd_test.go and apiserver_kms_test.go, which call the ' +
       'function with neither etcd credentials nor the hardened profile ' +
-      'variables (configure-kubeapiserver.sh L36-L40). It is why TestTLSFlags ' +
+      'variables (configure-kubeapiserver.sh L36-L39). It is why TestTLSFlags ' +
       '"mTLS disabled" legitimately expects --etcd-servers=' +
       'http://127.0.0.1:2379 (apiserver_etcd_test.go L185-L188) while a ' +
       'hardened profile with no credentials still demands exit 1. Both are ' +
@@ -473,12 +479,11 @@ export const ETCD_TRANSPORT_SCENARIOS: readonly EtcdTransportScenario[] = [
     endpoint: null,
     etcdServersFlag: null,
     tlsFlags: [],
-    operatorMessage:
-      'ERROR: Some of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ' +
-      'ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ' +
-      'ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, ' +
-      'mTLS between etcd server and kube-apiserver cannot be enabled. Please ' +
-      'provide all mTLS credential.',
+    // Read from the shared domain module, byte for byte as the shell writes it
+    // (configure-kubeapiserver.sh L70) — a DIFFERENT sentence from the all-absent
+    // branch's, and kept different on purpose: it is what tells a half-configured
+    // deployment apart from a deliberately permitted plaintext one.
+    operatorMessage: ETCD_PARTIAL_CREDENTIALS_ERROR,
     exitCode: 1,
     outcome:
       'configure-etcd-params calls exit 1 and kube-apiserver never starts. The ' +
@@ -486,7 +491,7 @@ export const ETCD_TRANSPORT_SCENARIOS: readonly EtcdTransportScenario[] = [
     requirementIds: ['F-008-RQ-001', 'F-008-RQ-003'],
     note:
       'ETCD_APISERVER_ALLOW_INSECURE is read only on the all-absent branch ' +
-      '(configure-kubeapiserver.sh L41), so setting it cannot turn a ' +
+      '(configure-kubeapiserver.sh L58), so setting it cannot turn a ' +
       'half-configured deployment into a plaintext boot. There is no silent ' +
       'downgrade available here, by design.',
   },
@@ -590,6 +595,17 @@ const NOT_PATH_SHAPED_TEXT = 'reported as something other than a file path; valu
 const CREDENTIAL_ABSENT_TEXT = 'reported as absent';
 
 /**
+ * Rendered for a diagnostic whose text does not survive sanitization.
+ *
+ * A local sentence rather than an empty cell, for the reason every other withheld
+ * rendering in this panel is: a blank cell reads as "nothing was reported", which is a
+ * different fact from "something was reported and could not be shown". The measurement
+ * beside it has already decided the verdict from the value itself, so this affects
+ * legibility only and never a verdict.
+ */
+const WITHHELD_DIAGNOSTIC_TEXT = 'a diagnostic was reported but could not be displayed';
+
+/**
  * Renders a CREDENTIAL-labelled observation value, never verbatim.
  *
  * M17, THE DISCLOSURE HALF. The evidence table rendered every value through the general
@@ -623,10 +639,25 @@ function formatCredentialValue(value: ControlObservation['value']): string {
  * REPRESENTABLE value in {@link ControlObservation} rather than a missing one, so it is
  * described rather than hidden, and an empty string is described for the same reason.
  *
- * TWO GUARDS, and they are different in kind (M17 and M18). A credential-labelled identity
- * goes to {@link formatCredentialValue}, which never renders the value at all. Everything
- * else goes through the shared bounded sanitizer, because an observation value is external
- * text of arbitrary length and shape whatever its label says.
+ * THREE GUARDS, and they are different in kind (M17, M18 and M10). A credential-labelled
+ * identity goes to {@link formatCredentialValue}, which never renders the value at all. The
+ * DIAGNOSTIC goes through {@link safeProse}, because it is a sentence rather than a
+ * measurement — see below. Everything else goes through the shared bounded sanitizer for
+ * scalar values, because an observation value is external text of arbitrary length and shape
+ * whatever its label says.
+ *
+ * WHY THE DIAGNOSTIC IS PROSE AND NOT A VALUE. `safeObservationValue` REDACTS outright, rather
+ * than shortens, any string over {@link MAX_SAFE_VALUE_LENGTH} (200) — correct for a scalar
+ * measurement, where a value that long is not a measurement a reader can use. The shell's
+ * three diagnostics are 247, 408 and 285 characters, because each one names all six
+ * credential variables in full, and that naming is the diagnostic's whole value to an
+ * operator. Sent through the scalar rule they rendered as `[redacted]`: the panel would have
+ * claimed it withheld a credential where the shell had in fact printed an ordinary message,
+ * and the evidence AAP §0.10.2 requires this branch to show would have been destroyed to
+ * chase a length. {@link safeProse} applies the SAME credential-shape redaction and the SAME
+ * control-character flattening against a prose-sized bound, so nothing is weakened: a
+ * diagnostic that did carry a credential shape is still redacted, and one over 2000 characters
+ * is still elided.
  *
  * @param identity - the observation label, which decides which rule applies.
  * @param value - the observation value, verbatim from the wire.
@@ -641,6 +672,10 @@ function formatObservationValue(identity: string, value: ControlObservation['val
   }
   if (value === '') {
     return 'reported as an empty string';
+  }
+  if (identity === V8_OBSERVATIONS.diagnostic && typeof value === 'string') {
+    const prose = safeProse(value);
+    return prose === '' ? WITHHELD_DIAGNOSTIC_TEXT : prose;
   }
   return typeof value === 'string' ? safeObservationValue(value) : String(value);
 }
@@ -941,7 +976,7 @@ function requireDiagnosticPhrase(
 }
 
 /**
- * Requires the diagnostic to be MEASURED SILENT — the MUTUAL-TLS path's signature.
+ * Requires the diagnostic to be MEASURED SILENT — the MUTUAL-TLS branch's signature.
  *
  * `configure-etcd-params` prints only on the fallback and abort paths: the
  * all-credentials branch appends its four flags and says nothing
@@ -950,21 +985,30 @@ function requireDiagnosticPhrase(
  * warning — which would mean the branch that ran was not this one, and the endpoint
  * and flags reported alongside describe a boot that did not happen.
  *
- * NOT USED FOR THE COMPATIBILITY DEFAULT, though it once was. That path was believed
- * to print nothing, and silence was taken as what told it apart from an operator's
- * explicit opt-in. Executing the shell disproved it: the branch guard is
- * `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`, so unset and explicit
- * `true` are the SAME branch and emit the SAME warning. What tells them apart is
- * whether the variable was explicitly supplied, which `readBranch` reads from
- * `V8_OBSERVATIONS.unitTestCompatibilityDefault`.
+ * THE MUTUAL-TLS BRANCH IS THE ONLY CALLER, and every sentence this function returns
+ * says so. It once served the compatibility default as well, on the belief that the
+ * shim path prints nothing and that its silence is what tells it apart from an
+ * operator's explicit opt-in. Executing the shell disproved both halves: the branch
+ * guard is `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`, so unset and
+ * explicit `true` are the SAME branch emitting the SAME warning, and what tells them
+ * apart is whether the variable was explicitly supplied — which `readBranch` reads
+ * from `V8_OBSERVATIONS.unitTestCompatibilityDefault`. When that caller was removed,
+ * these sentences still described it; a mutual-TLS payload therefore rendered evidence
+ * naming the compatibility shim, which is a different V8 branch with a different
+ * endpoint, a different flag set and a different verdict. Every title, detail and
+ * violation below now names the all-credentials branch and nothing else, and
+ * `EtcdTransportPanel.test.tsx` asserts that no mutual-TLS measurement mentions the
+ * compatibility or direct-invocation path.
  *
  * Requiring an explicit `null` rather than accepting an absent field is the same rule
  * as {@link requireNoEndpoint}: an absence that was measured is evidence, and an
  * absence nobody looked for is not.
  */
-function requireNoDiagnostic(observations: readonly ControlObservation[]): EtcdMeasurement {
+function requireSilentMutualTlsBranch(
+  observations: readonly ControlObservation[],
+): EtcdMeasurement {
   const identity = V8_OBSERVATIONS.diagnostic;
-  const title = 'the branch ran without a diagnostic, as the compatibility shim does';
+  const title = 'the mutual-TLS branch ran without a diagnostic, as the shell writes none';
   const found = selectObservation(observations, identity);
   if (found.state !== 'reported') {
     return measurement(
@@ -972,7 +1016,7 @@ function requireNoDiagnostic(observations: readonly ControlObservation[]): EtcdM
       title,
       'indeterminate',
       'The diagnostic was not reported at all, so the silence that identifies the ' +
-        'compatibility default is unmeasured.',
+        'all-credentials branch is unmeasured.',
     );
   }
   if (found.value.value === null) {
@@ -980,7 +1024,8 @@ function requireNoDiagnostic(observations: readonly ControlObservation[]): EtcdM
       identity,
       title,
       'satisfied',
-      'No diagnostic was emitted, which is the direct-invocation shim path.',
+      'No diagnostic was emitted, which is what the all-credentials branch does: it ' +
+        'appends its four flags and says nothing.',
     );
   }
   if (typeof found.value.value !== 'string') {
@@ -1001,8 +1046,9 @@ function requireNoDiagnostic(observations: readonly ControlObservation[]): EtcdM
     identity,
     title,
     'violated',
-    'A diagnostic was emitted, so this is not the silent compatibility path — a branch ' +
-      'that announces itself is an operator decision and must be reported as one.',
+    'A diagnostic was emitted, so the branch that ran was not the all-credentials one — ' +
+      'the shell prints only on the plaintext-fallback and abort paths, and the endpoint ' +
+      'and flags reported alongside describe a boot that did not happen.',
   );
 }
 
@@ -1241,7 +1287,9 @@ function buildEtcdEvidence(observations: readonly ControlObservation[]): EtcdTra
       // rather than ignoring the field closes the case where a payload claims mutual TLS
       // while the shell actually printed a warning — which would mean the branch that ran was
       // not this one, and the endpoint and flags below describe a boot that did not happen.
-      requireNoDiagnostic(observations),
+      // The helper is named and worded for THIS branch alone; it is not the compatibility
+      // default's check, and that path requires the warning rather than the silence.
+      requireSilentMutualTlsBranch(observations),
     );
   } else if (branch === 'fail-closed') {
     measurements.push(
@@ -1300,7 +1348,7 @@ function buildEtcdEvidence(observations: readonly ControlObservation[]): EtcdTra
       // THE SAME WARNING AS THE EXPLICIT OPT-IN, and this was measured against the
       // shipped shell rather than assumed. `configure-etcd-params` tests
       // `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`
-      // (cluster/gce/gci/configure-kubeapiserver.sh L41), so an UNSET variable takes
+      // (cluster/gce/gci/configure-kubeapiserver.sh L58), so an UNSET variable takes
       // the identical branch to an explicit `true` and emits the identical WARNING on
       // stdout. Executing all three states confirms it:
       //   unset          -> rc=0, http endpoint, 1 WARNING, 0 ERROR

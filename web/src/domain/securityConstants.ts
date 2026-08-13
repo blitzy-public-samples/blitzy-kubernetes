@@ -387,6 +387,95 @@ export const ETCD_PARTIAL_CREDENTIALS_MESSAGE = 'Please provide all mTLS credent
 export const ETCD_PLAINTEXT_WARNING_MESSAGE =
   'mTLS between etcd server and kube-apiserver is not enabled';
 
+/* -------------------------------------------------------------------------- *
+ * V8 - the three shell diagnostics, VERBATIM and COMPLETE.
+ *
+ * THE THREE CONSTANTS BELOW ARE THE ONLY DEFINITION SITE OF THESE SENTENCES,
+ * and that is the point rather than a tidiness preference. Each is transcribed
+ * byte for byte from `cluster/gce/gci/configure-kubeapiserver.sh` -- the WARNING
+ * from L60, the all-absent ERROR from L65, the partial-credential ERROR from L70
+ * -- because an operator greps a boot log for these exact words and AAP §0.10.2
+ * lists the fail-closed message as a boundary condition that must port
+ * unchanged. A paraphrase recorded as "what the shell writes" is evidence of a
+ * run that never happened, and a second copy of a paraphrase is worse: it reads
+ * as corroboration.
+ *
+ * Both the V8 panel's locally-authored scenario table and the recorded V8
+ * control-status payloads now read these, so the panel cannot describe one
+ * message while the fixture records another. They live HERE, in the module that
+ * depends on nothing, precisely so a recorded fixture and a rendering component
+ * can share one literal without a component ever importing test data.
+ *
+ * INVARIANT LOCKED: each full sentence CONTAINS its matching substring constant
+ * above -- {@link ETCD_PLAINTEXT_WARNING_MESSAGE},
+ * {@link ETCD_FAIL_CLOSED_MESSAGE} and {@link ETCD_PARTIAL_CREDENTIALS_MESSAGE}
+ * respectively. The substrings stay separate because they are what the panel and
+ * the pytest shell tier MATCH ON: a substring survives a future edit to the
+ * surrounding prose, while an equality check against the whole sentence would
+ * turn a harmless rewording into a false failure. The pairing is asserted in
+ * `EtcdTransportPanel.test.tsx` so the two can never drift apart.
+ *
+ * WHY THESE ARE NOT SHORTENED. Every one names the six credential variables in
+ * full. That naming IS the diagnostic's value -- an operator who sees which
+ * variables the boot looked for knows what to set -- and it is why the sentences
+ * are 247, 408 and 285 characters. They are prose and are rendered as prose;
+ * they are deliberately NOT routed through the 200-character observation-value
+ * bound, which exists for scalar measurements.
+ * -------------------------------------------------------------------------- */
+
+/**
+ * The complete stdout WARNING the plaintext-fallback branch writes
+ * (`configure-kubeapiserver.sh` L60), byte for byte.
+ *
+ * ONE branch writes it, so ONE constant records it. The guard is
+ * `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`, so an UNSET
+ * variable and an explicit `true` enter the same branch and reach the same
+ * `echo`: the explicit opt-in and the unit-test compatibility default emit this
+ * identical text. What tells those two states apart is whether the variable was
+ * explicitly supplied -- never the presence or absence of this warning.
+ */
+export const ETCD_PLAINTEXT_FALLBACK_WARNING =
+  'WARNING: ALL of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ' +
+  'ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ' +
+  'ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, ' +
+  'mTLS between etcd server and kube-apiserver is not enabled.';
+
+/**
+ * The complete stderr ERROR the fail-closed branch writes before `exit 1`
+ * (`configure-kubeapiserver.sh` L65), byte for byte.
+ *
+ * Reached when all six credentials are absent AND the insecure fallback is not
+ * explicitly permitted -- the branch both GCE reference profiles take when etcd
+ * certificates are missing. AAP §0.10.2 states this condition as the message AND
+ * the exit code together: the code alone cannot tell an intentional abort from a
+ * crash, and the message alone cannot prove the boot stopped.
+ */
+export const ETCD_FAIL_CLOSED_ERROR =
+  'ERROR: ALL etcd mTLS credentials (ETCD_APISERVER_CA_KEY, ' +
+  'ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ' +
+  'ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY, ' +
+  'ETCD_APISERVER_CLIENT_CERT) are missing and ' +
+  'ETCD_APISERVER_ALLOW_INSECURE is not set to true; refusing to fall back ' +
+  'to plaintext etcd for a hardened profile. Provide etcd mTLS ' +
+  'credentials, or set ETCD_APISERVER_ALLOW_INSECURE=true for local/dev.';
+
+/**
+ * The complete stderr ERROR the PARTIAL-credential branch writes before `exit 1`
+ * (`configure-kubeapiserver.sh` L70), byte for byte.
+ *
+ * A different sentence from {@link ETCD_FAIL_CLOSED_ERROR} because it is a
+ * different branch: it never consults the opt-out at all, so a half-configured
+ * deployment aborts unconditionally and no setting can turn it into a plaintext
+ * boot. Keeping the two texts distinct is what stops a half-configured
+ * deployment being reported as a deliberately permitted one.
+ */
+export const ETCD_PARTIAL_CREDENTIALS_ERROR =
+  'ERROR: Some of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ' +
+  'ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ' +
+  'ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, ' +
+  'mTLS between etcd server and kube-apiserver cannot be enabled. Please ' +
+  'provide all mTLS credential.';
+
 /* ------------------------------------------------------------------------ *
  * V2 - Pod Security admission
  * ------------------------------------------------------------------------ */

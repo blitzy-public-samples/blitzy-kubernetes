@@ -1168,6 +1168,20 @@ function EmptyNotice(): ReactElement {
  *
  * A message that sanitizes away to nothing is replaced by local wording rather than
  * leaving the sentence dangling after its colon.
+ *
+ * ABSENT IS NOT UNRECOGNISED, and the two must not be rendered alike.
+ * {@link describeStatusReason} takes `unknown` and maps EVERYTHING that is not an
+ * allowlisted `StatusReason` — including `undefined` — to `[unrecognised reason]`.
+ * That is right for a value the server actually sent: an unknown reason has to be
+ * named as unknown rather than echoed. It is wrong for a field that never arrived.
+ * `reason` is absent whenever there was no response body to read it from, which is
+ * every `network` and every `timeout` failure, and this sentence then read "reason
+ * [unrecognised reason]" — telling an operator the server had supplied a reason it
+ * could not interpret, when in truth no server had answered at all. That misdirects
+ * exactly the reader this alert exists for: it points at the API server on the one
+ * failure class where the fault is not there. So presence is tested FIRST and the
+ * clause is omitted entirely when the field is absent, which is what every other
+ * panel in this tier already does with its own reason field.
  */
 function describeError(error: ControlStatusError): string {
   const message = safeProse(error.message);
@@ -1179,9 +1193,11 @@ function describeError(error: ControlStatusError): string {
   if (error.httpStatus !== undefined) {
     parts.push(`HTTP status ${error.httpStatus}`);
   }
-  const reason = describeStatusReason(error.reason);
-  if (reason.length > 0) {
-    parts.push(`reason ${reason}`);
+  if (error.reason !== undefined) {
+    const reason = describeStatusReason(error.reason);
+    if (reason.length > 0) {
+      parts.push(`reason ${reason}`);
+    }
   }
   parts.push(`failure kind ${error.kind}`);
   return `${parts.join(' — ')}.`;

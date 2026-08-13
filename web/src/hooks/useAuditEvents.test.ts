@@ -2101,6 +2101,15 @@ describe('the recorded bodies are surfaced verbatim, so the guard stays assertab
   // is caught even if the expected-events table were edited to match. Its React counterpart
   // therefore iterates every returned event with `expect.soft`, reporting all offenders in
   // one run, and uses a hard `expect` only for the precondition that the events loaded.
+  //
+  // WHAT "EXACTLY AS THE API SERVER RECORDED IT" MEANS BELOW, since the phrase is only as
+  // good as the fixture behind it. The six RBAC `responseObject` bodies in
+  // ../test/fixtures/auditEvents are CAPTURED output: a real kube-apiserver built from this
+  // tree, under an audit policy holding RBAC at `RequestResponse`, replaying the six measured
+  // operations -- see AUDIT_RBAC_RESPONSE_CAPTURE there for the method. They previously held a
+  // test-only presence marker inside that wire field, which made this assertion's wording a
+  // claim about data no server had produced. Nothing about the pass-through property changed;
+  // what changed is that the thing being passed through is now wire data.
 
   it('hands back every recorded event, with both bodies untouched', async () => {
     serveRecorded();

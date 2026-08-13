@@ -130,9 +130,22 @@ import {
 // The audit-level vocabulary, from the one place it is defined. A fixture that
 // declared its own copy could record a level the parser would refuse, or an order
 // the panels do not use, and typecheck either way.
+//
+// The three V8 diagnostics arrive from the same module for a sharper reason than
+// tidiness. They are the sentences `configure-etcd-params` actually writes, and this
+// file records them as MEASURED OPERATOR OUTPUT -- so a paraphrase here is a claim
+// about a run that never happened. They had drifted: the recorded warning had been
+// shortened and had lost the six credential variable names the shell names in full,
+// while the V8 panel's scenario table carried the correct text, so two artifacts
+// described one shell branch differently. The full sentences now live once, in the
+// dependency-free domain module, and BOTH this file and the panel read them; the
+// substring constants stay separate because they are what the measurements match on.
 import {
   AUDIT_LEVEL_ORDER,
   AUDIT_LEVEL_RANK,
+  ETCD_FAIL_CLOSED_ERROR,
+  ETCD_PARTIAL_CREDENTIALS_ERROR,
+  ETCD_PLAINTEXT_FALLBACK_WARNING,
   NODE_AUTHORIZATION_MODE,
   NODE_RESTRICTION_PLUGIN,
   compareAuditLevels,
@@ -2928,23 +2941,40 @@ export const V8_PLAINTEXT_FLAGS = [
 ] as const satisfies readonly string[];
 
 /**
- * The plaintext-fallback WARNING the shell writes on stdout.
+ * The plaintext-fallback WARNING the shell writes on stdout, BYTE FOR BYTE.
  *
- * ONE DEFINITION SITE, because two branches emit it and they must be provably
- * identical. `configure-etcd-params` guards the fallback with
- * `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`
- * (cluster/gce/gci/configure-kubeapiserver.sh L41), so an UNSET variable and an
- * explicit `true` are the SAME branch reaching the SAME `echo`. Recording the text
- * once makes that sameness structural rather than a coincidence two literals happen
- * to share, and it is why the compatibility-default row can no longer drift back to
- * claiming silence.
+ * ONE DEFINITION SITE, AND IT IS NOT THIS FILE. The sentence lives in
+ * `web/src/domain/securityConstants.ts` as {@link ETCD_PLAINTEXT_FALLBACK_WARNING},
+ * transcribed from `cluster/gce/gci/configure-kubeapiserver.sh` L60, and the V8 panel's
+ * scenario table reads the same constant. That is what "one definition site" has to
+ * mean here: a constant in this file could only ever unify the uses WITHIN this file,
+ * and the drift that mattered was between this file and the panel.
  *
- * Contains {@link ETCD_PLAINTEXT_WARNING_MESSAGE} as a substring, which is the
- * invariant half the panel matches on.
+ * WHAT WAS WRONG, recorded so it is not re-introduced. This name previously held a
+ * SHORTENED paraphrase -- "WARNING: all etcd mTLS credentials are missing, ..." -- which
+ * lower-cased the shell's `ALL of` and dropped the six credential variable names the
+ * shell writes out in full. The panel's own scenario row had the correct 247-character
+ * sentence, so the two artifacts described one shell branch differently, and this file
+ * -- the one that presents itself as measured output -- was the wrong one. A second
+ * literal copy of the paraphrase also sat inline on the operator opt-in payload's
+ * `warnings` array, so the "one definition site" claim in this comment was false as
+ * written.
+ *
+ * WHY THE FULL SENTENCE AND NOT THE SHORT ONE. An operator greps a boot log for these
+ * words, and the six variable names are the actionable half: they say WHICH variables
+ * the boot looked for and therefore what to set. AAP §0.10.2 requires the V8
+ * diagnostics to port unchanged.
+ *
+ * Both branches that emit it share this one constant, which is the structural half of
+ * the fix: `configure-etcd-params` guards the fallback with
+ * `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]` (L59), so an UNSET
+ * variable and an explicit `true` are the SAME branch reaching the SAME `echo`, and the
+ * compatibility-default row cannot drift back to claiming silence.
+ *
+ * Contains `ETCD_PLAINTEXT_WARNING_MESSAGE` as a substring, which is the invariant half
+ * the panel matches on.
  */
-const ETCD_PLAINTEXT_WARNING_TEXT =
-  'WARNING: all etcd mTLS credentials are missing, mTLS between etcd server ' +
-  'and kube-apiserver is not enabled.';
+const ETCD_PLAINTEXT_WARNING_TEXT = ETCD_PLAINTEXT_FALLBACK_WARNING;
 
 /**
  * The five recorded states of `configure-etcd-params`.
@@ -2978,7 +3008,7 @@ export const ETCD_TRANSPORT_STATES = [
     exitCode: 0,
     // THE SAME WARNING AS THE EXPLICIT OPT-IN, corrected from a recorded `null`.
     // The branch guard is `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`
-    // (configure-kubeapiserver.sh L41), so an UNSET variable and an explicit `true`
+    // (configure-kubeapiserver.sh L58), so an UNSET variable and an explicit `true`
     // enter the same branch and reach the same `echo`. Executing all three states
     // against the shipped script confirms it:
     //   unset          -> rc=0, http, 1 WARNING on stdout, 0 ERROR on stderr
@@ -2990,7 +3020,7 @@ export const ETCD_TRANSPORT_STATES = [
     isUnitTestCompatibilityDefault: true,
     sourceReference:
       'cluster/gce/gci/apiserver_etcd_test.go L185-L188; ' +
-      'cluster/gce/gci/configure-kubeapiserver.sh L36-L42',
+      'cluster/gce/gci/configure-kubeapiserver.sh L58-L60',
   },
   {
     label: 'insecure fallback explicitly permitted: plaintext with a warning',
@@ -3001,7 +3031,7 @@ export const ETCD_TRANSPORT_STATES = [
     exitCode: 0,
     diagnostic: ETCD_PLAINTEXT_WARNING_TEXT,
     isUnitTestCompatibilityDefault: false,
-    sourceReference: 'cluster/gce/gci/configure-kubeapiserver.sh L41-L43',
+    sourceReference: 'cluster/gce/gci/configure-kubeapiserver.sh L58-L60',
   },
   {
     label: 'fail closed: credentials absent and insecure fallback not permitted',
@@ -3010,16 +3040,15 @@ export const ETCD_TRANSPORT_STATES = [
     outcome: 'fail-closed',
     renderedFlags: [],
     exitCode: 1,
-    // The key phrase is kept contiguous in ONE literal rather than split across a
-    // concatenation, so that `grep 'refusing to fall back to plaintext etcd'`
-    // finds it here exactly as it finds it in the shell source. A phrase broken
-    // over two string fragments is correct at run time and invisible to review.
-    diagnostic:
-      'ERROR: all etcd mTLS credentials are missing and ' +
-      'ETCD_APISERVER_ALLOW_INSECURE is not set to true; ' +
-      'refusing to fall back to plaintext etcd for a hardened profile.',
+    // BYTE FOR BYTE, from the shared domain module (configure-kubeapiserver.sh L65).
+    // This too was a paraphrase: it lower-cased `ALL`, dropped the parenthesised list
+    // of the six credential variables and dropped the closing remedy sentence, while
+    // the V8 panel's scenario row carried the whole 408-character message. One
+    // constant now serves both, so the sentence an operator greps for in a boot log
+    // is the sentence both artifacts record.
+    diagnostic: ETCD_FAIL_CLOSED_ERROR,
     isUnitTestCompatibilityDefault: false,
-    sourceReference: 'cluster/gce/gci/configure-kubeapiserver.sh L44-L46',
+    sourceReference: 'cluster/gce/gci/configure-kubeapiserver.sh L61-L66',
   },
   {
     label: 'fail closed: credentials only partially supplied',
@@ -3028,12 +3057,13 @@ export const ETCD_TRANSPORT_STATES = [
     outcome: 'fail-closed',
     renderedFlags: [],
     exitCode: 1,
-    diagnostic:
-      'ERROR: some of the etcd mTLS credentials are missing, mTLS between etcd ' +
-      'server and kube-apiserver cannot be enabled. Please provide all mTLS ' +
-      'credential.',
+    // BYTE FOR BYTE, from the shared domain module (configure-kubeapiserver.sh L70).
+    // Deliberately a DIFFERENT sentence from the all-absent branch's, and it stays
+    // different: telling the two apart is what stops a half-configured deployment
+    // being reported as a deliberately permitted plaintext one.
+    diagnostic: ETCD_PARTIAL_CREDENTIALS_ERROR,
     isUnitTestCompatibilityDefault: false,
-    sourceReference: 'cluster/gce/gci/configure-kubeapiserver.sh L48-L50',
+    sourceReference: 'cluster/gce/gci/configure-kubeapiserver.sh L68-L71',
   },
 ] as const satisfies readonly EtcdTransportState[];
 
@@ -3194,10 +3224,12 @@ export const V8_ETCD_TRANSPORT_WARNING = {
     'GCE profile enables it.',
   requirementIds: ['F-008-RQ-001', 'F-008-RQ-002'],
   findings: [],
-  warnings: [
-    'WARNING: all etcd mTLS credentials are missing, mTLS between etcd server ' +
-      'and kube-apiserver is not enabled.',
-  ],
+  // THE SHARED CONSTANT, not a second copy of it. An inline literal sat here and it was
+  // the shortened paraphrase, so this payload and the compatibility-default payload
+  // below -- which already read the shared name -- recorded DIFFERENT text for the one
+  // `echo` the shell runs on this branch. Reading the constant is what makes the two
+  // provably identical rather than identical by inspection.
+  warnings: [ETCD_PLAINTEXT_WARNING_TEXT],
   evidence: {
     observations: [
       { label: V8_OBSERVATIONS.etcdServers, value: 'http://127.0.0.1:2379' },
@@ -3206,9 +3238,11 @@ export const V8_ETCD_TRANSPORT_WARNING = {
       { label: V8_OBSERVATIONS.outcome, value: 'plaintext-loopback' },
       { label: V8_OBSERVATIONS.exitCode, value: 0 },
       { label: V8_OBSERVATIONS.unitTestCompatibilityDefault, value: false },
-      // THE WARNING IS WHAT MAKES THIS A DECISION rather than a silent downgrade,
-      // and it is the observation that distinguishes this state from the
-      // compatibility default, which emits nothing at all.
+      // THE WARNING IS WHAT MAKES THIS A DECISION rather than a silent downgrade. It is
+      // NOT what distinguishes this state from the compatibility default: both reach the
+      // same `echo` and emit the same sentence. The discriminator is
+      // `unitTestCompatibilityDefault` immediately above -- whether the variable was
+      // explicitly supplied -- and nothing else.
       {
         label: V8_OBSERVATIONS.diagnostic,
         value: ETCD_TRANSPORT_STATES[2].diagnostic,
