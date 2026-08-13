@@ -115,10 +115,18 @@ export default mergeConfig(
       // The single wiring point for the entire tier: the
       // @testing-library/jest-dom matchers; `afterEach(cleanup)`, so rendered
       // nodes and their listeners never leak from one spec into the next; the
-      // shared MSW 2 server lifecycle (listen, then reset handlers after each
-      // test, then close); and the three globals jsdom does not implement --
-      // IntersectionObserver, matchMedia and window.scrollTo
-      // (AAP §0.2.2.3, §0.4.4.3).
+      // three globals jsdom does not implement -- IntersectionObserver,
+      // matchMedia and window.scrollTo; and a side-effect import of
+      // src/test/msw/server.ts (AAP §0.2.2.3, §0.4.4.3).
+      //
+      // THE MSW LIFECYCLE IS NOT REGISTERED IN THAT SETUP FILE. Per AAP §0.5.1
+      // and §0.2.2.4, src/test/msw/server.ts owns both the single `setupServer`
+      // instance and its `beforeAll(listen)` / `afterEach(resetHandlers)` /
+      // `afterAll(close)` hooks; the setup file merely imports it, which is what
+      // starts it. Registering those hooks in both places was measured to throw
+      // "cannot configure an already enabled network" from the second
+      // `listen()`, failing all 16 spec files at once, so the ownership boundary
+      // is load-bearing rather than stylistic.
       setupFiles: ['./src/setupTests.ts'],
 
       // Stated explicitly instead of inherited from the default glob: specs

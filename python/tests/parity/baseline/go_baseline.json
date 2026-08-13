@@ -1,0 +1,5151 @@
+{
+  "counts": {
+    "by_package": {
+      "hack/boilerplate": {
+        "fail": 0,
+        "pass": 1,
+        "skip": 0,
+        "subtests": 0,
+        "top_level": 1,
+        "total": 1
+      },
+      "k8s.io/kubernetes/cluster/gce/gci": {
+        "fail": 0,
+        "pass": 648,
+        "skip": 0,
+        "subtests": 640,
+        "top_level": 8,
+        "total": 648
+      },
+      "k8s.io/kubernetes/plugin/pkg/admission/noderestriction": {
+        "fail": 0,
+        "pass": 5,
+        "skip": 0,
+        "subtests": 0,
+        "top_level": 5,
+        "total": 5
+      },
+      "k8s.io/kubernetes/plugin/pkg/admission/security/podsecurity": {
+        "fail": 0,
+        "pass": 1,
+        "skip": 0,
+        "subtests": 0,
+        "top_level": 1,
+        "total": 1
+      },
+      "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac": {
+        "fail": 0,
+        "pass": 3,
+        "skip": 0,
+        "subtests": 0,
+        "top_level": 3,
+        "total": 3
+      },
+      "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy": {
+        "fail": 0,
+        "pass": 15,
+        "skip": 0,
+        "subtests": 0,
+        "top_level": 15,
+        "total": 15
+      },
+      "k8s.io/kubernetes/test/integration/auth": {
+        "fail": 0,
+        "pass": 43,
+        "skip": 0,
+        "subtests": 0,
+        "top_level": 43,
+        "total": 43
+      },
+      "k8s.io/kubernetes/test/integration/controlplane/audit": {
+        "fail": 0,
+        "pass": 4,
+        "skip": 0,
+        "subtests": 2,
+        "top_level": 2,
+        "total": 4
+      },
+      "k8s.io/kubernetes/test/integration/secrets": {
+        "fail": 0,
+        "pass": 2,
+        "skip": 0,
+        "subtests": 0,
+        "top_level": 2,
+        "total": 2
+      }
+    },
+    "fail": 0,
+    "pass": 722,
+    "skip": 0,
+    "total": 722
+  },
+  "packages": [
+    "hack/boilerplate",
+    "k8s.io/kubernetes/cluster/gce/gci",
+    "k8s.io/kubernetes/plugin/pkg/admission/noderestriction",
+    "k8s.io/kubernetes/plugin/pkg/admission/security/podsecurity",
+    "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac",
+    "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+    "k8s.io/kubernetes/test/integration/auth",
+    "k8s.io/kubernetes/test/integration/controlplane/audit",
+    "k8s.io/kubernetes/test/integration/secrets"
+  ],
+  "provenance": "go_test_json",
+  "schema_version": "1",
+  "verdicts": [
+    {
+      "action": "pass",
+      "elapsed": null,
+      "package": "hack/boilerplate",
+      "subtest": "",
+      "test": "test_boilerplate"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.76,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "simple_string_and_empty_file",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "simple_string_and_file_already_contains_prefix",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "simple_string_and_file_already_contains_prefix_with_content_between_the_prefix_and_suffix",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "simple_string_and_file_already_contains_prefix_with_prefix_==_suffix",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "simple_string_and_non_empty_file",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "string_with_quotes_and_=_and_empty_file",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.58,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "string_with_quotes_and_=_and_file_already_contains_prefix",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "string_with_quotes_and_=_and_file_already_contains_prefix_with_content_between_the_prefix_and_suffix",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "string_with_quotes_and_=_and_file_already_contains_prefix_with_prefix_==_suffix",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "string_with_quotes_and_=_and_non_empty_file",
+      "test": "TestAppendOrReplacePrefix"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.07,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.get.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.update.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.update.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.update.endpoints:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "cluster-autoscaler.update.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.create.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.create.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get.nodes#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.get.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.patch.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.patch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.update.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "kubelet.update.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.create.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.delete.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.delete.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.delete.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.delete.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.delete.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.delete.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.delete.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.delete.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.get.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.list.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.list.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.list.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.list.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.list.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.list.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.list.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.list.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.patch.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.patch.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.patch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.patch.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.patch.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.patch.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.patch.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.patch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.update.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.watch.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.watch.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.watch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.watch.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.watch.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.watch.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:anonymous.watch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.create.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.create.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.create.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.create.serviceaccounts:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.delete.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get.namespaces",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get.namespaces#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get.namespaces#02",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.get.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.list.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.patch.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.update.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.update.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:apiserver.update.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get.endpoints:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get.nodemetrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.get.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.list.nodemetrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.list.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.update.endpoints:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-controller-manager.update.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.watch.endpoints:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.watch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.watch.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.watch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.watch.services:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-proxy.watch.services:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get.endpoints:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.get.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.update.endpoints:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:kube-scheduler.update.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.create.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.delete.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.delete.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.delete.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.delete.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.delete.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.delete.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.delete.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.get.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.list.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.list.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.list.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.list.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.list.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.list.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.list.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.patch.pods:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.pods:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.update.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.watch.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.watch.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.watch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.watch.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.watch.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.watch.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node-problem-detector.watch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.create.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.create.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.create.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.delete.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get.nodes#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.get.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.list.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.patch.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.patch.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.patch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.update.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.update.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:node:node-123.update.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.serviceaccounts:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.create.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.delete.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.delete.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.delete.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.delete.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.delete.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.delete.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.delete.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.delete.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.get.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.list.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.list.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.list.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.list.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.list.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.list.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.list.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.list.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.patch.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.patch.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.patch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.patch.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.patch.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.patch.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.patch.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.patch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.events:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.update.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.watch.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.watch.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.watch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.watch.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.watch.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.watch.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:default:default.watch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get.endpoints:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.get.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.update.endpoints:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:endpoint-controller.update.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.create.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.delete.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.delete.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.delete.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.delete.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.delete.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.delete.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.delete.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.deletecollection.namespaces",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.deletecollection.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.get.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.list.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.list.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.list.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.list.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.list.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.list.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.list.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.patch.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.patch.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.patch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.patch.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.patch.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.patch.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.patch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.secrets:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.update.tokenreviews",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.watch.clusterroles",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.watch.deployments:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.watch.endpoints:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.watch.foos:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.watch.foos:default#01",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.watch.podmetrics:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:namespace-controller.watch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.patch.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.patch.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.update.nodes",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:serviceaccount:kube-system:node-problem-detector.update.pods:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get.configmaps:default",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.get.configmaps:kube-system",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./api",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./apis/policy",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./healthz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./healthz/etcd",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./logs",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./metrics",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./openapi/v2",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./swagger-2.0.0.json",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./swagger-2.0.0.pb-v1.gz",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "system:unsecured.post./version",
+      "test": "TestCreateMasterAuditPolicy"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.19,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "",
+      "test": "TestEncryptionProviderConfig"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.78,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "",
+      "test": "TestEncryptionProviderFlag"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.21,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "ENCRYPTION_PROVIDER_CONFIG_is_not_set",
+      "test": "TestEncryptionProviderFlag"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.57,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "ENCRYPTION_PROVIDER_CONFIG_is_set",
+      "test": "TestEncryptionProviderFlag"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.21,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "",
+      "test": "TestKMSIntegration"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.1,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "CLOUD_KMS_INTEGRATION_is_not_set",
+      "test": "TestKMSIntegration"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.11,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "CLOUD_KMS_INTEGRATION_is_set",
+      "test": "TestKMSIntegration"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.16,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "",
+      "test": "TestServerOverride"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.08,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "ETCD-SERVERS_and_ETCD_SERVERS_OVERRIDES_are_set",
+      "test": "TestServerOverride"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.08,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "ETCD-SERVERS_is_not_set_-_default_override",
+      "test": "TestServerOverride"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.33,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "",
+      "test": "TestStorageOptions"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.21,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "storage_options_are_not_supplied",
+      "test": "TestStorageOptions"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.13,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "storage_options_are_supplied",
+      "test": "TestStorageOptions"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.5,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "",
+      "test": "TestTLSFlags"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.42,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "mTLS_disabled",
+      "test": "TestTLSFlags"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.08,
+      "package": "k8s.io/kubernetes/cluster/gce/gci",
+      "subtest": "mTLS_enabled",
+      "test": "TestTLSFlags"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/admission/noderestriction",
+      "subtest": "",
+      "test": "TestAdmitPVCStatus"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/plugin/pkg/admission/noderestriction",
+      "subtest": "",
+      "test": "TestAdmitResourceSlice"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/admission/noderestriction",
+      "subtest": "",
+      "test": "Test_getModifiedLabels"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.23,
+      "package": "k8s.io/kubernetes/plugin/pkg/admission/noderestriction",
+      "subtest": "",
+      "test": "Test_nodePlugin_Admit"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/admission/noderestriction",
+      "subtest": "",
+      "test": "Test_nodePlugin_Admit_OwnerReference"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/admission/security/podsecurity",
+      "subtest": "",
+      "test": "TestConvert"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac",
+      "subtest": "",
+      "test": "TestAuthorizer"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac",
+      "subtest": "",
+      "test": "TestRuleMatches"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac",
+      "subtest": "",
+      "test": "TestSubjectLocator"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.02,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestBootstrapClusterRoleBindings"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.01,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestBootstrapClusterRoles"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.01,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestBootstrapClusterRolesWithFeatureGatesEnabled"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestBootstrapControllerRoleBindings"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.01,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestBootstrapControllerRoles"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestBootstrapNamespaceRoleBindings"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestBootstrapNamespaceRoles"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestClusterRoleLabel"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestClusterRoleVerbsConsistency"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestControllerRoleLabel"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestControllerRoleVerbsConsistency"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestEditViewRelationship"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestNamespaceRoleVerbsConsistency"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestNoStarsForControllers"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.0,
+      "package": "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy",
+      "subtest": "",
+      "test": "TestNodeRuleVerbsConsistency"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.19,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestAliceNotForbiddenOrUnauthorized"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.14,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestAuthModeAlwaysAllow"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.03,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestAuthModeAlwaysDeny"
+    },
+    {
+      "action": "pass",
+      "elapsed": 10.01,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestAuthnToKAS"
+    },
+    {
+      "action": "pass",
+      "elapsed": 4.13,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestAuthorizationAttributeDetermination"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.68,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestAuthzConfig"
+    },
+    {
+      "action": "pass",
+      "elapsed": 2.86,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestBobIsForbidden"
+    },
+    {
+      "action": "pass",
+      "elapsed": 8.69,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestBootstrapTokenAuth"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.48,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestBootstrapping"
+    },
+    {
+      "action": "pass",
+      "elapsed": 6.76,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestConstrainedImpersonation"
+    },
+    {
+      "action": "pass",
+      "elapsed": 6.09,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestConstrainedImpersonationDisabled"
+    },
+    {
+      "action": "pass",
+      "elapsed": 7.12,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestDiscoveryUpgradeBootstrapping"
+    },
+    {
+      "action": "pass",
+      "elapsed": 13.08,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestDynamicClientBuilder"
+    },
+    {
+      "action": "pass",
+      "elapsed": 23.99,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestGetsSelfAttributes"
+    },
+    {
+      "action": "pass",
+      "elapsed": 6.88,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestGetsSelfAttributesError"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.64,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestImpersonateIsForbidden"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.87,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestImpersonateWithUID"
+    },
+    {
+      "action": "pass",
+      "elapsed": 2.85,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestKindAuthorization"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.24,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestLocalSubjectAccessReview"
+    },
+    {
+      "action": "pass",
+      "elapsed": 4.0,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestMonitoringURLs"
+    },
+    {
+      "action": "pass",
+      "elapsed": 5.29,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestMultiWebhookAuthzConfig"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.1,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestNamespaceAuthorization"
+    },
+    {
+      "action": "pass",
+      "elapsed": 4.37,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestNodeAuthorizer"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.41,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestNodeRestrictionCrossNodeDenied"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.73,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestNodeRestrictionServiceAccount"
+    },
+    {
+      "action": "pass",
+      "elapsed": 5.39,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestNodeRestrictionServiceAccountAudience"
+    },
+    {
+      "action": "pass",
+      "elapsed": 10.35,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestPodSecurity"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.46,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestPodSecurityEnforceBaselineRejectsPrivileged"
+    },
+    {
+      "action": "pass",
+      "elapsed": 8.79,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestPodSecurityGAOnly"
+    },
+    {
+      "action": "pass",
+      "elapsed": 15.2,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestPodSecurityWebhook"
+    },
+    {
+      "action": "pass",
+      "elapsed": 13.61,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestRBAC"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.08,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestRBACContextContamination"
+    },
+    {
+      "action": "pass",
+      "elapsed": 5.27,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestRBACNoWildcardOutsideSystemMasters"
+    },
+    {
+      "action": "pass",
+      "elapsed": 2.87,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestReadOnlyAuthorization"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.58,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestSelfSubjectAccessReview"
+    },
+    {
+      "action": "pass",
+      "elapsed": 4.21,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestServiceAccountAnnotationDeprecation"
+    },
+    {
+      "action": "pass",
+      "elapsed": 2.88,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestServiceAccountTokenBoundAndAudienced"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.5,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestServiceAccountTokenCreate"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.43,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestSloppySANCertificates"
+    },
+    {
+      "action": "pass",
+      "elapsed": 4.15,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestSubjectAccessReview"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.08,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestUnknownUserIsUnauthorized"
+    },
+    {
+      "action": "pass",
+      "elapsed": 2.93,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestWebhookTokenAuthenticator"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.08,
+      "package": "k8s.io/kubernetes/test/integration/auth",
+      "subtest": "",
+      "test": "TestWebhookTokenAuthenticatorCustomDial"
+    },
+    {
+      "action": "pass",
+      "elapsed": 13.69,
+      "package": "k8s.io/kubernetes/test/integration/controlplane/audit",
+      "subtest": "",
+      "test": "TestAudit"
+    },
+    {
+      "action": "pass",
+      "elapsed": 4.15,
+      "package": "k8s.io/kubernetes/test/integration/controlplane/audit",
+      "subtest": "",
+      "test": "TestAuditSensitiveResourceLevels"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.52,
+      "package": "k8s.io/kubernetes/test/integration/controlplane/audit",
+      "subtest": "audit.k8s.io/v1.rbac-response",
+      "test": "TestAuditSensitiveResourceLevels"
+    },
+    {
+      "action": "pass",
+      "elapsed": 0.51,
+      "package": "k8s.io/kubernetes/test/integration/controlplane/audit",
+      "subtest": "audit.k8s.io/v1.secrets-request",
+      "test": "TestAuditSensitiveResourceLevels"
+    },
+    {
+      "action": "pass",
+      "elapsed": 4.72,
+      "package": "k8s.io/kubernetes/test/integration/secrets",
+      "subtest": "",
+      "test": "TestSecrets"
+    },
+    {
+      "action": "pass",
+      "elapsed": 3.84,
+      "package": "k8s.io/kubernetes/test/integration/secrets",
+      "subtest": "",
+      "test": "TestSecretsAreEncryptedAtRest"
+    }
+  ]
+}

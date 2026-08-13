@@ -1,0 +1,188 @@
+# kube-env for the V8 etcd FAIL-CLOSED scenarios. Rendered, sourced, never edited.
+#
+# AAP §0.5.1 (this file's CREATE row, "Jinja2 port of the Go text/template kube-env
+# renderer") / AAP §0.4.1.1 layer L4 and AAP §0.4.2.1 (the test_etcd_failclosed.py
+# blueprint, whose four scenarios are new automation with no Go ancestor) /
+# AAP §0.10.2 (the etcd fail-closed boundary row: credentials absent with the
+# opt-out not "true" must print the refusal AND exit 1, and PARTIAL credentials
+# must ALSO exit 1) / tech-spec §2.1.8 (the function-local ":-true"
+# backward-compatibility shim) / tech-spec §6.2.4.6 (etcd access-control
+# hardening, control V8).
+#
+# INVARIANT LOCKED BY THIS FILE: every one of the fourteen assignments below is
+# emitted UNCONDITIONALLY and independently, so all four fail-closed scenarios of
+# cluster/gce/gci/configure-kubeapiserver.sh:configure-etcd-params are reachable
+# by varying render-context VALUES alone - never by editing this template, never
+# by coupling one credential to another, and never by defaulting a credential to
+# something non-empty. An arbitrary subset of the six etcd mTLS credentials must
+# stay expressible, because "a half-configured deployment must fail, not silently
+# downgrade" is the property AAP §0.10.2 singles out as the subtle one.
+#
+# WHY THIS FILE EXISTS AT ALL, GIVEN THREE TEMPLATES ARE ALREADY SHIPPED
+#
+# cluster/gce/gci/testdata/kube-apiserver/{base,etcd,kms}.template are read-only
+# inputs, consumed as-is by the L1 shell modules and never duplicated into Python
+# (AAP §0.4.4.2, "Referenced, not copied"). This file copies nothing from them and
+# replaces none of them. It exists because ETCD_APISERVER_ALLOW_INSECURE - the
+# one variable that selects between the plaintext-with-WARNING branch and the
+# exit-1 branch - appears in NONE of the three: grep -l ALLOW_INSECURE over the
+# trio returns no match. No combination of the shipped templates can express the
+# fail-closed scenarios, and adding a field to a shipped template would edit an
+# artifact this repository actually ships.
+#
+# It is also SELF-CONTAINED on purpose: it does not invoke the "base" template
+# and does not restate its assignments. The trio declares its variables readonly,
+# so a shell that sourced both a trio render and this one would abort on the
+# duplicate assignment. Measured sufficient: KUBE_HOME plus the etcd variables
+# drive every branch of configure-etcd-params, because the function reads nothing
+# else.
+#
+# THE RENDER CONTRACT
+#
+# Target name: kube_env.j2 - Go's ParseFiles names each template after its base
+# filename and this file defines no inner template, so its whole body IS the
+# template. Dialect: scalar substitution only, the strict subset of the shipped
+# trio's Go text/template syntax, so one renderer serves both. No statement
+# blocks, no filters, no conditionals, no loops, no inheritance - and therefore
+# no third-party template engine, which matters because jinja2 is not among the
+# pinned test dependencies in python/requirements-test.txt.
+#
+# Context keys are the exported Go identifiers of kubeAPIServeETCDEnv
+# (cluster/gce/gci/apiserver_etcd_test.go lines 26-43), which is exactly what
+# tests/fixtures/etcd_env_cases.py publishes from
+# KubeAPIServerETCDEnv.to_template_context() - thirteen of them are reused here
+# verbatim, including the singular ETCDServersOverride spelling of the plural
+# shell variable.
+#
+# ONE ADDITIONAL KEY, WHICH NO GO SOURCE CAN TELL YOU ABOUT: AllowInsecureEtcd.
+# It has no counterpart in the Go struct and must not be given one - see the
+# preservation note on TLS_FLAGS_CASES in tests/fixtures/etcd_env_cases.py, which
+# keeps that dataclass a faithful sixteen-field mirror and delegates this
+# variable here. The L4 context builder therefore supplies fourteen keys: the
+# thirteen from to_template_context() that this file dereferences, plus
+# AllowInsecureEtcd.
+#
+# THE TRAP: AN EMPTY AllowInsecureEtcd MEANS "true", WHICH MEANS PERMISSIVE
+#
+# configure-kubeapiserver.sh line 41 reads "${ETCD_APISERVER_ALLOW_INSECURE:-true}",
+# and bash substitutes a :- default when the variable is unset OR NULL. Measured,
+# with all six credentials empty: an empty value exits 0 down the WARNING branch,
+# the variable being absent entirely exits 0 identically, and only the literal
+# string false exits 1. So the fail-closed scenarios must render the literal
+# false. Do NOT "fix" a failing scenario by blanking or deleting this assignment -
+# that converts a fail-closed assertion into the permissive branch while the test
+# still looks like it is testing something. Both GCE profiles default the variable
+# to false (cluster/gce/config-default.sh:446, cluster/gce/config-test.sh:492,
+# both documented there as a fail-closed safety net), which is why the
+# credentials-absent-and-false scenario is the production-representative one and
+# the credentials-absent-and-true scenario is the local/dev opt-in.
+#
+# EMPTY IS THE RIGHT IDIOM FOR THE OTHER THIRTEEN
+#
+# "Absent" is simply an empty rendered value: `readonly ETCD_APISERVER_CA_KEY=`
+# is valid bash, passes bash -n, and satisfies the script's -z test. That is how
+# the shipped etcd.template already drives TestTLSFlags "mTLS disabled" from a
+# zero-value struct, so no conditional guard is needed here for any of them.
+#
+# THE THREE *_PATH VARIABLES ARE MANDATORY, NOT OPTIONAL
+#
+# configure-kubeapiserver.sh lines 23-25 dereference ETCD_APISERVER_CA_CERT_PATH,
+# ETCD_APISERVER_CLIENT_CERT_PATH and ETCD_APISERVER_CLIENT_KEY_PATH with NO :-
+# default, unlike every other read in the function. Measured: with all six
+# credentials set but the paths undefined, the mTLS branch under set -u aborts
+# with "line 23: ETCD_APISERVER_CA_CERT_PATH: unbound variable" and returns 127;
+# with them defined the same invocation returns 0. Their values are paths, not
+# key material, so obviously fake /foo/bar placeholders are sufficient - as they
+# are in the shipped templates - and no real certificate, key or token belongs in
+# any render context for this file.
+#
+# NOTES FOR THE CONSUMING TEST, NONE OF WHICH IS DISCOVERABLE FROM THIS FILE
+#
+#  1. configure-etcd-params takes a NAMEREF (line 19, local -n params_ref=$1), so
+#     it must be invoked as: params="" ; configure-etcd-params params ; and then
+#     "$params" read. A bare call with no argument does NOT fail loudly - measured,
+#     it prints `local: not a valid identifier`, leaves the variable unset and
+#     still exits 0. Consequently THIS TEMPLATE MUST NEVER DECLARE A VARIABLE
+#     NAMED params: measured, adding `readonly params=` here makes the caller's
+#     own assignment fail with "params: readonly variable" and exit 1 - a FALSE
+#     rc==1 indistinguishable at a glance from a passing fail-closed assertion.
+#  2. Both the WARNING line and the "refusing to fall back to plaintext etcd"
+#     ERROR line are emitted with a bare echo, so they arrive on STDOUT; stderr
+#     was EMPTY in all four measured scenarios. Assert against stdout, using the
+#     separated-stream, tolerate-non-zero posture of tests/helpers/bash.py
+#     (try_invoke_func, or run_bash for the nameref call shape). The "stderr
+#     substring" wording in the AAP §0.5.2.1 blueprint is contradicted by
+#     measurement; bash.py's own docstring records the stdout behaviour correctly.
+#  3. The exit 1 fires from INSIDE the function, so it terminates the whole bash
+#     invocation: nothing sequenced after the call runs, and no params echo will
+#     be seen for scenarios 2 and 3.
+#  4. Sourcing configure-kubeapiserver.sh alone is sufficient for
+#     configure-etcd-params - measured. configure-helper.sh is needed only by
+#     start-kube-apiserver.
+#  5. These assignments are readonly, and a sourced kube-env is read FIRST, so it
+#     WINS over the process environment: measured, a scenario run with
+#     ETCD_APISERVER_ALLOW_INSECURE=true exported still exits 1 when this file
+#     renders false. Vary the render context, not the subprocess environment.
+#  6. Storage options are deliberately absent. STORAGE_BACKEND,
+#     STORAGE_MEDIA_TYPE and ETCD_COMPACTION_INTERVAL_SEC exist in the Go struct
+#     and in etcd.template, but configure-etcd-params reads all three only through
+#     ${VAR:-} guards (lines 59-68) so their absence is safe, and TestStorageOptions
+#     already covers them at the L1 tier through the shipped template.
+#  7. --etcd-servers-overrides is emitted only when ETCD_SERVERS is empty (the
+#     default /events#http://127.0.0.1:4002 is appended) or when
+#     ETCD_SERVERS_OVERRIDES is non-empty; with ETCD_SERVERS set and the override
+#     empty it is absent entirely (lines 53-57, measured). ETCDServers and
+#     ETCDServersOverride are therefore kept independently controllable.
+#
+# There is no Apache-2.0 header here, and that is deliberate rather than an
+# oversight: hack/boilerplate/boilerplate.py registers gated extensions by
+# globbing boilerplate.*.txt, j2 is not among them, and get_files() collects a
+# path only when its extension is registered - so this file is never gated. A
+# header would satisfy no gate and would instead be rendered verbatim into the
+# generated kube-env. Comments that reach the output are safe because they are
+# shell comments; these lines are inert to bash and to bash -n.
+
+# KUBE_HOME. Supplied per test from the caller's temporary directory, never a
+# hardcoded absolute path, so cases stay isolated under pytest-xdist and
+# pytest-randomly. configure-etcd-params does not read it; the surrounding
+# harness and any full start-kube-apiserver invocation do.
+readonly KUBE_HOME={{.KubeHome}}
+
+# The six etcd mTLS credentials, and only these six, are what
+# configure-etcd-params branches on (lines 21-51): all six non-empty selects
+# mTLS, all six empty selects the plaintext-or-abort branch, and ANY other
+# combination is the partial configuration that exits 1. Each is set
+# independently so that arbitrary subset stays expressible. The shipped naming
+# crosses two schemes and is reproduced as-is: the API server's own pair renders
+# into the SERVER_ variables while the etcd pair renders into the CLIENT_ ones,
+# because from etcd's point of view the API server is the client.
+readonly ETCD_APISERVER_CA_KEY={{.CAKey}}
+readonly ETCD_APISERVER_CA_CERT={{.CACert}}
+readonly ETCD_APISERVER_SERVER_KEY={{.APIServerKey}}
+readonly ETCD_APISERVER_SERVER_CERT={{.APIServerCert}}
+readonly ETCD_APISERVER_CLIENT_KEY={{.ETCDKey}}
+readonly ETCD_APISERVER_CLIENT_CERT={{.ETCDCert}}
+
+# The etcd endpoint. Empty selects the script's own default per branch: https for
+# mTLS (line 22), http for the plaintext fallback (line 42).
+readonly ETCD_SERVERS={{.ETCDServers}}
+
+# The three paths copied into --etcd-cafile, --etcd-certfile and --etcd-keyfile.
+# Mandatory: see the *_PATH note above. Placeholders only.
+readonly ETCD_APISERVER_CA_CERT_PATH={{.CACertPath}}
+readonly ETCD_APISERVER_CLIENT_CERT_PATH={{.APIServerCertPath}}
+readonly ETCD_APISERVER_CLIENT_KEY_PATH={{.APIServerKeyPath}}
+
+# The events-store override. Shell variable plural, Go field singular; both
+# spellings are as shipped.
+readonly ETCD_SERVERS_OVERRIDES={{.ETCDServersOverride}}
+
+# The uid the generated pod manifest runs as. Not read by configure-etcd-params,
+# and supplied as the running uid rather than a literal, so a scenario that goes
+# on to invoke start-kube-apiserver gets a value that exists on this machine.
+readonly KUBE_API_SERVER_RUNASUSER={{.KubeAPIServerRunAsUser}}
+
+# The fail-closed selector. MUST render the literal false for the fail-closed
+# scenarios and the literal true for the local/dev opt-in scenario. An empty
+# value means true - see THE TRAP above before changing anything on this line.
+readonly ETCD_APISERVER_ALLOW_INSECURE={{.AllowInsecureEtcd}}

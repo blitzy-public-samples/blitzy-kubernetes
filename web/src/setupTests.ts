@@ -41,18 +41,17 @@ limitations under the License.
  *    rendered nodes accumulate in one jsdom document and `getByRole` starts finding the
  *    PREVIOUS test's element — a false pass that survives even after the component under
  *    test is broken, which for a security-posture badge is the worst possible failure.
- * 3. MSW LIFECYCLE. `listen` before the file's first test, `resetHandlers` after each
- *    test, `close` after the last. The reset is what stops a `server.use(...)` override
- *    in one test from silently governing the next.
+ * 3. THE MSW SERVER, STARTED BY IMPORTING IT — AND NOTHING MORE. `./test/msw/server`
+ *    owns both the single `setupServer` instance and its whole lifecycle: it registers
+ *    `beforeAll(listen)`, `afterEach(resetHandlers)` and `afterAll(close)` itself. This
+ *    file's entire contribution is to import that module exactly once, which is what
+ *    guarantees the lifecycle is registered for every spec in the tier without any spec
+ *    having to remember it. This file must NOT re-register those hooks; see the import
+ *    comment below for the measured failure a second `listen()` produces.
  * 4. THE THREE BROWSER GLOBALS jsdom DOES NOT IMPLEMENT. Each is stubbed rather than
  *    polyfilled: the specs assert on rendered output and interaction, never on scroll
  *    position or viewport intersection, so a stub that records calls is enough and a
  *    real implementation would add behaviour nothing asserts.
- *
- * `onUnhandledRequest: 'error'` is the deliberate strictness. A spec that renders a
- * component which fetches an endpoint nobody stubbed would otherwise see an opaque
- * network failure and render its error state — passing an "it handles errors" assertion
- * for entirely the wrong reason. Failing loudly names the URL instead.
  */
 
 // AAP §0.5.1 / §0.2.2.3 / tech-spec §6.6.3.4
@@ -64,46 +63,44 @@ limitations under the License.
 import '@testing-library/jest-dom/vitest';
 
 import { cleanup } from '@testing-library/react';
-import { afterAll, afterEach, beforeAll, vi } from 'vitest';
+import { afterEach, vi } from 'vitest';
 
-import { server } from './test/msw/server';
-
-/**
- * Start intercepting before the first test in the file.
- *
- * `onUnhandledRequest: 'error'` is passed HERE because `listen()` is the only place MSW
- * accepts it — `setupServer()` takes handlers and nothing else. Setting it at this single
- * call site is what makes it hold for every spec in the tier without any of them having
- * to remember it, and `'error'` rather than the default `'warn'` is the point: a warning
- * is printed and the request is then allowed through to a network that is not there, so
- * the component under test renders its error branch and an "it handles failure"
- * assertion passes having proven only that MSW was misconfigured. `'error'` fails the
- * test instead, naming the method and URL nobody stubbed.
- */
-beforeAll(() => {
-  server.listen({ onUnhandledRequest: 'error' });
-});
+// A SIDE-EFFECT IMPORT, AND DELIBERATELY NOT A NAMED ONE. Importing this module is
+// what starts the tier's MSW server: `./test/msw/server` owns the single
+// `setupServer` instance AND registers `beforeAll(listen)`, `afterEach(resetHandlers)`
+// and `afterAll(close)` itself. This file must therefore import it exactly once and
+// must NOT re-register any of those three hooks -- a second `listen()` on one MSW
+// instance throws "cannot configure an already enabled network", which fails every
+// spec in the tier rather than just one. There is no `server` binding here because
+// nothing in this file needs one; `strict` plus `noUnusedLocals` would flag it.
+// `onUnhandledRequest: 'error'` lives at that module's `listen()` call, the only place
+// MSW accepts it.
+import './test/msw/server';
 
 /**
- * Unmount everything and forget every per-test override, after every test.
+ * Unmount everything rendered by the test that just finished.
  *
- * Order matters: `cleanup()` first, because unmounting can trigger an abort or a final
- * fetch from a component's teardown, and those must still be intercepted by the handlers
- * that were in force during the test rather than by whatever the reset restores.
+ * Kept explicitly even though RTL 16 auto-registers its own cleanup when a global
+ * `afterEach` exists (which `globals: true` provides): AAP §0.5.1 names
+ * `afterEach(cleanup)` as a requirement of this file, and cleanup over an
+ * already-cleaned container is a no-op, so the belt-and-braces call is free. A future
+ * reader may be tempted to delete it as redundant — do not.
+ *
+ * Ordering against the MSW handler reset is structural rather than stated here. Vitest
+ * runs `afterEach` hooks in REVERSE registration order, and `./test/msw/server`'s body
+ * runs before this file's because ES imports are hoisted — so this `cleanup()` always
+ * runs BEFORE that module's `resetHandlers()`. That is the order wanted: unmounting can
+ * trigger an abort or one last fetch from a component's teardown, and those must still
+ * meet the handlers that were in force during the test.
  */
 afterEach(() => {
   cleanup();
-  server.resetHandlers();
   // Restores anything a spec replaced with vi.spyOn. It deliberately does NOT reset
   // vi.fn() instances or automocks -- Vitest 4 narrowed restoreAllMocks to spies only
   // (AAP §0.2.2.2) -- so a spec that needs a fresh vi.fn() creates one per test rather
-  // than relying on a global reset that no longer does that.
+  // than relying on a global reset that no longer does that. It does not touch the
+  // vi.stubGlobal stubs installed below, which must survive every test in the file.
   vi.restoreAllMocks();
-});
-
-/** Stop intercepting after the last test, so the process can exit cleanly. */
-afterAll(() => {
-  server.close();
 });
 
 /**
