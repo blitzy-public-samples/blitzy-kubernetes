@@ -49,6 +49,7 @@ on, and none of them is observable from a happy-path test:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -502,26 +503,114 @@ def test_decode_failure_message_never_discloses_a_body() -> None:
     assert message.startswith("failed decoding buf:")
 
 
-def test_unparseable_line_is_truncated_rather_than_echoed_whole() -> None:
-    """A line that will not parse at all cannot be redacted, so it is bounded.
+def test_unparseable_line_is_described_never_echoed() -> None:
+    """A record that will not parse is described from METADATA ONLY - none of it is shown.
 
-    Without the bound one pathological line - a megabyte of a leaked body with a
-    syntax error in it - would be echoed in full into the report.
+    A line cannot be redacted member by member until it has decoded to an object,
+    so for everything else the diagnostic carries no bytes of the record at all.
+    That is not fastidiousness: a truncated or partially flushed Secret event is
+    precisely the record whose ``requestObject`` survives while its JSON envelope
+    does not, and echoing "just the first few hundred characters" of it publishes
+    the very body F-006-RQ-002 exists to keep out of the log - into pytest output,
+    and from there into the JUnit XML that TestGrid and Spyglass archive.
+
+    What must be reported instead is everything needed to FIND the record without
+    seeing it: which line, how long, why it failed, and a fingerprint that ties two
+    diagnostics to the same record. The reader already holds the log.
     """
-    flood = "x" * 20_000 + CANARY
+    flood = CANARY + "x" * 20_000
 
     with pytest.raises(AuditLogDecodeError) as raised:
         check_audit_lines([flood], [], VERSION)
 
     message = str(raised.value)
+    # NOT ONE BYTE OF THE RECORD. The canary would leak a body; the filler proves
+    # that no prefix of the record survives either, which a truncating excerpt
+    # would have left in place.
     assert CANARY not in message
-    assert "[truncated," in message
-    # The full length is reported so the reader knows what was withheld, without
-    # the withheld text itself.
-    assert f"{len(flood)} characters total" in message
-    # And the whole message stays readable: the excerpt is bounded, so one
-    # pathological line cannot flood a CI log.
+    assert "xxxxxxxxxx" not in message
+    # Metadata only, and all of it: the marker, the position, the size, the
+    # parser's own complaint and the fingerprint.
+    assert "<redacted>" in message
+    assert "undecodable audit record" in message
+    assert "line 1" in message
+    assert f"{len(flood)} character(s)" in message
+    assert "JSONDecodeError" in message
+    assert "sha256:" in message
+    # And the whole message stays readable: a description is bounded by
+    # construction, so one pathological record cannot flood a CI log.
     assert len(message) < 1_000
+
+
+def test_valid_json_that_is_not_an_object_is_described_never_echoed() -> None:
+    """A scalar or array record is reported by its JSON TYPE, with none of its content.
+
+    ``json.loads`` succeeds here, so the old code path fell through to echoing the
+    line. A JSON array of Secret bodies decodes perfectly well and is not an audit
+    event, which is exactly the shape that made the fallback unsafe.
+    """
+    payload = json.dumps([SECRET_BODY, SECRET_BODY])
+
+    with pytest.raises(AuditLogDecodeError) as raised:
+        check_audit_lines([payload], [], VERSION)
+
+    message = str(raised.value)
+    assert CANARY not in message
+    assert "decoded as JSON list, which is not an audit event object" in message
+    assert "sha256:" in message
+
+
+def test_the_fingerprint_identifies_the_record_without_disclosing_it() -> None:
+    """Two diagnostics for the same record share a fingerprint; different records do not.
+
+    That is what makes a content-free message actionable at all: a reader holding
+    the log can hash the line themselves and confirm WHICH record is meant, and a
+    reader comparing two failures can tell one record from two.
+    """
+
+    def fingerprint_of(record: str) -> str:
+        with pytest.raises(AuditLogDecodeError) as raised:
+            check_audit_lines([record], [], VERSION)
+        message = str(raised.value)
+        marker = "sha256:"
+        start = message.index(marker) + len(marker)
+        return message[start : message.index(">", start)]
+
+    first = fingerprint_of("not json at all")
+    again = fingerprint_of("not json at all")
+    other = fingerprint_of("also not json")
+
+    assert first == again
+    assert first != other
+
+
+def test_line_fingerprint_reports_the_physical_line_number() -> None:
+    """The reported position is the 1-BASED PHYSICAL line, not a decoded-event index.
+
+    Since the text is withheld, the position is the only way to find the offending
+    line, so it has to be the number an editor would show. Go's own loop counter
+    (``for i = 0; scanner.Scan(); i++`` at test/utils/audit.go 103) is 0-based and
+    is what ``num_events_checked`` reports, so a diagnostic that reused it would be
+    off by one on every line of every log -- consistently enough to look right.
+
+    The third record is the offender: a 1-based physical position says "line 3",
+    while the 0-based counter would say "line 2", and BOTH are asserted so the two
+    cannot be confused. Blank records are deliberately not used to make the point --
+    they are a decode failure in their own right, which
+    :func:`test_a_blank_record_is_a_decode_failure_not_a_skip` locks separately.
+    """
+    good = json.dumps(
+        {"kind": "Event", "apiVersion": VERSION, "level": "Metadata", "verb": "get"}
+    )
+
+    with pytest.raises(AuditLogDecodeError) as raised:
+        check_audit_lines([good, good, "{not json"], [], VERSION)
+
+    message = str(raised.value)
+    # Two records decode before it, so the offender is physical line 3.
+    assert "line 3" in message
+    assert "line 2" not in message
+
 
 
 def test_empty_report_renders_without_raising() -> None:
@@ -538,16 +627,69 @@ def test_empty_report_renders_without_raising() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_blank_lines_do_not_advance_the_counter() -> None:
-    """Go's scanner produces no token for a trailing newline, so neither does this.
+@pytest.mark.parametrize(
+    ("records", "offending_line"),
+    [
+        pytest.param(["", line()], 1, id="empty-first"),
+        pytest.param([line(), ""], 2, id="empty-last"),
+        pytest.param([line(), "   ", line()], 2, id="whitespace-only-interior"),
+    ],
+)
+def test_a_blank_record_is_a_decode_failure_not_a_skip(
+    records: list[str], offending_line: int
+) -> None:
+    """A blank or whitespace-only record FAILS, naming its line. Go fails it too.
 
-    Counting them would make ``num_events_checked`` disagree with Go's ``i`` for
-    every well-formed blocking-mode log, which ends with a newline.
+    ``bufio.Scanner`` with ``ScanLines`` emits a token for a blank line - it does
+    not swallow it - and ``runtime.DecodeInto`` then fails that empty buffer at
+    audit.go 106-110. Skipping it here was a silent divergence with a real cost: a
+    partially flushed or truncated write disappeared from the scan, the caller's
+    500 ms poll spun to its deadline, and the failure it finally reported was
+    "missing events" - which points the reader at the API server rather than at the
+    log line that was actually broken.
+
+    The line number is asserted because a content-free diagnostic is only
+    actionable if it says WHERE.
     """
-    report = check_audit_lines(["", line(), "   ", line(), ""], [], VERSION)
+    with pytest.raises(AuditLogDecodeError) as raised:
+        check_audit_lines(records, [], VERSION)
+
+    message = str(raised.value)
+    assert f"line {offending_line}" in message
+    assert "undecodable audit record" in message
+    assert "0 character(s)" in message or "3 character(s)" in message
+
+
+def test_a_trailing_newline_in_a_real_log_yields_no_extra_record(tmp_path: Path) -> None:
+    """A blocking-mode log ends with "\\n" and still reports exactly its own events.
+
+    This is the legitimate concern the old blank-line skip was reaching for, and it
+    needs no skip: iterating a file object yields one string per line and produces
+    NO final empty element for the terminating newline, exactly as
+    ``bufio.Scanner`` produces no final token. ``num_events_checked`` therefore
+    equals Go's ``i`` without anything being discarded.
+    """
+    log = tmp_path / "kube-apiserver-audit.log"
+    log.write_text(f"{line()}\n{line()}\n", encoding="utf-8")
+
+    report = check_audit_lines(log, [], VERSION)
 
     assert report.num_events_checked == 2
     assert len(report.all_events) == 2
+
+
+def test_a_carriage_return_before_the_newline_is_dropped(tmp_path: Path) -> None:
+    """CRLF records decode. ``dropCR`` removes exactly one "\\r", and only before "\\n".
+
+    Without that, a log written on a CRLF stream would fail every line with a JSON
+    error - a decoder difference from Go masquerading as a broken audit log.
+    """
+    log = tmp_path / "crlf-audit.log"
+    log.write_bytes(f"{line()}\r\n".encode())
+
+    report = check_audit_lines(log, [], VERSION)
+
+    assert report.num_events_checked == 1
 
 
 def test_all_events_is_a_superset_the_guard_can_scan() -> None:

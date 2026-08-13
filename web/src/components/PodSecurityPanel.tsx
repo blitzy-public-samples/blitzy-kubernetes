@@ -108,7 +108,12 @@ import {
   verdictForAbsence,
 } from '../domain/evidence';
 import { V2_OBSERVATIONS, v2NamespaceLabelObservation } from '../domain/observationIds';
-import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeLabel,
+  safeObservationValue,
+  safeProse,
+} from '../domain/safeText';
 import {
   useLiveRegionRole,
   usePanelLabelId,
@@ -1513,7 +1518,7 @@ function PostureRequestFailure({ error }: { readonly error: ControlStatusError }
           <li>{`Status endpoint response code: ${String(error.httpStatus)}`}</li>
         )}
         {error.reason === undefined ? null : (
-          <li>{`Status endpoint response reason: ${safeLabel(error.reason)}`}</li>
+          <li>{`Status endpoint response reason: ${describeStatusReason(error.reason)}`}</li>
         )}
       </ul>
       <p>

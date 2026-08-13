@@ -270,18 +270,90 @@ const WHITESPACE_RUN = /\s{2,}/g;
 const ABSOLUTE_POSIX_PATH = /^(?:\/[A-Za-z0-9._@+-]+)+\/?$/;
 
 /**
+ * A `key = value` or `key: value` assignment whose KEY names a credential.
+ *
+ * CLOSES THE LARGEST GAP IN A SHAPE-ONLY SANITIZER. Everything above recognises a
+ * credential by its ENCODING — PEM armour, a dotted JWT, a padded base64 blob — and
+ * a short opaque secret has no encoding to recognise. `password=hunter2` is eight
+ * ordinary characters; no entropy or structure rule can distinguish it from prose,
+ * so it passed through untouched into live DOM alerts. React escaping prevents
+ * script injection, not disclosure (CWE-200).
+ *
+ * The KEY is the signal instead of the value, which is what makes this reliable: a
+ * backend that names a field `password` has told us the next token is one. The label
+ * is preserved and only the value is replaced, so the message still says WHAT was
+ * withheld — "password=[redacted]" is more useful to an operator than a message with
+ * a hole in it, and it cannot leak.
+ *
+ * Word boundaries matter and were chosen deliberately: `\bkey\b` does not match
+ * `keyfile`, so `--etcd-keyfile=/etc/srv/kubernetes/pki/etcd-client.key` keeps its
+ * path — a path is not a credential, and redacting it would destroy the evidence the
+ * V8 panel exists to show.
+ */
+const SENSITIVE_ASSIGNMENT =
+  /\b(token|secret|key|password|passwd|pwd|credential|credentials|bearer|apikey|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;)\]}]+)/gi;
+
+/**
+ * The `user:password@` userinfo of a URI.
+ *
+ * A connection string is the other way a short opaque secret reaches a log without
+ * looking like one: `postgres://svc:s3cr3t@db.internal:5432/posture` is a perfectly
+ * ordinary error-message fragment and the password sits in the middle of it. Matched
+ * only when the userinfo actually contains a `:` — that is, only when a password is
+ * present — so `https://foo.bar.example.com` and a plain `user@host` are untouched.
+ */
+const URI_USERINFO = /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]*@/g;
+
+/**
+ * A long opaque single-token run: 16 or more `[A-Za-z0-9_]` characters carrying at
+ * least one digit and at least one letter.
+ *
+ * Catches the credentials that carry no padding and no dots — an AWS-style access key
+ * id, an unpadded base64url token, a hex API key — which the padded-base64 rule above
+ * explicitly declines to match.
+ *
+ * THE CHARACTER CLASS EXCLUDES `-` AND `.` ON PURPOSE, and that is what keeps this
+ * precise rather than destructive. Both are separators in the identifiers this tier
+ * legitimately renders, so excluding them breaks those identifiers into short runs
+ * that cannot match:
+ *   * a UUID `a3f05d29-5b83-4e72-9d14-8c60a7be215f` — longest run is 8, and audit IDs
+ *     are rendered for correlation, so redacting them would remove a real affordance;
+ *   * a version `v1.34.0-blitzy`, a namespace `psa-enforce-baseline`, a label
+ *     `pod-security.kubernetes.io/enforce` — all broken into short, letter-only runs.
+ * Requiring BOTH a digit and a letter excludes ordinary long words and plain decimal
+ * numbers such as a byte count or a timestamp.
+ */
+const OPAQUE_TOKEN_RUN = /(?=[A-Za-z0-9_]{16,})(?=[A-Za-z0-9_]*\d)[A-Za-z0-9_]*[A-Za-z][A-Za-z0-9_]*/g;
+
+/**
  * Replaces every recognisable credential shape in `text` with
  * {@link SAFE_REDACTED}.
  *
- * Order matters: PEM armour is removed first, because a base64 body inside a
- * block would otherwise be redacted piecemeal and leave the armour lines on
- * screen looking like a rendered certificate.
+ * Order matters, and each step is ordered against the one after it:
+ *   1. PEM armour first, because a base64 body inside a block would otherwise be
+ *      redacted piecemeal and leave the armour lines on screen looking like a
+ *      rendered certificate.
+ *   2. URI userinfo before the token rules, so a password inside a connection string
+ *      is removed as part of the URI rather than leaving a mangled fragment.
+ *   3. Sensitive assignments before the opaque-run rule, so the label survives and
+ *      only its value is replaced.
+ *   4. The encoding-shaped rules last, over whatever remains.
+ *
+ * A DENYLIST OF FOUR RULES IS STILL A DENYLIST, and that is stated rather than
+ * glossed: this is defence in depth for text that a panel has decided to render, not
+ * a proof that no secret can ever appear in backend prose. The structural protection
+ * is that every panel's diagnosis is composed from LOCAL text plus enumerated,
+ * allowlisted fields — see {@link describeStatusReason} — so a withheld message
+ * costs context and never the explanation itself.
  */
 function redactCredentialShapes(text: string): string {
   return text
     .replace(PEM_ARMOURED_BLOCK, SAFE_REDACTED)
+    .replace(URI_USERINFO, `$1${SAFE_REDACTED}@`)
+    .replace(SENSITIVE_ASSIGNMENT, `$1$2${SAFE_REDACTED}`)
     .replace(CREDENTIAL_SHAPED_VALUE_GLOBAL, SAFE_REDACTED)
-    .replace(PADDED_BASE64_BLOB, SAFE_REDACTED);
+    .replace(PADDED_BASE64_BLOB, SAFE_REDACTED)
+    .replace(OPAQUE_TOKEN_RUN, SAFE_REDACTED);
 }
 
 /**
@@ -296,17 +368,42 @@ function flatten(text: string): string {
 }
 
 /**
+ * Non-global test twins of the three shape rules that are declared with `g`.
+ *
+ * A `g` regex carries a mutable `lastIndex`, so calling `.test()` on the rule used for
+ * replacement would make the answer depend on how many times it had been called before
+ * — the same hazard {@link PADDED_BASE64_BLOB_TEST} exists to avoid. These share the
+ * rules' sources, so a rule edited above cannot leave its predicate behind.
+ */
+const SENSITIVE_ASSIGNMENT_TEST = new RegExp(SENSITIVE_ASSIGNMENT.source, 'i');
+const URI_USERINFO_TEST = new RegExp(URI_USERINFO.source);
+const OPAQUE_TOKEN_RUN_TEST = new RegExp(OPAQUE_TOKEN_RUN.source);
+
+/**
  * Whether `text` contains something shaped like a credential.
  *
  * Exported so a caller that must make a DECISION about a value — rather than
  * render it — can ask the same question this module answers, instead of writing
  * a second, drifting copy of these patterns.
+ *
+ * IT MUST TEST EVERY SHAPE {@link redactCredentialShapes} REPLACES, and it has to be
+ * kept that way deliberately, because the two are consulted at different depths. The
+ * callers that render prose sanitize it surgically; {@link safeLabel},
+ * {@link safeObservationValue} and {@link isSafeAbsolutePath} instead consult THIS
+ * predicate and, when it answers false, return the value VERBATIM. A shape known to
+ * the sanitizer but missing here therefore does not degrade to a partial redaction —
+ * it leaks the whole value into the document. That is not hypothetical: when the
+ * assignment, URI-userinfo and opaque-run rules were added to the sanitizer without
+ * being added here, `safeLabel('password=hunter2')` returned its input unchanged.
  */
 export function containsCredentialShape(text: string): boolean {
   return (
     text.includes(PEM_MARKER) ||
     CREDENTIAL_SHAPED_VALUE.test(text) ||
-    PADDED_BASE64_BLOB_TEST.test(text)
+    PADDED_BASE64_BLOB_TEST.test(text) ||
+    SENSITIVE_ASSIGNMENT_TEST.test(text) ||
+    URI_USERINFO_TEST.test(text) ||
+    OPAQUE_TOKEN_RUN_TEST.test(text)
   );
 }
 
@@ -494,4 +591,73 @@ export function safePathBasename(value: unknown): string {
   // absolute, so `lastIndexOf` cannot return -1 and the slice cannot be empty.
   const withoutTrailingSlash = value.endsWith('/') ? value.slice(0, -1) : value;
   return withoutTrailingSlash.slice(withoutTrailingSlash.lastIndexOf('/') + 1);
+}
+
+/* ------------------------------------------------------------------------ *
+ * Allowlisted structured evidence
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Every `Status.reason` the Kubernetes API server can send.
+ *
+ * TRANSCRIBED, NOT GUESSED. These are the nineteen `StatusReason` constants declared
+ * in `staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go`, which is the only
+ * place that defines them. `reason` is an ENUMERATION rather than prose, so it can be
+ * allowlisted outright — and allowlisting is categorically stronger than sanitizing:
+ * a value that is not on this list is not rendered at all, so there is nothing for a
+ * pattern to miss.
+ *
+ * This is the structural half of the CWE-200 fix. The sanitizer that guards free
+ * text is a denylist of credential shapes, and a denylist can only ever remove what
+ * it recognises; every field that CAN be enumerated is therefore enumerated instead,
+ * so the surface a denylist has to cover shrinks to the one field that is genuinely
+ * free text.
+ */
+export const KUBERNETES_STATUS_REASONS: readonly string[] = Object.freeze([
+  'AlreadyExists',
+  'BadRequest',
+  'Conflict',
+  'Expired',
+  'Forbidden',
+  'Gone',
+  'InternalError',
+  'Invalid',
+  'MethodNotAllowed',
+  'NotAcceptable',
+  'NotFound',
+  'RequestEntityTooLarge',
+  'ServerTimeout',
+  'ServiceUnavailable',
+  'StorageReadError',
+  'Timeout',
+  'TooManyRequests',
+  'Unauthorized',
+  'UnsupportedMediaType',
+]);
+
+/** Rendered in place of a `reason` that is not a recognised Kubernetes value. */
+export const SAFE_UNRECOGNISED_REASON = '[unrecognised reason]';
+
+/**
+ * Renders a `Status.reason` from the ALLOWLIST, never as prose.
+ *
+ * A recognised reason is returned verbatim, because it is one of nineteen fixed
+ * tokens and carries no attacker-controlled content. Anything else — free text a
+ * backend put in the field, a value from a newer API version, an empty string —
+ * yields {@link SAFE_UNRECOGNISED_REASON}, so this function can never place
+ * server-chosen characters in the document.
+ *
+ * Contrast with passing `reason` through {@link safeProse}, which is what the panels
+ * did: that renders whatever the server sent minus any credential shape the denylist
+ * happens to recognise, and a short opaque secret has no shape to recognise. An
+ * allowlist has no such gap.
+ *
+ * @param reason - the raw `reason` field, or anything at all.
+ * @returns the allowlisted token, or {@link SAFE_UNRECOGNISED_REASON}.
+ */
+export function describeStatusReason(reason: unknown): string {
+  if (typeof reason !== 'string') {
+    return SAFE_UNRECOGNISED_REASON;
+  }
+  return KUBERNETES_STATUS_REASONS.includes(reason) ? reason : SAFE_UNRECOGNISED_REASON;
 }

@@ -589,8 +589,9 @@ STORAGE_OPTIONS_CASES: tuple[ETCDEnvCase, ...] = (
 #: shipped profiles set ``ETCD_APISERVER_ALLOW_INSECURE=false``
 #: (cluster/gce/config-default.sh and config-test.sh), so a real deployment
 #: missing its etcd certificates takes the else branch and exits 1 after printing
-#: "refusing to fall back to plaintext etcd" (line 45 of the script; the phrase is
-#: kept on one line here so that grepping the tree for it finds this note too).
+#: "refusing to fall back to plaintext etcd" ON STDERR (line 45 of the script,
+#: which emits it with ``>&2`` as AAP §0.10.2 requires; the phrase is kept on one
+#: line here so that grepping the tree for it finds this note too).
 #:
 #: Two truths therefore hold at once, and BOTH must stay green:
 #:

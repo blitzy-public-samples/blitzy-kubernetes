@@ -160,6 +160,59 @@ export function selectObservation(
 }
 
 /**
+ * Reads a CARDINALITY measurement: a count of things that were observed.
+ *
+ * Stricter than {@link readNumber} in exactly one way, and it is the way that
+ * matters for a verdict: a count must be a NON-NEGATIVE INTEGER. Nothing can be
+ * observed 9.5 times or -1 times, so a value like that is not a count that happens
+ * to be unusual — it is evidence that whatever produced it was not counting.
+ *
+ * WHY THIS IS NOT PEDANTRY. Every completeness check in this tier is arithmetic
+ * over counts: "were at least as many events observed as expected?", "did any
+ * Secret event carry a response body?". `readNumber` admits any finite number, so
+ * an observed count of `9.5` against an expected `9` satisfied BOTH `> 0` and
+ * `>= 9` and produced a PASS — a false pass built out of a value no counter can
+ * emit. Rejecting it as `wrong-type` makes it INDETERMINATE instead, which is the
+ * honest verdict: the measurement is unusable, so the control is unproven rather
+ * than either broken or holding.
+ *
+ * Zero is accepted here, deliberately. An empty log is a legitimate measurement
+ * ("nothing was scanned") and its consequence belongs to the caller, which
+ * generally reports it as indeterminate rather than violated. Only NEGATIVE and
+ * NON-INTEGER values are refused.
+ *
+ * @param observations - the measured observations to search.
+ * @param label - the observation label to read.
+ * @returns the count, or the reason it could not be read as one.
+ */
+export function readCount(
+  observations: readonly MeasuredObservation[] | undefined,
+  label: string,
+): EvidenceResult<number> {
+  const found = readNumber(observations, label);
+  if (found.state !== 'reported') {
+    return found;
+  }
+  if (!Number.isInteger(found.value)) {
+    return missing(
+      'wrong-type',
+      `The observation labelled "${label}" is ${String(found.value)}, which is not a whole ` +
+        'number, so it cannot be a count of observed things. Rounding it would invent ' +
+        'evidence, and comparing it would let a value no counter can emit satisfy a ' +
+        'completeness check.',
+    );
+  }
+  if (found.value < 0) {
+    return missing(
+      'wrong-type',
+      `The observation labelled "${label}" is ${String(found.value)}, which is negative, so ` +
+        'it cannot be a count of observed things.',
+    );
+  }
+  return reported(found.value);
+}
+
+/**
  * Reads a BOOLEAN measurement. No truthiness, no string parsing.
  *
  * `'true'`, `'false'`, `1`, `0` and `''` are all rejected as `wrong-type`. Accepting any

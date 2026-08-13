@@ -311,7 +311,7 @@ describe('ConfidentialityRedaction — loading, empty, error and accessibility',
     const { container } = renderWithProviders(
       <ConfidentialityRedaction
         events={[]}
-        error={{ httpStatus: 403, reason: 'Forbidden', message: 'forbidden' }}
+        error={{ kind: 'http', httpStatus: 403, reason: 'Forbidden', message: 'forbidden' }}
       />,
     );
 
@@ -323,7 +323,7 @@ describe('ConfidentialityRedaction — loading, empty, error and accessibility',
     const forbidden = renderWithProviders(
       <ConfidentialityRedaction
         events={[]}
-        error={{ httpStatus: 403, reason: 'Forbidden', message: 'forbidden' }}
+        error={{ kind: 'http', httpStatus: 403, reason: 'Forbidden', message: 'forbidden' }}
       />,
     );
     expect(forbidden.container).toHaveTextContent('HTTP status 403');
@@ -332,7 +332,7 @@ describe('ConfidentialityRedaction — loading, empty, error and accessibility',
     const broken = renderWithProviders(
       <ConfidentialityRedaction
         events={[]}
-        error={{ httpStatus: 500, reason: 'InternalError', message: 'boom' }}
+        error={{ kind: 'http', httpStatus: 500, reason: 'InternalError', message: 'boom' }}
       />,
     );
     expect(broken.container).toHaveTextContent('HTTP status 500');
@@ -696,6 +696,7 @@ describe('ConfidentialityRedaction — external text is bounded and redacted', (
       <ConfidentialityRedaction
         events={[]}
         error={{
+          kind: 'http',
           httpStatus: 500,
           reason: `InternalError ${TOKEN_SHAPED}`,
           message: `upstream said ${TOKEN_SHAPED}`,
@@ -717,7 +718,7 @@ describe('ConfidentialityRedaction — external text is bounded and redacted', (
     const { container } = renderWithProviders(
       <ConfidentialityRedaction
         events={[]}
-        error={{ httpStatus: 403, reason: '', message: '' }}
+        error={{ kind: 'http', httpStatus: 403, reason: '', message: '' }}
       />,
     );
 
@@ -730,7 +731,7 @@ describe('ConfidentialityRedaction — external text is bounded and redacted', (
     const { container } = renderWithProviders(
       <ConfidentialityRedaction
         events={[]}
-        error={{ httpStatus: 500, message: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1) }}
+        error={{ kind: 'http', httpStatus: 500, message: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1) }}
       />,
     );
 
@@ -884,5 +885,84 @@ describe('ConfidentialityRedaction — a body that cannot be serialized is still
 
     expect(text(container)).not.toContain(RESPONSE_MARKER);
     expect(mustWithholdResponseBody(offendingSecretsEvent())).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The recorded fixtures claim only what the oracle measured (finding P).
+// ---------------------------------------------------------------------------
+
+describe('the recorded audit fixtures carry presence, not invented bodies', () => {
+  /**
+   * WHY THIS LIVES IN A SPEC AND NOT ONLY IN A COMMENT. `test/utils/audit.go`
+   * L151-156 reduces every audited body to a BOOLEAN --
+   * `if e.ResponseObject != nil { event.ResponseObject = true }` -- so the parity
+   * oracle records that a response body existed and records NOTHING about its
+   * contents. The fixtures previously filled each `responseObject` with the
+   * corresponding REQUEST object, which no server returns: a create response carries
+   * the `uid`, `resourceVersion` and `creationTimestamp` a request cannot have, and a
+   * delete response is a `Status` or the deleted object rather than the target.
+   *
+   * That put invented content, in a file named `fixtures`, where a reader would take
+   * it for recorded wire data. A comment saying "contents are illustrative" does not
+   * stop the next author from asserting against it; this does.
+   */
+  const PRESENCE_MARKER_KEY = 'audit.k8s.io.blitzy/body';
+
+  it('records every response body as an explicit presence marker', () => {
+    const withResponseBodies = ALL_OBSERVED_AUDIT_EVENTS.filter(
+      (candidate) => candidate.responseObject !== undefined,
+    );
+
+    // Guard against a vacuous pass: the RBAC events are audited at RequestResponse,
+    // so some events MUST carry a response body or this test proves nothing.
+    expect(
+      withResponseBodies.length,
+      'no recorded event carries a response body, so this assertion is vacuous',
+    ).toBeGreaterThan(0);
+
+    for (const observed of withResponseBodies) {
+      const body = observed.responseObject as Record<string, unknown>;
+      expect(
+        Object.keys(body),
+        `${observed.auditID} records a response body with invented contents; the oracle ` +
+          'measures presence only',
+      ).toEqual([PRESENCE_MARKER_KEY]);
+      expect(String(body[PRESENCE_MARKER_KEY])).toContain('not measured');
+    }
+  });
+
+  it('still omits the response body entirely on every secrets event', () => {
+    // THE CONFIDENTIALITY GUARD IS UNAFFECTED, and must be: the marker replaces
+    // invented CONTENT, it does not weaken the rule that a `secrets` event carries no
+    // response body at all. Omitted rather than present-and-marked, so a presence
+    // check still means something.
+    for (const observed of ALL_OBSERVED_AUDIT_EVENTS) {
+      if (observed.objectRef?.resource !== 'secrets') {
+        continue;
+      }
+      expect(
+        Object.hasOwn(observed, 'responseObject'),
+        `${observed.auditID} is a secrets event and must omit responseObject entirely`,
+      ).toBe(false);
+    }
+  });
+
+  it('keeps request bodies as the objects the measured operations construct', () => {
+    // CONTROL, and the boundary of the fix: REQUEST bodies are traceable to
+    // `audit_test.go` L743-746, L763-766 and L781-793 -- they are the arguments the
+    // measured operations actually pass -- so they are sourced evidence and are NOT
+    // replaced by the marker. A blanket replacement would have discarded real
+    // evidence along with the invented kind.
+    const secretWrite = ALL_OBSERVED_AUDIT_EVENTS.find(
+      (candidate) => candidate.objectRef?.resource === 'secrets' && candidate.verb === 'create',
+    );
+
+    expect(secretWrite, 'the recorded secrets create is missing').toBeDefined();
+    const requestBody = secretWrite?.requestObject as Record<string, unknown>;
+    expect(requestBody['kind'], 'the recorded request body is the real Secret object').toBe(
+      'Secret',
+    );
+    expect(Object.keys(requestBody)).not.toEqual([PRESENCE_MARKER_KEY]);
   });
 });

@@ -333,7 +333,7 @@ export interface ControlStatus {
  * - `payload` — a 2xx response arrived but its body could not be trusted to
  *   describe the controls asked about.
  */
-export type ControlStatusErrorKind = 'http' | 'network' | 'payload';
+export type ControlStatusErrorKind = 'http' | 'network' | 'payload' | 'timeout';
 
 /**
  * A transport or contract failure.
@@ -352,8 +352,10 @@ export interface ControlStatusError {
    */
   readonly message: string;
   /**
-   * The HTTP status code, verbatim. Absent only for `kind: 'network'`, where no
-   * response — and therefore no status — ever existed.
+   * The HTTP status code, verbatim. Absent for `kind: 'network'` and for
+   * `kind: 'timeout'`, where no response — and therefore no status — ever
+   * existed. Never synthesised: a consumer that sees a number knows a server
+   * sent it.
    */
   readonly httpStatus?: number;
   /**
@@ -1172,6 +1174,30 @@ type ControlStatusSnapshot =
 const LOADING_SNAPSHOT: ControlStatusSnapshot = Object.freeze({ status: 'loading' as const });
 
 /**
+ * Wall-clock ceiling for a single control-status request, in milliseconds.
+ *
+ * An `AbortController` alone bounds only what the CONSUMER does — unmount,
+ * refresh, a changed path. It cannot bound what the SERVER does, and the failure
+ * that matters here is the one it cannot see: a server that accepts the
+ * connection and then never responds. `fetch` has no default timeout, so without
+ * this the promise never settles, nothing is committed, and the panel stays in
+ * `loading` for as long as the tab is open — a posture surface that silently
+ * shows nothing rather than reporting that it could not read.
+ *
+ * 15 seconds is chosen from the contract this UI renders rather than from taste:
+ * the admission webhook it reports on is committed to `timeoutSeconds: 5` and the
+ * KMS envelope call to `timeout: 3s` (AAP §0.10.2), so a healthy control-plane
+ * read completes well inside it, while a request still outstanding at 15s has
+ * stopped being slow and started being wedged.
+ */
+export const CONTROL_STATUS_REQUEST_TIMEOUT_MS = 15_000;
+
+/** Message committed when {@link CONTROL_STATUS_REQUEST_TIMEOUT_MS} elapses. */
+const TIMEOUT_MESSAGE =
+  `The control-status request did not complete within ${CONTROL_STATUS_REQUEST_TIMEOUT_MS / 1000}s ` +
+  'and was cancelled. No posture verdict can be shown for it. Retry to re-issue the request.';
+
+/**
  * Reads the posture of one hardening control, or of all eight at once.
  *
  * Called with no argument it queries {@link CONTROL_STATUS_BASE_PATH} and
@@ -1215,13 +1241,33 @@ export function useControlStatus(controlId?: ControlId): UseControlStatusResult 
     // the two are not redundant: cleanup marks this effect run superseded even
     // in the window before an in-flight read observes the abort.
     let current = true;
+    // Set by the deadline timer BEFORE it aborts. This is what separates the two
+    // reasons a request can end without a response, which the abort signal alone
+    // cannot distinguish: a consumer cancellation must commit nothing, while a
+    // deadline must commit an error. Without this flag a timeout implemented by
+    // aborting is swallowed by the same branch that ignores unmount, and the hook
+    // stays in `loading` exactly as it did before the deadline existed.
+    let timedOut = false;
 
     const commit = (next: ControlStatusSnapshot): void => {
-      if (!current || controller.signal.aborted) {
+      // `timedOut` deliberately overrides the aborted check: the deadline aborts
+      // the controller on purpose, so its own error must still be committable.
+      if (!current || (controller.signal.aborted && !timedOut)) {
         return;
       }
       setSnapshot(next);
     };
+
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      // Abort as well as flag: the flag decides what is reported, the abort
+      // actually releases the socket and stops the response being parsed.
+      controller.abort();
+      commit({
+        status: 'error',
+        error: { kind: 'timeout', message: TIMEOUT_MESSAGE },
+      });
+    }, CONTROL_STATUS_REQUEST_TIMEOUT_MS);
 
     // Returning the previous value unchanged when it is already the loading
     // snapshot keeps the identity stable, so the first mount does not re-render
@@ -1267,14 +1313,27 @@ export function useControlStatus(controlId?: ControlId): UseControlStatusResult 
           isEmpty: outcome.controls.length === 0,
         });
       } catch (error) {
+        if (timedOut) {
+          // The deadline already committed the timeout error. The abort it raised
+          // arrives here as an AbortError; reporting it again as a network
+          // failure would overwrite the accurate diagnosis with a vaguer one.
+          return;
+        }
         if (isAbortError(error) || controller.signal.aborted) {
-          // Invariant 2: an abort is not a failure, so nothing is committed.
+          // Invariant 2: a CONSUMER abort is not a failure, so nothing is
+          // committed. Reached on unmount, refresh and a changed path.
           return;
         }
         commit({
           status: 'error',
           error: { kind: 'network', message: describeNetworkFailure(error, path) },
         });
+      } finally {
+        // Deterministic in every outcome — success, HTTP error, payload error,
+        // network error, consumer abort and the timeout itself. A timer that
+        // outlived its request would abort a LATER one, so this is cleared here
+        // as well as in the cleanup below rather than only there.
+        clearTimeout(deadline);
       }
     };
 
@@ -1282,6 +1341,7 @@ export function useControlStatus(controlId?: ControlId): UseControlStatusResult 
 
     return () => {
       current = false;
+      clearTimeout(deadline);
       controller.abort();
     };
   }, [path, attempt]);

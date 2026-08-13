@@ -462,6 +462,46 @@ describe('AuditFidelityPanel — a pass must be earned', () => {
     expect(container).toHaveTextContent('nothing to inspect');
   });
 
+  it.each([
+    { label: 'a fraction that clears the expected count', observed: 9.5 },
+    { label: 'a fraction below one', observed: 0.5 },
+    { label: 'a negative count', observed: -1 },
+    { label: 'a large fraction', observed: 40.25 },
+  ])('refuses the pass when the observed event count is $label', ({ observed }) => {
+    // INVARIANT LOCKED (finding Q): a completeness verdict is never computed from a
+    // value that cannot be a count.
+    //
+    // The reader was `readNumber`, which admits ANY finite number, so an observed
+    // count of 9.5 against an expected 9 satisfied both the positivity check
+    // (`> 0`) and the completeness comparison (`9.5 >= 9`) and produced a PASS. The
+    // pass was built out of a value no counter can emit. `readCount` now refuses a
+    // non-integer or negative value as `wrong-type`, which surfaces as
+    // INDETERMINATE -- the honest verdict, because a broken measuring apparatus
+    // leaves the control unproven rather than refuted.
+    const status = claimingPass(replacing(V6_OBSERVATIONS.auditEventsObserved, observed));
+
+    expect(
+      resolveAuditFidelityEffectiveVerdict(status),
+      'a malformed observed count must never yield a pass',
+    ).not.toBe('pass');
+
+    const { container } = renderWithProviders(<AuditFidelityPanel result={success(status)} />);
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, V6_OBSERVATIONS.auditEventsObserved)).toBe(
+      'indeterminate',
+    );
+  });
+
+  it('still grants the pass for a whole-number count, so the guard is not blanket', () => {
+    // CONTROL: rejecting malformed counts must not reject well-formed ones. Without
+    // this, a reader that refused every count would satisfy the cases above.
+    expect(
+      resolveAuditFidelityEffectiveVerdict(
+        claimingPass(replacing(V6_OBSERVATIONS.auditEventsObserved, 9)),
+      ),
+    ).toBe('pass');
+  });
+
   it('grants the pass when the check reported that it scanned events', () => {
     // REPLACING rather than appending: the baseline already carries an observed count, and
     // a second copy of an identity is a conflict rather than a stronger measurement.
@@ -897,6 +937,78 @@ describe('AuditFidelityPanel — M6: every required per-resource level row must 
     },
   );
 
+  it.each([
+    {
+      name: 'configmaps required at Metadata, observed at Request',
+      identity: v6ResourceLevelObservation('', ['configmaps'], 'webhook-audit-metadata'),
+      observed: 'Request',
+      required: 'Metadata',
+      says: 'records the request body',
+      mustNotSay: 'the payload reached the audit log',
+    },
+    {
+      name: 'roles/rolebindings required at RequestResponse, observed at Metadata',
+      identity: v6ResourceLevelObservation(
+        'rbac.authorization.k8s.io',
+        ['roles', 'rolebindings'],
+        'rbac-audit-response',
+      ),
+      observed: 'Metadata',
+      required: 'RequestResponse',
+      says: 'held UP at the most verbose level for forensics',
+      mustNotSay: 'above the required',
+    },
+    {
+      name: 'secrets required at Request, observed at RequestResponse',
+      identity: v6ResourceLevelObservation('', ['secrets'], 'secret-audit-request'),
+      observed: 'RequestResponse',
+      required: 'Request',
+      says: 'records the response body',
+      mustNotSay: 'below the required',
+    },
+  ])(
+    'names the ACTUAL required level in the guidance for $name',
+    ({ identity, observed, required, says, mustNotSay }) => {
+      // INVARIANT LOCKED (finding R): remediation guidance names the level THIS row
+      // requires, and says what the observed level actually records.
+      //
+      // The deviation helper compared every row against the hard-coded Secrets
+      // requirement of `Request`. The verdict was still correct -- a wrong level is a
+      // violation either way -- but the guidance was not: a roles/rolebindings row
+      // required at RequestResponse and observed at Metadata was described as being
+      // "below the required Request", and a configmaps row required at Metadata and
+      // observed at Request was described as "above the required Request", which is
+      // not even a deviation. An operator following either sentence would act on the
+      // wrong level.
+      const { container } = renderWithProviders(
+        <AuditFidelityPanel result={success(claimingPass(replacing(identity, observed)))} />,
+      );
+
+      expect(measurementResult(container, identity)).toBe('violated');
+      // The REQUIRED level must appear, and it is the row's own, not Secrets'.
+      expect(container).toHaveTextContent(`the required ${required}`);
+      // What the observed level records, or why the row is held where it is.
+      expect(container).toHaveTextContent(says);
+      // And the sentence that would have been produced by comparing against the
+      // Secrets requirement must NOT appear.
+      expect(container).not.toHaveTextContent(`${mustNotSay} Request (3 of 4)`);
+    },
+  );
+
+  it('appends the row rationale so the guidance says why the level matters', () => {
+    // The `because` text lives beside each required level in one place; before the fix
+    // it reached the row TITLE but never the deviation detail, so a failing row said
+    // what happened and not why it mattered.
+    const identity = v6ResourceLevelObservation('', ['serviceaccounts/token'], 'create-audit-request');
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass(replacing(identity, 'RequestResponse')))} />,
+    );
+
+    expect(measurementResult(container, identity)).toBe('violated');
+    expect(container).toHaveTextContent('Required because');
+    expect(container).toHaveTextContent('an issued token appears only in the response');
+  });
+
   it('renders all ten required measurements whether or not the payload reports them', () => {
     // UNCONDITIONAL is the substance of the fix: a measurement that appears only when its
     // observation does cannot report the observation's ABSENCE, which is the one thing a
@@ -1251,4 +1363,3 @@ describe('AuditFidelityPanel — M18: external prose is bounded and stripped of 
     expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
   });
 });
-

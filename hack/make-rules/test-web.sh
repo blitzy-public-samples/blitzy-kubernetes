@@ -455,6 +455,117 @@ for arg; do
 done
 set -- "${targets[@]+${targets[@]}}"
 
+# kube::test::web::flag_name echoes the bare name of the Vitest option $1:
+# --watch=true -> watch, -w -> w, --browser.enabled -> browser. Both the `=value`
+# form and the leading dashes are stripped, and a dotted sub-option is reduced to
+# its namespace, because a check keyed on the literal spelling has that many
+# trivial bypasses.
+kube::test::web::flag_name() {
+  local stripped=${1#-}
+  stripped=${stripped#-}
+  stripped=${stripped%%=*}
+  echo "${stripped%%.*}"
+}
+
+# kube::test::web::reject_forbidden_args refuses any caller-supplied Vitest option
+# that would let this gate SUCCEED WITHOUT RUNNING THE SPECS, wait for input
+# forever, or remove a bound the tier depends on. On return either every argument
+# is permitted, or an actionable message has been written and the status is
+# non-zero.
+#
+# WHY, AND WHY THE `run` SUBCOMMAND IS NOT ENOUGH. This runner always passes
+# `run`, which is what makes the invocation non-watching (AAP §0.9.3) - but Vitest
+# honours an explicit `--watch` after it, so `run --watch` watches. A watching gate
+# in CI is a job that consumes its whole wall-clock allowance in silence and
+# reports nothing, which is the single worst outcome available here.
+#
+# THE OTHER CLASSES:
+#   * SUCCEEDING WITHOUT SPECS. `--passWithNoTests` makes "every spec was deleted"
+#     indistinguishable from "every spec passed". This runner takes deliberate care
+#     over that verdict - kube::test::web::spec_count, the empty-tier exemption
+#     gated on KUBE_WEB_ALLOW_NO_TESTS and refused in CI - and a caller-supplied
+#     flag would bypass every bit of it.
+#   * REMOVING THE PER-TEST BOUND. `--testTimeout=0` and `--hookTimeout=0` mean NO
+#     timeout in Vitest, so a hung test or a hung `beforeAll` waits forever. Those
+#     bounds (10000 ms each in web/vitest.config.ts) are the React tier's analogue
+#     of pytest-timeout.
+#   * OUT-OF-SCOPE RUNNERS. `--browser`, `--browser.enabled` and `--standalone`
+#     switch to Browser Mode or a standalone server. AAP §0.8.2 puts browser
+#     automation, cross-browser testing and visual regression outside this project
+#     outright; §0.4.1.1 fixes the tier as jsdom. A browser run here would need a
+#     provider package that is deliberately not installed, so it fails obscurely
+#     rather than clearly.
+#   * A REPORTER THAT NO LONGER EXISTS. `basic` was REMOVED in Vitest 4 (AAP
+#     §0.2.2.2, §0.9.1.2) and fails at load with ERR_LOAD_URL /
+#     loadCustomReporterModule - a startup crash that reads like a configuration
+#     error rather than a bad flag. Named here so the diagnostic is the real one.
+#
+# WHAT IS DELIBERATELY STILL ALLOWED. `-t`/`--testNamePattern` and a positional
+# path filter narrow the run, but Vitest exits 1 when a filter matches no spec, and
+# this runner treats that as the genuine failure it is - so a mistyped filter fails
+# rather than passing quietly. `--bail` can only make the gate stricter.
+kube::test::web::reject_forbidden_args() {
+  local arg name reason value
+
+  for arg in "$@"; do
+    name=$(kube::test::web::flag_name "${arg}")
+    reason=""
+    case "${name}" in
+      watch|w)
+        # `--watch=false` is the explicit OFF form and is harmless; only a watching
+        # value is refused, so a caller may be redundantly explicit.
+        value="true"
+        [[ "${arg}" == *=* ]] && value=${arg#*=}
+        if [[ "${value}" != "false" && "${value}" != "0" ]]; then
+          reason="it makes Vitest watch for file changes and never return, so in CI it consumes the whole wall-clock allowance in silence"
+        fi
+        ;;
+      ui)
+        reason="it opens the interactive Vitest UI, which never returns and cannot report a verdict to a Makefile" ;;
+      standalone)
+        reason="it starts Vitest as a standalone server that waits for work instead of running the suite" ;;
+      browser)
+        reason="browser automation, cross-browser testing and visual regression are outside this project (AAP §0.8.2) and this tier is fixed to jsdom (AAP §0.4.1.1); the provider package is deliberately not installed, so a browser run fails obscurely rather than clearly" ;;
+      passWithNoTests)
+        reason="it makes 'every spec was deleted' indistinguishable from 'every spec passed', bypassing the empty-tier handling this runner exists to provide (use KUBE_WEB_ALLOW_NO_TESTS=y locally, which is refused in CI)" ;;
+      testTimeout|hookTimeout)
+        if [[ "${arg}" == *=* ]]; then
+          value=${arg#*=}
+          if [[ "${value}" =~ ^-?[0-9]+$ ]] && [[ "${value}" -le 0 ]]; then
+            reason="a ${name} of ${value} means NO timeout in Vitest, so a hung test or hook waits forever; that bound is this tier's analogue of pytest-timeout"
+          fi
+        fi
+        ;;
+      reporter)
+        if [[ "${arg}" == *=basic ]]; then
+          reason="the 'basic' reporter was REMOVED in Vitest 4 (AAP §0.2.2.2) and fails at load with ERR_LOAD_URL / loadCustomReporterModule, which reads like a configuration error rather than a bad flag; use 'default'"
+        fi
+        ;;
+    esac
+
+    if [[ -n "${reason}" ]]; then
+      kube::log::usage \
+        "ERROR: refusing the Vitest argument '${arg}': ${reason}." \
+        "This gate exists to prove the React tier RAN and PASSED, so an argument that can" \
+        "produce a zero exit status - or no exit at all - without that being true is rejected" \
+        "before Vitest starts. Nothing was run. Remove the argument, or narrow the run with a" \
+        "path filter or -t, both of which fail when they match nothing."
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Validate BOTH sources of caller arguments together - KUBE_VITEST_ARGS and the
+# positional ones - so a forbidden flag cannot be smuggled in through whichever
+# channel was checked less carefully.
+if [[ ${#vitestargs[@]} -gt 0 ]]; then
+  kube::test::web::reject_forbidden_args "${vitestargs[@]}" || exit 1
+fi
+if [[ $# -gt 0 ]]; then
+  kube::test::web::reject_forbidden_args "$@" || exit 1
+fi
+
 # kube::test::web::abs_dir creates the directory $1 and echoes its absolute,
 # symlink-resolved path. On return the directory exists and an absolute path has
 # been printed, or an actionable message has been written and the status is
@@ -740,7 +851,55 @@ runTests() {
   # runner's own, so that they can override them - with the single deliberate
   # exception of the coverage floors, which are appended after everything for the
   # reason given above.
+  # THE OUTER CEILING, a SECOND bound rather than a replacement for Vitest's own
+  # testTimeout/hookTimeout (10000 ms each, web/vitest.config.ts). The two catch
+  # different things:
+  #
+  #   * testTimeout bounds ONE TEST and hookTimeout ONE HOOK, and each reports the
+  #     hang as a FAILURE naming what hung - the more useful diagnostic, which is
+  #     why it must always fire first.
+  #   * This ceiling bounds THE WHOLE INVOCATION, for the hangs those structurally
+  #     cannot see: a wedge while Vite transforms or resolves the module graph,
+  #     before any test starts; a worker that never reports back; an MSW server or
+  #     a jsdom timer keeping the event loop alive after the last test finished; and
+  #     Vitest failing to enforce its own bound.
+  #
+  # Sized generously and floored at half an hour, so an ordinary slow run has long
+  # since reported its per-test failure. Refused if set to anything that is not a
+  # positive integer, because "0" means NO ceiling in timeout(1) and that is the one
+  # value a caller must not be able to smuggle in.
+  local ceiling=${KUBE_WEB_TEST_CEILING_SECONDS:-1800}
+  if [[ ! "${ceiling}" =~ ^[1-9][0-9]*$ ]]; then
+    kube::log::usage \
+      "ERROR: KUBE_WEB_TEST_CEILING_SECONDS='${ceiling}' is not a positive integer." \
+      "0 or empty would mean NO outer ceiling at all, which is exactly what this bound exists" \
+      "to prevent. Nothing was run. Pass a whole number of seconds."
+    return 1
+  fi
+
+  local -a ceiling_cmd=()
+  if command -v timeout >/dev/null 2>&1; then
+    ceiling_cmd=(timeout --signal=TERM --kill-after=30s "${ceiling}s")
+  else
+    kube::log::status \
+      "WARNING: timeout(1) was not found, so this run has NO outer ceiling." \
+      "A wedge during module transformation, or a worker that never reports back, would hang" \
+      "this gate rather than failing it. Install coreutils."
+  fi
+
+  # Wall-clock start, so that "the ceiling fired" is decided by ELAPSED TIME and not
+  # by an exit code alone. MEASURED REASON: timeout(1) is not one program. GNU
+  # coreutils returns 124 on timeout; the uutils Rust reimplementation shipped as
+  # coreutils-from-uutils on Ubuntu 25.10 - which is what /usr/bin/timeout is here -
+  # returns 125 whenever --kill-after is given. 125 in GNU means "timeout itself
+  # could not run the command", so accepting it unconditionally would misreport a
+  # genuine setup failure as a hang. Requiring the elapsed time to have reached the
+  # ceiling removes the ambiguity without a per-implementation special case, and
+  # keeps this runner's behaviour identical to the Python one's.
+  local ceiling_started_at=${SECONDS}
+
   local -a vitest_cmd=(
+    "${ceiling_cmd[@]:+${ceiling_cmd[@]}}"
     "${vitest_bin}" run
     "--reporter=default"
     "${junit_args[@]:+${junit_args[@]}}"
@@ -770,6 +929,35 @@ runTests() {
       kube::log::run "${vitest_cmd[@]}" \
     && rc=$? || rc=$?
 
+  # DID THE CEILING FIRE? Two conditions, both required: a status timeout(1) uses
+  # for a termination - 124 (GNU), 125 (uutils with --kill-after) or 137
+  # (128+SIGKILL) - AND an elapsed time that actually reached the ceiling. The
+  # elapsed check is what makes this correct on both implementations and what keeps
+  # a genuine "timeout could not exec the command" from being reported as a hang.
+  #
+  # The message is the diagnostic that survives: this function returns ${rc}, but
+  # hack/lib/logging.sh:46 installs a repository-wide `trap kube::log::errexit ERR`
+  # whose handler exits 1, so every make-rule reports 1 to its caller regardless of
+  # the code it returned. That is the repository's convention and is not changed
+  # here - which is exactly why the reason must be in the log rather than encoded in
+  # the status.
+  local elapsed=$(( SECONDS - ceiling_started_at ))
+  if [[ ${#ceiling_cmd[@]} -gt 0 ]] \
+      && { [[ "${rc}" -eq 124 ]] || [[ "${rc}" -eq 125 ]] || [[ "${rc}" -eq 137 ]]; } \
+      && [[ "${elapsed}" -ge "${ceiling}" ]]; then
+    kube::log::usage \
+      "ERROR: the React tier exceeded its outer ceiling of ${ceiling}s (ran for ${elapsed}s)" \
+      "and was terminated by timeout(1), which exited ${rc}." \
+      "Vitest's testTimeout and hookTimeout bound an individual test and hook and should have" \
+      "failed first, so reaching this bound means the wedge is somewhere they cannot see: Vite" \
+      "transforming or resolving the module graph before any test ran, a worker that never" \
+      "reported back, or an MSW server or jsdom timer keeping the event loop alive after the" \
+      "last test finished." \
+      "Re-run with --maxWorkers=1 --isolate=false to locate it." \
+      "Raise KUBE_WEB_TEST_CEILING_SECONDS only once you are satisfied the run is merely slow."
+    return "${rc}"
+  fi
+
   return "${rc}"
 }
 
@@ -788,4 +976,3 @@ KUBE_WEB_DIR=$(cd "${KUBE_WEB_DIR}" && pwd -P)
 kube::node::dirs
 
 runTests "$@"
-

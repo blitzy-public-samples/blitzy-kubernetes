@@ -627,6 +627,56 @@ def test_encryption_provider_flag(
             f"names a file that was never written and fails the API server closed at boot. "
             f"Got: {exec_args!r}"
         )
+        # AND NO FILE WAS WRITTEN. The AAP §0.4.2.1 KMS blueprint states this half
+        # of the negative case explicitly -- "Error cases: absent config must not
+        # create the file" -- and it is a DIFFERENT claim from the flag's absence,
+        # not a restatement of it. `setup-etcd-encryption` guards the decode with
+        # `if [[ -n "${ENCRYPTION_PROVIDER_CONFIG:-}" ]]`
+        # (cluster/gce/gci/configure-kubeapiserver.sh, the function begins at line
+        # 459) and the flag is appended from the same branch, so the two travel
+        # together today -- which is exactly why asserting only one of them would
+        # leave the other unguarded. A regression that decoded an EMPTY value would
+        # leave a zero-byte file at the configured path: harmless while no flag
+        # points at it, and a silent failure to start the API server the moment one
+        # does. Nothing else in this tier looks at the path when the flag is absent.
+        assert not config_path.exists(), (
+            f"{_RQ}: {case.desc}, so the generator must NOT have created "
+            f"{config_path}. A file exists there, which means `setup-etcd-encryption` decoded "
+            f"something when it had nothing to decode -- most likely an empty value written as a "
+            f"zero-byte file. That is inert only for as long as no flag names it; the moment one "
+            f"does, the API server is handed a file that is not an EncryptionConfiguration and "
+            f"refuses to start, taking encryption at rest down with it. Content found: "
+            f"{config_path.read_bytes()!r}"
+        )
+
+        # THE OTHER HALF OF THE NEGATIVE, and it asserts a different fact than the
+        # one above. The flag assertion proves nothing was WIRED; this proves
+        # nothing was WRITTEN. They come apart in both directions, and each
+        # direction is a real defect:
+        #
+        #   * a file decoded but not wired leaves stale configuration on the master
+        #     disk that the next boot, or a later flag change, could silently pick
+        #     up -- and because it is an EncryptionConfiguration, whatever key it
+        #     names is then live;
+        #   * a file written from an EMPTY variable would be a zero-byte or
+        #     whitespace document at exactly the path the flag names, so a future
+        #     edit that emitted the flag unconditionally would point the API server
+        #     at an unparseable configuration rather than at nothing at all.
+        #
+        # `config_path` is the path the environment DECLARED through
+        # ENCRYPTION_PROVIDER_CONFIG_PATH, so this asserts the script did not honour
+        # a path it was given no content for. `_run_generator` returns it precisely
+        # so the assertion can name the same path the flag would have carried,
+        # rather than re-deriving it here and risking asserting about a different
+        # file (AAP §0.4.2.1's blueprint error case: "absent config must not create
+        # the file").
+        assert not config_path.exists(), (
+            f"{_RQ}: {case.desc}, yet setup-etcd-encryption wrote {config_path} anyway. With no "
+            f"ENCRYPTION_PROVIDER_CONFIG to base64-decode there is nothing to write, so the file "
+            f"must not exist at all: its presence means the generator materialised an empty or "
+            f"partial EncryptionConfiguration at the path the flag would have named. Contents "
+            f"found: {config_path.read_bytes()!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -646,11 +696,11 @@ def test_encryption_provider_flag(
 # does not contain, which the parity contract's completeness and verdict-equality
 # assertions exist to catch. The node id must stay bracket-free.
 #
-# The AAP's blueprint also notes the negative half of this behaviour, that an
-# absent configuration must not create the file. It is already covered by
-# test_encryption_provider_flag's "is not set" case, which proves the flag is
-# never emitted, and adding a second case here to restate it would break the flat
-# shape for no additional coverage.
+# The AAP blueprint's negative half -- "absent config must not create the file" --
+# is asserted INSIDE test_encryption_provider_flag's "is not set" case, alongside
+# the flag's absence, rather than as a case of its own here. That placement is what
+# lets both halves of the negative be proven while this function stays flat and the
+# tier's node-id cardinality stays exactly what the baseline records.
 
 
 def test_encryption_provider_config(
@@ -660,7 +710,7 @@ def test_encryption_provider_config(
     """F-003-RQ-001: the base64 EncryptionConfiguration is DECODED onto disk, byte for byte.
 
     INVARIANT LOCKED: ``setup-etcd-encryption``
-    (cluster/gce/gci/configure-kubeapiserver.sh, the function begins at line 459)
+    (cluster/gce/gci/configure-kubeapiserver.sh, the function begins at line 480)
     base64-DECODES what the operator supplied in ``ENCRYPTION_PROVIDER_CONFIG``
     and writes the plain bytes to ``ENCRYPTION_PROVIDER_CONFIG_PATH``. This is the
     decode ROUND TRIP: ``Zm9v`` goes in and exactly ``foo`` must come out. Were

@@ -146,7 +146,12 @@ import {
   strictestVerdict,
 } from '../domain/evidence';
 import { V1_OBSERVATIONS } from '../domain/observationIds';
-import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeLabel,
+  safeObservationValue,
+  safeProse,
+} from '../domain/safeText';
 // `usePanelLabelId` is deliberately NOT imported here: this panel names its region with a
 // literal `aria-label` rather than by pointing at its heading, so the region keeps its
 // accessible name whether or not the heading is rendered.
@@ -1421,7 +1426,7 @@ function RbacWildcardError({
         {error.reason === undefined ? null : (
           <>
             <dt>Server reason</dt>
-            <dd>{safeLabel(error.reason)}</dd>
+            <dd>{describeStatusReason(error.reason)}</dd>
           </>
         )}
       </dl>

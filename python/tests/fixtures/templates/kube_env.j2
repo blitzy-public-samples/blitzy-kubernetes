@@ -106,13 +106,25 @@
 #     NAMED params: measured, adding `readonly params=` here makes the caller's
 #     own assignment fail with "params: readonly variable" and exit 1 - a FALSE
 #     rc==1 indistinguishable at a glance from a passing fail-closed assertion.
-#  2. Both the WARNING line and the "refusing to fall back to plaintext etcd"
-#     ERROR line are emitted with a bare echo, so they arrive on STDOUT; stderr
-#     was EMPTY in all four measured scenarios. Assert against stdout, using the
-#     separated-stream, tolerate-non-zero posture of tests/helpers/bash.py
-#     (try_invoke_func, or run_bash for the nameref call shape). The "stderr
-#     substring" wording in the AAP §0.5.2.1 blueprint is contradicted by
-#     measurement; bash.py's own docstring records the stdout behaviour correctly.
+#  2. THE TWO STREAMS CARRY DIFFERENT THINGS, AND WHICH ONE IS PART OF THE
+#     REQUIREMENT. The "refusing to fall back to plaintext etcd" ERROR (line 65)
+#     and the partial-credential ERROR (line 70) are written with >&2 and arrive on
+#     STDERR, which is what AAP §0.10.2, §0.4.2.1 and §0.5.2.1 each specify and what
+#     this directory's own convention requires of a pre-exit diagnostic. The WARNING
+#     (line 60) has no >&2 and arrives on STDOUT, alongside the parameter string the
+#     caller echoes. Measured, with the streams captured separately:
+#
+#       all-absent + ALLOW_INSECURE=false   rc=1  stderr=refusal  stdout=EMPTY
+#       partial    + ALLOW_INSECURE=false   rc=1  stderr=ERROR    stdout=EMPTY
+#       all-absent + ALLOW_INSECURE=true    rc=0  stdout=WARNING  stderr=EMPTY
+#       all six credentials present         rc=0  stdout=flags    stderr=EMPTY
+#
+#     So assert PER STREAM, using the separated-stream, tolerate-non-zero posture of
+#     tests/helpers/bash.py (try_invoke_func, or run_bash for the nameref call
+#     shape) with merge_streams=False. Never assert against the concatenation:
+#     merged output is satisfied by EITHER stream, so it cannot distinguish a
+#     correct refusal from one that regressed onto stdout - and on the fatal paths
+#     stdout is exactly where a caller looks for the assembled flag string.
 #  3. The exit 1 fires from INSIDE the function, so it terminates the whole bash
 #     invocation: nothing sequenced after the call runs, and no params echo will
 #     be seen for scenarios 2 and 3.
@@ -126,13 +138,32 @@
 #  6. Storage options are deliberately absent. STORAGE_BACKEND,
 #     STORAGE_MEDIA_TYPE and ETCD_COMPACTION_INTERVAL_SEC exist in the Go struct
 #     and in etcd.template, but configure-etcd-params reads all three only through
-#     ${VAR:-} guards (lines 59-68) so their absence is safe, and TestStorageOptions
+#     ${VAR:-} guards (lines 66-75) so their absence is safe, and TestStorageOptions
 #     already covers them at the L1 tier through the shipped template.
 #  7. --etcd-servers-overrides is emitted only when ETCD_SERVERS is empty (the
 #     default /events#http://127.0.0.1:4002 is appended) or when
 #     ETCD_SERVERS_OVERRIDES is non-empty; with ETCD_SERVERS set and the override
-#     empty it is absent entirely (lines 53-57, measured). ETCDServers and
+#     empty it is absent entirely (lines 60-64, measured). ETCDServers and
 #     ETCDServersOverride are therefore kept independently controllable.
+#  8. EVERY SUBSTITUTED VALUE BELOW IS SHELL-QUOTED BY THE RENDERER, and the
+#     assignments are written bare for exactly that reason. (This note cannot spell
+#     an action out: a doubled brace anywhere in this file - comment or not - is
+#     tokenised as one, because the renderer scans the whole text.)
+#     The renderer's _format_value passes each substituted value through
+#     tests.helpers.bash.shell_quote, which is
+#     shlex.quote: this file is SOURCED by bash, so an unquoted value crosses from
+#     data into code - a space splits the assignment and runs the remainder, and
+#     $(...), a backtick or ${...} is EVALUATED rather than read. KUBE_HOME derives
+#     from pytest's tmp_path and therefore from --basetemp, an externally supplied
+#     argument, so that is not a hypothetical path. Do NOT add quotes here on top of
+#     it: shlex.quote already returns ONE shell word, and wrapping a quoted word in
+#     more quotes would embed the quote characters in the value. And do not remove
+#     the quoting from the renderer to "match the shipped templates": shlex.quote is
+#     a no-op for every value these cases carry - paths, https://127.0.0.1:2379,
+#     base64, placeholder identifiers, `false` - so the rendered text is already
+#     byte-identical to Go's text/template output for all of them.
+#     python/tests/unit/shell/test_kube_env_quoting.py proves both halves by
+#     rendering hostile values and having REAL bash source the result.
 #
 # There is no Apache-2.0 header here, and that is deliberate rather than an
 # oversight: hack/boilerplate/boilerplate.py registers gated extensions by
@@ -149,7 +180,7 @@
 readonly KUBE_HOME={{.KubeHome}}
 
 # The six etcd mTLS credentials, and only these six, are what
-# configure-etcd-params branches on (lines 21-51): all six non-empty selects
+# configure-etcd-params branches on (lines 21-58): all six non-empty selects
 # mTLS, all six empty selects the plaintext-or-abort branch, and ANY other
 # combination is the partial configuration that exits 1. Each is set
 # independently so that arbitrary subset stays expressible. The shipped naming

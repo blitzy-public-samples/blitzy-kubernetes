@@ -215,6 +215,64 @@ test-integration:
 	KUBE_TEST_ARGS='$(value KUBE_TEST_ARGS)' hack/make-rules/test-integration.sh $(WHAT)
 endif
 
+# AAP §0.4.6 / §0.5.4 / §0.9.1.4: the Python and React tiers are reached through
+# the same Make surface as the Go tiers, so a developer and external Prow CI
+# invoke one interface. The runners own their own argument validation and outer
+# execution ceiling (AAP §0.9.1.1 / §0.9.1.2), so these targets deliberately add
+# no wrapping of their own beyond forwarding the documented argument channels.
+define TEST_PYTHON_HELP_INFO
+# Run the Python (pytest) test tier.
+#
+# Args:
+#   KUBE_PYTEST_ARGS: Arguments to pass to the resulting pytest invocation.
+#     Arguments that would stop the tier from actually executing its tests
+#     (for example --collect-only, --ignore, or a non-positive --timeout) are
+#     refused by the runner rather than silently honoured.
+#   KUBE_PYTHON_TEST_CEILING_SECONDS: Outer wall-clock ceiling for the whole
+#     tier, enforced independently of any per-test timeout. Default 3600.
+#   KUBE_JUNIT_REPORT_DIR: If set, JUnit XML is written there for TestGrid.
+#
+# Example:
+#   make test-python
+#   make test-python KUBE_PYTEST_ARGS='-k audit_policy'
+#   make test-python KUBE_PYTEST_ARGS='-m "not integration"'
+endef
+.PHONY: test-python
+ifeq ($(PRINT_HELP),y)
+test-python:
+	echo "$$TEST_PYTHON_HELP_INFO"
+else
+test-python:
+	# KUBE_PYTEST_ARGS is explicitly passed here in order to ensure that we are preserving any dollar signs in the value.
+	KUBE_PYTEST_ARGS='$(value KUBE_PYTEST_ARGS)' hack/make-rules/test-python.sh
+endif
+
+define TEST_WEB_HELP_INFO
+# Run the React (Vitest) test tier.
+#
+# Args:
+#   KUBE_VITEST_ARGS: Arguments to pass to the resulting vitest invocation.
+#     Arguments that would stop the tier from actually executing its tests
+#     (for example --watch, --ui, or --passWithNoTests) are refused by the
+#     runner rather than silently honoured.
+#   KUBE_WEB_TEST_CEILING_SECONDS: Outer wall-clock ceiling for the whole
+#     tier, enforced independently of any per-test timeout. Default 1800.
+#   KUBE_JUNIT_REPORT_DIR: If set, JUnit XML is written there for TestGrid.
+#
+# Example:
+#   make test-web
+#   make test-web KUBE_VITEST_ARGS='-t renders'
+endef
+.PHONY: test-web
+ifeq ($(PRINT_HELP),y)
+test-web:
+	echo "$$TEST_WEB_HELP_INFO"
+else
+test-web:
+	# KUBE_VITEST_ARGS is explicitly passed here in order to ensure that we are preserving any dollar signs in the value.
+	KUBE_VITEST_ARGS='$(value KUBE_VITEST_ARGS)' hack/make-rules/test-web.sh
+endif
+
 define TEST_E2E_NODE_HELP_INFO
 # Build and run node end-to-end tests.
 #

@@ -248,12 +248,14 @@ error:
 # narrow the budget and the same tests become flaky; drop the JSON-decoded
 # message from the haystack set and every quoted expectation matches nothing.
 
+import http.client
 import json
 import logging
 import time
 from collections.abc import Callable
 from typing import Final, NamedTuple, NoReturn
 
+import urllib3.exceptions
 from kubernetes.client.rest import ApiException
 
 from tests.helpers.polling import PollTimeoutError, poll_immediate
@@ -326,6 +328,47 @@ _EXPECT_TIMEOUT_SECONDS: Final[float] = 30.0
 #: as a field directly beneath it.
 _HEADLINE_SUMMARY_LIMIT: Final[int] = 200
 
+#: The ONLY exceptions :func:`_expect` retries. Everything else propagates on the
+#: first attempt, unwrapped - see that function's docstring for why breadth here
+#: is a defect rather than robustness.
+#:
+#: Each member is here because a CONVERGING API server legitimately produces it
+#: while the outcome under test is still settling, which is the exact condition
+#: ``expect`` (test/integration/auth/node_test.go:684-696) exists to wait out:
+#:
+#:   * ``ApiException`` - the API server answered, and the answer is the subject
+#:     of every predicate in this module. The RBAC or Node authorizer may not
+#:     have caught up with a just-created binding yet, so a 403 that will become
+#:     a 200 (or the reverse) arrives here.
+#:   * ``urllib3.exceptions.HTTPError`` - the base of every urllib3 transport
+#:     failure, and what the pinned client's REST layer surfaces when a
+#:     connection is refused, reset or times out. Measured against
+#:     ``kubernetes`` 34.1.0 on ``urllib3`` 2.3.0: ``ApiException`` does NOT
+#:     derive from it (both descend straight from ``Exception``), so it must be
+#:     listed separately rather than assumed to be covered.
+#:   * ``http.client.HTTPException`` - a malformed or truncated response from a
+#:     server mid-restart, raised beneath urllib3 rather than by it.
+#:   * ``OSError`` - the socket layer itself: ``ConnectionResetError``,
+#:     ``ConnectionRefusedError`` and ``TimeoutError`` are all subclasses, and a
+#:     test server whose listener is not yet accepting produces them before
+#:     urllib3 has anything to wrap. ``ssl.SSLError`` is covered by the same entry
+#:     through inheritance, which is what a server whose serving certificate is not
+#:     yet in place produces.
+#:
+#: Deliberately ABSENT, and each for the same reason - it is a defect in the test
+#: rather than a transient state of the server, so retrying it wastes the whole
+#: budget and then reports the last occurrence instead of the first cause:
+#: ``TypeError``, ``AttributeError``, ``NameError``, ``KeyError``, ``ValueError``,
+#: ``ImportError`` and ``AssertionError`` (which is also
+#: :class:`~tests.helpers.polling.PollTimeoutError`'s base, and swallowing it
+#: turned a real finding into a timeout about something else).
+_RETRYABLE_OPERATION_ERRORS: Final[tuple[type[Exception], ...]] = (
+    ApiException,
+    urllib3.exceptions.HTTPError,
+    http.client.HTTPException,
+    OSError,
+)
+
 
 class _Outcome(NamedTuple):
     """What one bounded expectation observed. The port of ``expect``'s returns.
@@ -393,21 +436,31 @@ def _status_of(error: object) -> int | None:
     correctly read as "no status". ``isinstance`` rather than an exact type
     check, so any future subclass is included.
 
-    THE COERCION IS MEASURED, NOT SPECULATIVE. ``ApiException.__init__(status=
-    None, reason=None, http_resp=None)`` assigns ``self.status`` straight from
-    whichever branch it takes, with no validation: the real error path at
-    kubernetes/client/rest.py:238 passes ``http_resp`` and yields an ``int``,
-    the transport-failure path at rest.py:214 and :224 passes ``status=0``, and
-    a directly constructed ``ApiException(status="403")`` keeps the string
-    verbatim - measured. So an ``int`` is the normal case and a numeric ``str``
-    is a real possibility, and both must compare numerically. ``strict_equality``
-    is on in python/pyproject.toml, which would reject a mixed comparison
-    outright; converting here is what keeps the predicates well typed.
+    NOTHING IS COERCED, AND THE ABSENCE OF COERCION IS THE POINT. A REAL HTTP
+    response always yields an ``int``: ``ApiException.__init__`` takes its status
+    from ``http_resp.status`` on the error path (kubernetes/client/rest.py:238),
+    and ``urllib3``'s ``HTTPResponse.status`` is an ``int``. The transport-failure
+    path (rest.py:214 and :224) passes the ``int`` ``0``. There is no path through
+    the pinned 34.1.0 client on which a genuine API-server status arrives as a
+    string.
 
-    ``bool`` is rejected even though ``bool`` is a subclass of ``int``:
-    ``status=True`` is not a status. It could not produce a false positive
-    anyway - neither 403, 404 nor 409 equals ``True`` - but reading it as the
-    integer 1 would be a lie the next reader has to re-derive.
+    ``ApiException(status="403")`` is therefore not a case to support - it is a
+    HAND-BUILT FAKE, and accepting it is a false pass. These predicates are how
+    V1, V2 and V7 prove a DENIAL: ``expect_forbidden`` passing means the API
+    server refused the request. A helper that read ``"403"`` as Forbidden would
+    let a test double satisfy that proof without any server having refused
+    anything, which is precisely the class of defect the whole integration tier
+    exists to rule out. So the type is checked exactly and never converted:
+    a string status reads as "no status", the predicate is false, and the
+    assertion reports the real shape it was handed.
+
+    ``type(status) is int`` and NOT ``isinstance``: ``bool`` is a subclass of
+    ``int``, and ``status=True`` is not a status. The exact test rejects it
+    without a second branch, and it also rejects ``IntEnum`` and every other
+    int-like wrapper, none of which any real response produces. It could not
+    have produced a false POSITIVE either way - neither 403, 404 nor 409 equals
+    ``True`` - but ``is int`` states the contract instead of leaving a reader to
+    re-derive it.
     """
     if not isinstance(error, ApiException):
         return None
@@ -417,18 +470,11 @@ def _status_of(error: object) -> int | None:
     # instance need not have, and a predicate must not raise AttributeError.
     status = getattr(error, "status", None)
 
-    if isinstance(status, bool):
-        return None
-    if isinstance(status, int):
+    # No isinstance, no int(), no strip(), no try/except: exactly an int, or no
+    # status at all. See the docstring - the rejected cases are fakes, and
+    # admitting a fake here would let one satisfy a denial assertion.
+    if type(status) is int:
         return status
-    if isinstance(status, str):
-        try:
-            return int(status.strip())
-        except ValueError:
-            # A non-numeric status string is no status at all. Swallowed
-            # deliberately and locally: this function's contract is to answer,
-            # never to raise, and the caller's assertion carries the finding.
-            return None
     return None
 
 
@@ -841,13 +887,34 @@ def _expect(
     ``last_error``, a normal return records ``None``, and the predicate is then
     evaluated over exactly the two-valued domain ``wantErr`` sees.
 
-    ``except Exception`` and not ``except BaseException``, deliberately.
-    ``KeyboardInterrupt`` and ``SystemExit`` must end the run rather than be
-    retried thirty times, and - the reason that actually bites - pytest's own
-    outcome exceptions (``Failed``, ``Skipped``) derive from ``BaseException``
-    precisely so that helpers cannot swallow them. An operation that calls
-    ``pytest.fail()`` or ``pytest.skip()`` internally therefore reports that
-    outcome instead of being mistaken for a failed API call.
+    WHAT IS RETRIED IS AN EXPLICIT, NARROW SET -- see
+    :data:`_RETRYABLE_OPERATION_ERRORS` -- and everything else propagates on the
+    FIRST attempt, unwrapped.
+
+    That narrowness is the whole correctness of the retry. Go's ``expect``
+    re-invokes a closure whose only failure mode is an API call returning an
+    ``error``; Python's equivalent closure can also raise because the TEST is
+    wrong -- a ``TypeError`` from a mistyped model field, an ``AttributeError``
+    from a renamed client method, a ``NameError``, a ``KeyError`` on a fixture
+    dict, an ``AssertionError`` from an assertion the operation performs itself.
+    A blanket ``except Exception`` retried every one of those for the full 30
+    seconds and then reported the LAST occurrence, so a one-line typo cost half a
+    minute per call site and arrived as "waited 30s for a Forbidden response"
+    with the original traceback thirty frames of retry away from its cause.
+    Retrying a deterministic programming error also cannot help: it produces the
+    identical exception every time by definition.
+
+    ``AssertionError`` matters most and is called out for that reason. It is what
+    :class:`tests.helpers.polling.PollTimeoutError` derives from, and what a
+    nested helper's own assertion raises; absorbing it turned a real finding into
+    a timeout report about a different thing entirely.
+
+    ``BaseException`` is not caught either, and that was already true and stays
+    true: ``KeyboardInterrupt`` and ``SystemExit`` must end the run, and pytest's
+    own outcome exceptions (``Failed``, ``Skipped``) derive from
+    ``BaseException`` precisely so that helpers cannot swallow them. An operation
+    that calls ``pytest.fail()`` or ``pytest.skip()`` internally therefore
+    reports that outcome instead of being mistaken for a failed API call.
 
     ISOLATION. ``last_error`` and ``attempts`` live in THIS frame and are reached
     through ``nonlocal``; there is no module-level mutable state anywhere in this
@@ -882,7 +949,11 @@ def _expect(
         attempts += 1
         try:
             operation()
-        except Exception as exc:
+        except _RETRYABLE_OPERATION_ERRORS as exc:
+            # The only failures a converging authorizer legitimately produces:
+            # an API-server response (ApiException) or a transport hiccup while
+            # the server is still coming up. Anything else is a defect in the
+            # test and has already left this frame.
             last_error = exc
         else:
             last_error = None
@@ -1267,4 +1338,3 @@ def check_nil_error(error: BaseException | None, *, requirement: str | None = No
             ]
         )
     )
-

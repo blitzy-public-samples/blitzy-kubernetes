@@ -2928,6 +2928,25 @@ export const V8_PLAINTEXT_FLAGS = [
 ] as const satisfies readonly string[];
 
 /**
+ * The plaintext-fallback WARNING the shell writes on stdout.
+ *
+ * ONE DEFINITION SITE, because two branches emit it and they must be provably
+ * identical. `configure-etcd-params` guards the fallback with
+ * `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`
+ * (cluster/gce/gci/configure-kubeapiserver.sh L41), so an UNSET variable and an
+ * explicit `true` are the SAME branch reaching the SAME `echo`. Recording the text
+ * once makes that sameness structural rather than a coincidence two literals happen
+ * to share, and it is why the compatibility-default row can no longer drift back to
+ * claiming silence.
+ *
+ * Contains {@link ETCD_PLAINTEXT_WARNING_MESSAGE} as a substring, which is the
+ * invariant half the panel matches on.
+ */
+const ETCD_PLAINTEXT_WARNING_TEXT =
+  'WARNING: all etcd mTLS credentials are missing, mTLS between etcd server ' +
+  'and kube-apiserver is not enabled.';
+
+/**
  * The five recorded states of `configure-etcd-params`.
  *
  * Entries 2 and 3 are the two plaintext-related truths described at length in the
@@ -2957,7 +2976,17 @@ export const ETCD_TRANSPORT_STATES = [
     outcome: 'plaintext-loopback',
     renderedFlags: V8_PLAINTEXT_FLAGS,
     exitCode: 0,
-    diagnostic: null,
+    // THE SAME WARNING AS THE EXPLICIT OPT-IN, corrected from a recorded `null`.
+    // The branch guard is `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`
+    // (configure-kubeapiserver.sh L41), so an UNSET variable and an explicit `true`
+    // enter the same branch and reach the same `echo`. Executing all three states
+    // against the shipped script confirms it:
+    //   unset          -> rc=0, http, 1 WARNING on stdout, 0 ERROR on stderr
+    //   explicit true  -> rc=0, http, 1 WARNING on stdout, 0 ERROR on stderr
+    //   explicit false -> rc=1, no endpoint, 0 WARNING, 1 ERROR on stderr
+    // Recording `null` here described a state the shell cannot produce, and it made
+    // the silence rather than the explicit supply the distinguishing fact.
+    diagnostic: ETCD_PLAINTEXT_WARNING_TEXT,
     isUnitTestCompatibilityDefault: true,
     sourceReference:
       'cluster/gce/gci/apiserver_etcd_test.go L185-L188; ' +
@@ -2970,9 +2999,7 @@ export const ETCD_TRANSPORT_STATES = [
     outcome: 'plaintext-loopback',
     renderedFlags: V8_PLAINTEXT_FLAGS,
     exitCode: 0,
-    diagnostic:
-      'WARNING: all etcd mTLS credentials are missing, mTLS between etcd server ' +
-      'and kube-apiserver is not enabled.',
+    diagnostic: ETCD_PLAINTEXT_WARNING_TEXT,
     isUnitTestCompatibilityDefault: false,
     sourceReference: 'cluster/gce/gci/configure-kubeapiserver.sh L41-L43',
   },
@@ -3217,9 +3244,21 @@ export const V8_ETCD_TRANSPORT_WARNING = {
  *     exit 1, because both profiles set the opt-out to false.
  *
  * Collapsing them breaks parity in one direction or the control in the other. The
- * discriminator is `unit-test compatibility default`, recorded `true` here and
- * `false` on {@link V8_ETCD_TRANSPORT_WARNING}, together with the diagnostic: the
- * operator-chosen state emits a WARNING and this one emits NOTHING.
+ * discriminator is `unit-test compatibility default` ALONE, recorded `true` here and
+ * `false` on {@link V8_ETCD_TRANSPORT_WARNING} — that is, whether the variable was
+ * explicitly supplied.
+ *
+ * IT IS NOT THE DIAGNOSTIC, though this payload once claimed it was. The belief was
+ * that the operator-chosen state emits a WARNING and this one emits NOTHING.
+ * Executing the shipped shell disproves it: the guard is
+ * `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`, so an unset variable
+ * enters the same branch as an explicit `true` and reaches the same `echo`. All three
+ * states, measured:
+ *   unset          -> rc=0, http endpoint, 1 WARNING on stdout, 0 ERROR on stderr
+ *   explicit true  -> rc=0, http endpoint, 1 WARNING on stdout, 0 ERROR on stderr
+ *   explicit false -> rc=1, no endpoint,   0 WARNING,           1 ERROR on stderr
+ * Recording silence here described a state the shell cannot produce, and it made the
+ * panel reject a truthful report while accepting an impossible one.
  * ===========================================================================
  *
  * `warn` and not `fail`, because the transport genuinely is unauthenticated; and not
@@ -3233,13 +3272,18 @@ export const V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT = {
   detail:
     'The environment supplied no etcd credentials and no explicit insecure ' +
     'fallback setting, so the function-local backward-compatibility default ' +
-    'applied and configuration addressed the loopback etcd over http without ' +
-    'emitting a warning. This is the direct-invocation path the in-tree shell ' +
-    'unit tests take; it is NOT the profile-driven path, and both GCE profiles ' +
-    'set the insecure fallback to false so a real deployment fails closed instead.',
+    'applied and configuration addressed the loopback etcd over http, emitting ' +
+    'the same warning an explicit opt-in emits. What distinguishes this state is ' +
+    'that nobody opted in, not that it was silent. This is the direct-invocation ' +
+    'path the in-tree shell unit tests take; it is NOT the profile-driven path, ' +
+    'and both GCE profiles set the insecure fallback to false so a real ' +
+    'deployment fails closed instead.',
   requirementIds: ['F-008-RQ-001', 'F-008-RQ-002'],
   findings: [],
-  warnings: [],
+  // The warning IS emitted on this path, so it is surfaced here exactly as it is on
+  // V8_ETCD_TRANSPORT_WARNING. An empty list said the plaintext transport was
+  // configured without announcement, which the shell does not do.
+  warnings: [ETCD_PLAINTEXT_WARNING_TEXT],
   evidence: {
     observations: [
       { label: V8_OBSERVATIONS.etcdServers, value: 'http://127.0.0.1:2379' },
@@ -3248,10 +3292,17 @@ export const V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT = {
       { label: V8_OBSERVATIONS.outcome, value: 'plaintext-loopback' },
       { label: V8_OBSERVATIONS.exitCode, value: 0 },
       { label: V8_OBSERVATIONS.unitTestCompatibilityDefault, value: true },
-      // NO diagnostic, recorded as a measured `null`. The shell emits its WARNING
-      // only where the opt-out was consulted and found to be `true` explicitly; the
-      // shim path prints nothing, and that silence is how the two are told apart.
-      { label: V8_OBSERVATIONS.diagnostic, value: null },
+      // THE SAME WARNING AS THE EXPLICIT OPT-IN. This observation recorded a measured
+      // `null` on the belief that the shim path prints nothing and that its silence is
+      // how the two plaintext states are told apart. Executing the shipped shell
+      // disproves both halves: the guard is
+      // `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`, so unset and
+      // explicit `true` are ONE branch emitting ONE warning, and what distinguishes
+      // them is `unitTestCompatibilityDefault` immediately above -- whether the
+      // variable was explicitly supplied. The literal is shared with
+      // V8_ETCD_TRANSPORT_WARNING through ETCD_PLAINTEXT_WARNING_TEXT so the two
+      // cannot drift apart again.
+      { label: V8_OBSERVATIONS.diagnostic, value: ETCD_PLAINTEXT_WARNING_TEXT },
       ...V8_PROFILE_DEFAULT_OBSERVATIONS,
     ],
   },

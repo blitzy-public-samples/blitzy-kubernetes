@@ -153,6 +153,7 @@ network.
 import contextlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -917,6 +918,208 @@ def _pod_schema_model(name: str) -> object | None:
     return getattr(models, name, None)
 
 
+# ---------------------------------------------------------------------------
+# Kubernetes CUSTOM SCALARS. Where the OpenAPI type string is not the decoder.
+# ---------------------------------------------------------------------------
+# The generated Python models describe two Kubernetes scalars with types that are
+# strictly wider than the Go decoder they stand for, and both of them appear in the
+# shipped cluster/gce/manifests/kube-apiserver.manifest:
+#
+#   * `resource.Quantity` is declared `dict(str, str)` on
+#     V1ResourceRequirements.limits and .requests, so `cpu: "not-a-quantity"` is
+#     "a string" and passes -- while Go's `resource.Quantity.UnmarshalJSON` runs
+#     `ParseQuantity` over it and REJECTS the document. The manifest carries
+#     `"requests": {"cpu": "250m"}` (line 30-31).
+#   * `intstr.IntOrString` is declared `object` on V1HTTPGetAction.port and
+#     V1TCPSocketAction.port -- the OpenAPI spelling for a free-form value -- so a
+#     boolean, an array or 1.5 all pass, while Go's
+#     `intstr.IntOrString.UnmarshalJSON` accepts only a JSON string or something
+#     that unmarshals into an int32. The manifest carries `"port": {{secure_port}}`
+#     in both probes (lines 45 and 55), which is exactly a value the generator
+#     SUBSTITUTES -- so a botched substitution is the realistic way this field goes
+#     wrong, and it is the reason a decoder-equivalent check here is worth having.
+#
+# Both are therefore keyed on (MODEL, ATTRIBUTE) rather than on a concrete field
+# path, so the check applies wherever the field occurs in the document instead of
+# only where this module happened to look.
+
+#: ``(model, attribute)`` pairs whose value is a Quantity, or a mapping of Quantity.
+_QUANTITY_FIELDS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("V1ResourceRequirements", "limits"),
+        ("V1ResourceRequirements", "requests"),
+    }
+)
+
+#: ``(model, attribute)`` pairs whose value is an ``IntOrString``.
+_INT_OR_STRING_FIELDS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("V1HTTPGetAction", "port"),
+        ("V1TCPSocketAction", "port"),
+    }
+)
+
+#: The exact grammar ``ParseQuantity`` accepts, transcribed from
+#: staging/src/k8s.io/apimachinery/pkg/api/resource/quantity.go's documented
+#: production::
+#:
+#:     <quantity>        ::= <signedNumber><suffix>
+#:     <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI>
+#:     <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei
+#:     <decimalSI>       ::= n | u | m | "" | k | M | G | T | P | E
+#:     <decimalExponent> ::= "e" <signedNumber> | "E" <signedNumber>
+#:     <signedNumber>    ::= <number> | <sign><number>
+#:     <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits>
+#:
+#: Note the case sensitivity: ``k`` is lower case in decimalSI while every binary
+#: prefix is upper case, so ``100K`` is NOT a quantity and ``100k`` is. Getting that
+#: backwards would make this check reject a valid manifest.
+_QUANTITY_PATTERN: Final = re.compile(
+    r"^[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+|[KMGTPE]i|[numkMGTPE])?$"
+)
+
+#: ``int32`` bounds, which is the type ``IntOrString.IntVal`` unmarshals into.
+_INT32_MIN: Final[int] = -(2**31)
+_INT32_MAX: Final[int] = 2**31 - 1
+
+
+def _validate_quantity(value: object, *, field: str, source: str) -> None:
+    """Check one value the way ``resource.Quantity.UnmarshalJSON`` does.
+
+    That method (quantity.go) treats ``null`` as the zero quantity, strips one pair
+    of surrounding quotes if present, trims surrounding space and hands the rest to
+    ``ParseQuantity``. So a JSON string and a JSON NUMBER are both accepted -- ``2``
+    parses as two -- while a boolean is not, because ``ParseQuantity("true")``
+    fails, and neither is an object or an array.
+
+    Raises:
+        ManifestHarnessError: if Go's decoder would reject the value.
+    """
+    __tracebackhide__ = True
+    if value is None:
+        return
+    if isinstance(value, bool):
+        raise ManifestHarnessError(
+            f"generated manifest {source} has {field} as boolean, but the v1.Pod schema declares "
+            "a resource.Quantity. Go hands the literal to ParseQuantity, which rejects "
+            "'true'/'false', so the API server would refuse this manifest."
+        )
+    if isinstance(value, (int, float)):
+        literal = repr(value)
+    elif isinstance(value, str):
+        literal = value
+    else:
+        raise ManifestHarnessError(
+            f"generated manifest {source} has {field} as {_describe_json_type(value)}, but the "
+            "v1.Pod schema declares a resource.Quantity, which is written as a string such as "
+            '"250m" or as a bare number.'
+        )
+    if not _QUANTITY_PATTERN.match(literal.strip()):
+        raise ManifestHarnessError(
+            f"generated manifest {source} has {field} = {value!r}, which is not a valid "
+            "resource.Quantity. ParseQuantity accepts <signedNumber><suffix> where suffix is one "
+            "of Ki Mi Gi Ti Pi Ei (binary), n u m k M G T P E (decimal, note the LOWER-CASE k) "
+            "or an e/E exponent -- so 250m and 1.5Gi are quantities and this is not. Go's "
+            "decoder rejects the document, which means the generator's substitutions corrupted "
+            "it."
+        )
+
+
+def _validate_int_or_string(value: object, *, field: str, source: str) -> None:
+    """Check one value the way ``intstr.IntOrString.UnmarshalJSON`` does.
+
+    That method (staging/src/k8s.io/apimachinery/pkg/util/intstr/intstr.go) branches
+    on the FIRST BYTE: a leading ``"`` means unmarshal into a string, and anything
+    else means unmarshal into an ``int32``. So a string is accepted whatever it says
+    -- a named port -- ``null`` is accepted as the zero value, an integer within
+    int32 is accepted, and a boolean, a fractional number, an out-of-range integer,
+    an object or an array are all rejected because ``encoding/json`` cannot put any
+    of them into an ``int32``.
+
+    ``1.0`` is rejected along with ``1.5``: ``encoding/json`` parses an integer
+    target from the literal TEXT, so a decimal point fails regardless of the value.
+    ``json.loads`` preserves that distinction -- ``1`` decodes to ``int`` and ``1.0``
+    to ``float`` -- so the check is exact rather than approximate.
+
+    Raises:
+        ManifestHarnessError: if Go's decoder would reject the value.
+    """
+    __tracebackhide__ = True
+    if value is None or isinstance(value, str):
+        return
+    if isinstance(value, bool):
+        raise ManifestHarnessError(
+            f"generated manifest {source} has {field} as boolean, but the v1.Pod schema declares "
+            "an intstr.IntOrString. Its UnmarshalJSON unmarshals a non-quoted value into an "
+            "int32, and encoding/json refuses a boolean there."
+        )
+    if isinstance(value, int):
+        if _INT32_MIN <= value <= _INT32_MAX:
+            return
+        raise ManifestHarnessError(
+            f"generated manifest {source} has {field} = {value!r}, which is outside int32 "
+            f"[{_INT32_MIN}, {_INT32_MAX}]. intstr.IntOrString stores a non-quoted value in an "
+            "int32, so encoding/json rejects this document."
+        )
+    raise ManifestHarnessError(
+        f"generated manifest {source} has {field} as {_describe_json_type(value)} ({value!r}), "
+        "but the v1.Pod schema declares an intstr.IntOrString: a quoted port NAME, or an integer "
+        "that fits in an int32. A fractional number is rejected too, because encoding/json "
+        "parses an integer target from the literal text and a decimal point fails there."
+    )
+
+
+def _validate_custom_scalar(
+    value: object,
+    key: tuple[str, str],
+    *,
+    field: str,
+    source: str,
+) -> bool:
+    """Validate ``value`` as a custom scalar when ``key`` names one; report whether it did.
+
+    Returning a flag rather than raising on an unknown key keeps the caller's flow
+    obvious: a ``(model, attribute)`` pair this table does not know falls through to
+    the ordinary OpenAPI walk unchanged.
+
+    Args:
+        value: The decoded member.
+        key: ``(model type name, python attribute name)``.
+        field: Dotted wire path, for the failure message.
+        source: Path or label of the manifest.
+
+    Returns:
+        ``True`` when ``key`` named a custom scalar and ``value`` was validated as
+        one; ``False`` when it did not.
+
+    Raises:
+        ManifestHarnessError: if the value is not what Go's decoder accepts.
+    """
+    __tracebackhide__ = True
+    if key in _QUANTITY_FIELDS:
+        # limits/requests are `dict(str, Quantity)` on the wire, so the mapping
+        # shape is checked here and each VALUE is a quantity.
+        if value is None:
+            return True
+        if not isinstance(value, dict):
+            raise ManifestHarnessError(
+                f"generated manifest {source} has {field} as {_describe_json_type(value)}, but "
+                "the v1.Pod schema declares a map of resource name to resource.Quantity."
+            )
+        for resource_name, quantity in value.items():
+            if not isinstance(resource_name, str):
+                raise ManifestHarnessError(
+                    f"generated manifest {source} has a non-string key {resource_name!r} in "
+                    f"{field}."
+                )
+            _validate_quantity(quantity, field=f"{field}[{resource_name!r}]", source=source)
+        return True
+    if key in _INT_OR_STRING_FIELDS:
+        _validate_int_or_string(value, field=field, source=source)
+        return True
+    return False
+
+
 def _validate_against_schema(
     value: object,
     type_name: str,
@@ -1019,6 +1222,14 @@ def _validate_against_schema(
         if not isinstance(member_type, str):
             continue
         child_field = f"{field}.{wire_key}" if field else wire_key
+        # A KUBERNETES CUSTOM SCALAR FIRST, because for those the OpenAPI type
+        # string is wider than the Go decoder it stands for and the ordinary walk
+        # below would accept documents the API server rejects. See
+        # _validate_custom_scalar.
+        if _validate_custom_scalar(
+            member, (type_name, attribute), field=child_field, source=source
+        ):
+            continue
         _validate_against_schema(member, member_type, field=child_field, source=source)
 
 
@@ -1319,6 +1530,15 @@ class ManifestTestCase:
 
         self._pod: PodManifest | None = None
 
+        # EVERY FILESYSTEM ENTRY THIS INSTANCE CREATES, in creation order.
+        # `tear_down` removes exactly these and nothing else, and the constructor's
+        # rollback below unwinds exactly these. Recording the entries rather than
+        # inferring them is what makes cleanup provable: the alternative -- deleting
+        # the layout ROOTS, `kube-manifests/` and `etc/` -- removes whatever else a
+        # caller-supplied directory happened to hold under those names, which is
+        # data loss dressed up as tidying. See `_track` and `tear_down`.
+        self._created_entries: list[Path] = []
+
         try:
             self._claim_kube_home()
             self._copy_from_template()
@@ -1328,15 +1548,118 @@ class ManifestTestCase:
             # Go leaks its temp directory when a must* step calls t.Fatalf,
             # because the deferred tearDown is only registered once the
             # constructor has returned. Nothing asserts on that leak, so it is
-            # not preserved: a directory this constructor created is removed
-            # before the failure propagates, which keeps /tmp clean across an
-            # xdist run. A directory the CALLER named is left alone -- removing
-            # it would be a surprise, and pytest's tmp_path already handles it.
+            # not preserved.
+            #
+            # ROLLBACK IS UNCONDITIONAL, which it was not before. When this harness
+            # created the root, the whole tree goes -- Go's behaviour exactly. When
+            # the CALLER named the directory, the root stays but every entry this
+            # constructor had already created is undone, INCLUDING the ownership
+            # marker: leaving the marker behind would mean a later, unrelated case
+            # pointed at the same directory could prove an ownership this instance
+            # never completed, and leaving half a layout behind would make the
+            # directory look like another case's tree to `_reject_existing_kube_home`.
             if self._created_kube_home:
                 shutil.rmtree(self._kube_home, ignore_errors=True)
+            else:
+                self._remove_created_entries(ignore_errors=True)
             raise
 
     # -- setup, ported step by step from the Go constructor -------------------
+
+    def _track(self, entry: Path) -> None:
+        """Record ``entry`` as created by THIS instance, once.
+
+        The list is ordered by creation, so unwinding it in reverse removes children
+        before their parents -- which is what lets teardown use ``rmdir`` on
+        directories and therefore refuse to delete anything it did not put there.
+        """
+        if entry not in self._created_entries:
+            self._created_entries.append(entry)
+
+    def _mkdir_tracked(self, directory: Path, *, what: str) -> None:
+        """Create ``directory`` and every missing parent under ``KUBE_HOME``, recording each.
+
+        ``mkdir(parents=True)`` creates intermediate directories silently, so the
+        missing ancestors are computed FIRST and recorded individually. Without that
+        the layout roots would be created but unowned, and teardown would either
+        leave them behind or -- as it used to -- delete them recursively whether or
+        not this instance had made them.
+
+        Only ancestors at or below ``KUBE_HOME`` are considered: the root itself is
+        owned through :attr:`_created_kube_home`, and nothing above it is ever this
+        harness's business.
+
+        Args:
+            directory: The directory to create.
+            what: How to name it in a failure message.
+
+        Raises:
+            ManifestHarnessError: if creation fails.
+        """
+        __tracebackhide__ = True
+        missing: list[Path] = []
+        cursor = directory
+        while cursor != self._kube_home and self._kube_home in cursor.parents:
+            if cursor.exists():
+                break
+            missing.append(cursor)
+            cursor = cursor.parent
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ManifestHarnessError(f"failed to create {what} {directory}: {exc}") from exc
+        # Shallowest first, so the recorded order stays creation order.
+        for created in reversed(missing):
+            self._track(created)
+
+    def _remove_created_entries(self, *, ignore_errors: bool = False) -> None:
+        """Remove exactly the entries this instance created, deepest first.
+
+        RECURSION IS CONFINED TO DIRECTORIES THIS INSTANCE CREATED, and that
+        confinement is the whole safety property. Such a directory was EMPTY at the
+        moment it was created -- :meth:`_mkdir_tracked` records only the ancestors
+        that did not yet exist -- so everything inside it now arrived during this
+        case: the manifests copied in during setup, and whatever the shipped
+        generator wrote there (``configure-kubeapiserver.sh:435`` copies the finished
+        pod manifest into ``etc/kubernetes/manifests``, which is why the directory
+        cannot simply be ``rmdir``-ed). Removing it whole therefore removes only this
+        case's own artifacts.
+
+        A directory this instance did NOT create is never named here at all, so it is
+        never removed, never descended into and never inspected. That is what the
+        previous behaviour got wrong: it removed the layout ROOTS -- ``kube-manifests``
+        and ``etc`` -- by name, whether or not this harness had created them, taking
+        an unrelated pre-existing ``etc/`` subtree with them.
+
+        A symlink is unlinked, never followed, so a link substituted for a tracked
+        entry during the test removes the link and leaves its target alone.
+
+        Args:
+            ignore_errors: Swallow filesystem errors, for the constructor's rollback
+                path where the exception already in flight is the one that matters.
+
+        Raises:
+            ManifestHarnessError: when ``ignore_errors`` is false and an entry
+                exists but cannot be removed.
+        """
+        __tracebackhide__ = True
+        for entry in reversed(self._created_entries):
+            try:
+                if entry.is_symlink():
+                    entry.unlink()
+                elif entry.is_dir():
+                    shutil.rmtree(entry)
+                elif entry.exists():
+                    entry.unlink()
+            except OSError as exc:
+                if ignore_errors:
+                    continue
+                raise ManifestHarnessError(
+                    f"failed to remove {entry}, which this case created: {exc}. A subprocess "
+                    "still holding a file open under KUBE_HOME is the usual cause; inspect the "
+                    "path, then remove it by hand."
+                ) from exc
+        self._created_entries.clear()
 
     def _claim_kube_home(self) -> None:
         """Write the ownership marker that authorises :meth:`tear_down` to remove the tree.
@@ -1358,6 +1681,7 @@ class ManifestTestCase:
         """
         __tracebackhide__ = True
         marker = self._kube_home / CASE_OWNERSHIP_MARKER
+        self._track(marker)
         try:
             marker.write_text(
                 "# Written by python/tests/helpers/manifest.py (ManifestTestCase).\n"
@@ -1367,6 +1691,7 @@ class ManifestTestCase:
                 f"created_by_harness={self._created_kube_home}\n",
                 encoding="utf-8",
             )
+            self._track(marker)
         except OSError as exc:
             raise ManifestHarnessError(
                 f"failed to write the ownership marker {marker}: {exc}. The harness will not "
@@ -1427,13 +1752,24 @@ class ManifestTestCase:
             # directory into existence" is the question tear_down needs answered
             # and mkdir(exist_ok=True) erases the distinction.
             created_here = not explicit.exists()
+            # AN EXISTING DIRECTORY MUST BE EMPTY, checked BEFORE anything is
+            # created inside it. Go's harness only ever receives a `MkdirTemp` path
+            # of its own making, so it never faces this question; this one accepts
+            # `kube_home=` and therefore has to answer it. Emptiness is the answer
+            # that makes teardown safe by construction: there is nothing in the tree
+            # that this instance did not put there, so nothing it removes can belong
+            # to anyone else. The earlier rule -- refuse only a directory already
+            # holding `kube-env` or `kube-manifests` -- let a directory with an
+            # unrelated `etc/` subtree through, and teardown then removed that
+            # subtree recursively.
+            if explicit.exists():
+                self._reject_non_empty_kube_home(explicit)
             try:
                 explicit.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise ManifestHarnessError(
                     f"failed to create KUBE_HOME at {explicit}: {exc}"
                 ) from exc
-            self._reject_existing_case_tree(explicit)
 
             # `.resolve()` is safe here and only here: the final component has
             # just been proved not to be a symlink, so all resolution does is
@@ -1463,26 +1799,71 @@ class ManifestTestCase:
             ) from exc
         return Path(created).resolve(), True
 
-    def _reject_existing_case_tree(self, candidate: Path) -> None:
-        """Refuse a ``KUBE_HOME`` that already holds another case's tree.
+    def _reject_non_empty_kube_home(self, candidate: Path) -> None:
+        """Refuse an explicit ``KUBE_HOME`` that already contains anything at all.
 
-        Isolation has to be structural rather than hoped for. Two cases sharing a
-        ``KUBE_HOME`` is not a tidiness problem: ``configure-kubeapiserver.sh``
-        rewrites the copied manifest in place, and a stale manifest left at the
-        destination could be loaded and asserted against even if the second
-        generator run never wrote one -- a pass that proves nothing. A reused
-        directory is therefore refused here, before any of it can happen.
+        TWO HAZARDS, ONE RULE.
+
+        Isolation: two cases sharing a ``KUBE_HOME`` is not a tidiness problem.
+        ``configure-kubeapiserver.sh`` rewrites the copied manifest in place, so a
+        stale manifest left at the destination could be loaded and asserted against
+        even when the second generator run never wrote one -- a pass that proves
+        nothing.
+
+        Ownership: :meth:`tear_down` removes what this instance created. If the
+        directory arrives holding entries this instance did not create, then either
+        cleanup has to inspect and reason about them -- which is how a caller's data
+        gets deleted -- or it has to leave them, which reintroduces the isolation
+        hazard. Requiring emptiness removes the question entirely, and it costs
+        nothing: every real call site passes ``base_dir=tmp_path`` or a fresh
+        subdirectory of ``tmp_path``.
+
+        Raises:
+            ManifestHarnessError: if ``candidate`` holds any entry, naming a sample
+                of them so the caller can see what it pointed at.
         """
         __tracebackhide__ = True
-        for marker in (ENV_SCRIPT_FILE_NAME, MANIFEST_SOURCES_RELATIVE_PATH[0]):
-            if (candidate / marker).exists():
-                raise ManifestHarnessError(
-                    f"kube_home {candidate} already contains {marker!r}, so it is another case's "
-                    "KUBE_HOME. Each case needs its own: the shipped generator rewrites the "
-                    "copied manifest in place, so a shared tree lets one case read what another "
-                    "left behind. Use base_dir= for a unique directory, or pass a fresh "
-                    "subdirectory of tmp_path."
-                )
+        try:
+            entries = sorted(entry.name for entry in candidate.iterdir())
+        except OSError as exc:
+            raise ManifestHarnessError(
+                f"kube_home {candidate} exists but could not be listed: {exc}. This harness "
+                "requires an empty directory so that teardown removes only what it created."
+            ) from exc
+        if not entries:
+            return
+        shown = ", ".join(repr(name) for name in entries[:8])
+        more = f" (and {len(entries) - 8} more)" if len(entries) > 8 else ""
+        raise ManifestHarnessError(
+            f"kube_home {candidate} is not empty: it contains {shown}{more}. This harness "
+            "requires a FRESH, EMPTY directory for two reasons. The shipped generator rewrites "
+            "the copied manifest in place, so a shared tree lets one case read what another "
+            "left behind; and tear_down() removes the entries this case created, so a "
+            "pre-existing entry would either have to be reasoned about -- risking your data -- "
+            "or left behind. Use base_dir= for a unique directory, or pass a fresh "
+            "subdirectory of tmp_path."
+        )
+
+        # THE DESTINATION-ROOT COLLISION, refused separately. The two markers above
+        # are what a PREVIOUS case of this harness leaves behind, and neither is
+        # produced by anything else; the generator's own output is not covered by
+        # either, because it lands under `etc/kubernetes/manifests` -- a path the
+        # loop above deliberately does not guard, since `etc` may legitimately be
+        # the caller's own directory holding the caller's own files. A file already
+        # sitting at the exact destination is the one collision that matters
+        # regardless of who put it there: `load_pod_from_manifest` re-reads that
+        # path, so a stale document there would be decoded and asserted against
+        # even if the generator never ran, which is a pass that proves nothing.
+        collision = candidate.joinpath(*MANIFEST_DESTINATION_RELATIVE_PATH, self._manifest)
+        if collision.exists() or collision.is_symlink():
+            raise ManifestHarnessError(
+                f"kube_home {candidate} already holds a file at the generated-manifest "
+                f"destination {collision}. This harness refuses it: load_pod_from_manifest() "
+                f"re-reads exactly that path to prove what the GENERATOR wrote, so a document "
+                f"already there could be decoded and asserted against even if the generator "
+                f"never produced one. Remove it, use base_dir= for a unique directory, or pass "
+                f"a fresh subdirectory of tmp_path."
+            )
 
     def _copy_file(self, src: Path, dst: Path, *, what: str) -> None:
         """Copy file CONTENT from ``src`` to ``dst``, the port of ``copyFile``.
@@ -1496,12 +1877,14 @@ class ManifestTestCase:
         bits is not something to rely on for that.
         """
         __tracebackhide__ = True
+        self._track(dst)
         try:
             shutil.copyfile(src, dst)
         except OSError as exc:
             raise ManifestHarnessError(
                 f"failed to copy {what} {src} to KUBE_HOME at {dst}: {exc}"
             ) from exc
+        self._track(dst)
 
     def _copy_from_template(self) -> None:
         """Create the sources directory and copy the shipped pod manifest into it.
@@ -1515,13 +1898,13 @@ class ManifestTestCase:
         instead of leaving a stale copy passing its own assertions.
         """
         __tracebackhide__ = True
-        try:
-            self._manifest_sources.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ManifestHarnessError(
-                f"failed to create the manifest sources directory {self._manifest_sources}: {exc}"
-                " -- configure-kubeapiserver.sh:299 reads its input from exactly this path."
-            ) from exc
+        self._mkdir_tracked(
+            self._manifest_sources,
+            what=(
+                "the manifest sources directory (configure-kubeapiserver.sh:299 reads its "
+                "input from exactly this path)"
+            ),
+        )
 
         if not self._manifest_template.is_file():
             raise ManifestHarnessError(
@@ -1570,15 +1953,13 @@ class ManifestTestCase:
         but a missing directory.
         """
         __tracebackhide__ = True
-        destination_dir = self._manifest_destination.parent
-        try:
-            destination_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ManifestHarnessError(
-                f"failed to create the manifest destination directory {destination_dir}: {exc} -- "
-                "configure-kubeapiserver.sh:435 copies the generated manifest here with `cp`, "
-                "which does not create its destination."
-            ) from exc
+        self._mkdir_tracked(
+            self._manifest_destination.parent,
+            what=(
+                "the manifest destination directory (configure-kubeapiserver.sh:435 copies the "
+                "generated manifest here with `cp`, which does not create its destination)"
+            ),
+        )
 
     # -- what the case is, as read-only views --------------------------------
 
@@ -1785,12 +2166,14 @@ class ManifestTestCase:
         """
         __tracebackhide__ = True
         destination = self.env_script_path
+        self._track(destination)
         try:
             destination.write_text(content, encoding="utf-8")
         except OSError as exc:
             raise ManifestHarnessError(
                 f"failed to write the {ENV_SCRIPT_FILE_NAME} script to {destination}: {exc}"
             ) from exc
+        self._track(destination)
         return destination
 
     def create_env(
@@ -2096,11 +2479,18 @@ class ManifestTestCase:
         * when the harness CREATED the directory - ``base_dir=``, or a
           ``kube_home=`` that did not exist - the whole tree goes, which is Go's
           behaviour exactly;
-        * when the caller supplied a directory that ALREADY EXISTED, only the
-          entries this harness put in it are removed, and the directory itself is
-          left in place. That is the one deliberate departure from Go, and it is
-          the difference between cleaning up after yourself and deleting a
-          directory whose other contents you never inspected.
+        * when the caller supplied a directory that ALREADY EXISTED, ONLY the exact
+          entries this instance created are removed -- each one recorded as it was
+          created, unwound deepest first, with files unlinked and directories
+          removed. That is the one deliberate departure from Go, and it is the
+          difference between cleaning up after yourself and deleting a directory
+          whose other contents you never inspected. Recursion reaches only INTO
+          directories this instance created -- each of which was empty when created,
+          so its contents can only be this case's own artifacts. A directory the
+          caller already had is never named, never descended into and never removed.
+          (It also has to have arrived empty -- see
+          :meth:`_reject_non_empty_kube_home` -- so the two defences are
+          independent and either alone would close the hazard.)
 
         Idempotent, exactly as ``os.RemoveAll`` is: removing an already-removed
         tree is not an error, so calling this after :func:`manifest_test_case`
@@ -2135,29 +2525,21 @@ class ManifestTestCase:
                 "set up."
             )
 
-        try:
-            if self._created_kube_home:
+        if self._created_kube_home:
+            try:
                 shutil.rmtree(self._kube_home)
-            else:
-                # A pre-existing, caller-supplied directory: remove the case's own
-                # entries and leave the directory. The two layout roots are the
-                # only subdirectories this harness creates, and the env script and
-                # the marker are the only files.
-                for relative in (
-                    MANIFEST_SOURCES_RELATIVE_PATH[0],
-                    MANIFEST_DESTINATION_RELATIVE_PATH[0],
-                ):
-                    entry = self._kube_home / relative
-                    if entry.is_dir() and not entry.is_symlink():
-                        shutil.rmtree(entry)
-                env_script = self._kube_home / ENV_SCRIPT_FILE_NAME
-                if env_script.is_file():
-                    env_script.unlink()
-                marker.unlink()
-        except OSError as exc:
-            raise ManifestHarnessError(
-                f"failed to tear down KUBE_HOME {self._kube_home}: {exc}"
-            ) from exc
+            except OSError as exc:
+                raise ManifestHarnessError(
+                    f"failed to tear down KUBE_HOME {self._kube_home}: {exc}"
+                ) from exc
+            self._created_entries.clear()
+            return
+
+        # A pre-existing, caller-supplied directory. Only the recorded entries go,
+        # and the directory itself stays. `_remove_created_entries` raises a
+        # ManifestHarnessError naming the entry it could not remove.
+        self._remove_created_entries()
+
 
 
 def _attach_note(error: BaseException, note: str) -> None:

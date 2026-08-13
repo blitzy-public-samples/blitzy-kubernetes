@@ -78,7 +78,12 @@ import {
   type EffectiveVerdict,
 } from '../domain/evidence';
 import { V5_OBSERVATIONS } from '../domain/observationIds';
-import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeLabel,
+  safeObservationValue,
+  safeProse,
+} from '../domain/safeText';
 import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
 import {
   WEBHOOK_ADMISSION_REVIEW_VERSIONS,
@@ -1174,7 +1179,7 @@ function describeError(error: ControlStatusError): string {
   if (error.httpStatus !== undefined) {
     parts.push(`HTTP status ${error.httpStatus}`);
   }
-  const reason = safeProse(error.reason);
+  const reason = describeStatusReason(error.reason);
   if (reason.length > 0) {
     parts.push(`reason ${reason}`);
   }

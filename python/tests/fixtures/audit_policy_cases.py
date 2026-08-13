@@ -110,11 +110,17 @@ and accumulate-and-continue, every failure reported in one run::
 #       -> ok, 620 '=== RUN' subtests, 0 failures
 #       -> 35 names carry a '#NN' suffix, 585 distinct base names, 0 collisions
 #
-# The plan's prose describes 30 invocations (28 of them `testResources`); the
-# repository measures 29 (27 of them `testResources`), and the plan's own
-# per-invocation table has exactly 29 rows summing to 620. The measured 29 is
-# what this file transcribes, because the code is authoritative where code and
-# prose disagree (AAP §0.10.1).
+# The plan's prose describes 30 invocations (28 of them `testResources`) and 24
+# selectors; the repository declares 29 (27 of them `testResources`) and 23, and
+# the plan's own per-invocation table has exactly 29 rows summing to 620. This
+# file transcribes the repository, and - because a comment cannot adjudicate a
+# disagreement - the counts are RE-DERIVED FROM THE ORACLE ON EVERY RUN by
+# tests/unit/shell/test_audit_policy.py's
+# `test_matrix_vocabulary_matches_the_go_source`, which counts the call sites,
+# the selector declarations, the `allUsers` roster and both non-resource path
+# groups in cluster/gce/gci/audit_policy_test.go and fails by name on any
+# difference. The 620-case total is the parity key either way (AAP §0.7.1.2), and
+# neither figure may be changed without re-measuring both together.
 #
 # THE COUNT CONSTANTS AT THE END OF THIS FILE ARE LITERALS ON PURPOSE. They are
 # what the Go suite measured, so a consumer asserting `len(expand()) ==
@@ -161,8 +167,10 @@ __all__ = [
     "INGRESS",
     "INVOCATIONS",
     "INVOCATION_COUNT",
+    "KNOWN_API_READ_VERBS",
     "KUBELET",
     "KUBEPROXY",
+    "KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS",
     "LEVEL_ORDER",
     "LEVEL_RANK",
     "LEVEL_WIRE_STRINGS",
@@ -196,6 +204,7 @@ __all__ = [
     "SELECTOR_COUNT",
     "SENSITIVE_RESOURCE_EXPECTATIONS",
     "SENSITIVE_RESOURCE_LEVELS",
+    "SENSITIVE_RESOURCE_PARTITION",
     "SERVICES",
     "SERVICE_ACCOUNT_GROUP_PREFIX",
     "SERVICE_ACCOUNT_USERNAME_PREFIX",
@@ -216,6 +225,7 @@ __all__ = [
     "cases_by_invocation",
     "expand",
     "non_resource_cases",
+    "required_sensitive_level",
     "resource",
     "resource_cases",
     "service_account_principal",
@@ -490,42 +500,19 @@ SENSITIVE_RESOURCE_EXPECTATIONS: Final[tuple[SensitiveResourceExpectation, ...]]
 # per resource - the L2 integration module reads it to check the level of an
 # observed audit event.
 #
-# READ THE CLUSTERROLES ENTRY CAREFULLY. `RequestResponse` is the level for
-# MUTATING verbs; reads of the same resource are deliberately `Request`, as the
-# two clusterroles entries above record. That is not a contradiction and must not
-# be "fixed" in either direction: the AAP §0.10.2 boundary is that RBAC objects
-# reach RequestResponse when they are changed.
+# THIS MAPPING IS THE RULE, NOT THE WHOLE PARTITION. Two of the five resources
+# carry an exactly-enumerated, exactly-measured set of exceptions, and both are
+# recorded immediately below as their own frozen sets rather than left in prose:
+# a consumer that needs the complete statement must read
+# :data:`SENSITIVE_RESOURCE_PARTITION` and not this mapping alone. Stating the
+# rule without its exceptions is what let a probe pick a compliant row per
+# resource and call the boundary locked.
 #
 # PER-CASE EXPECTATIONS DO NOT COME FROM HERE. Every one of the 620 cases takes
 # its level from the invocation that declares it, so this mapping can never
 # override a transcribed expectation - a global default that outranked the
 # invocation table would be exactly the silent downgrade this file exists to
 # prevent.
-#
-# WHICH IS NOT A TECHNICALITY, MEASURED OVER THE EXPANSION:
-#
-#   secrets                35 -> 17 cases, all Request
-#   serviceaccounts/token         2 cases, all Request
-#   tokenreviews                 12 cases, all Metadata
-#   clusterroles                 28 cases: 12 Request (reads, Go L180)
-#                                          16 RequestResponse (writes, Go L181)
-#   configmaps                   35 cases: 32 Metadata
-#                                           3 None   (Go L135, L158)
-#
-# Those three `None` configmaps cases are deliberate and are not a hole in the
-# control: they are `configmaps` in KUBE-SYSTEM read by `system:unsecured` and by
-# `cluster-autoscaler`, whose polling is high-volume enough that the generator
-# drops it, and the Go suite asserts the drop explicitly so that it can never
-# widen unnoticed. The same principals reading `configmaps` in `default` are
-# recorded at Metadata (Go L136, L159), which is the assertion that the exemption
-# stays scoped to kube-system.
-#
-# So the invariant a consumer should assert over the expansion is that configmaps
-# and tokenreviews NEVER EXCEED Metadata - `case.level <= AuditLevel.METADATA`,
-# which holds for all 47 of them - and NOT that every such case equals Metadata,
-# which is false for exactly those three and would report a false failure. The
-# exact per-case equality assertion is the one against `case.level`, which comes
-# from the invocation and is checked for all 620 cases anyway.
 SENSITIVE_RESOURCE_LEVELS: Final[Mapping[str, AuditLevel]] = MappingProxyType(
     {
         "secrets": AuditLevel.REQUEST,
@@ -533,6 +520,118 @@ SENSITIVE_RESOURCE_LEVELS: Final[Mapping[str, AuditLevel]] = MappingProxyType(
         "configmaps": AuditLevel.METADATA,
         "tokenreviews": AuditLevel.METADATA,
         "clusterroles": AuditLevel.RESPONSE,
+    }
+)
+
+# The KUBE-SYSTEM configmaps exemption, as an EXACTLY ENUMERATED CLOSED SET of
+# `(principal, verb, namespace)` triples. Transcribed from
+# cluster/gce/gci/audit_policy_test.go L135 (`at.testResources(none, ingress,
+# "get", sysConfigmaps)`) and L158 (`at.testResources(none, autoscaler, "get",
+# "update", sysConfigmaps, sysEndpoints)`).
+#
+# WHY IT IS A SET AND NOT A SENTENCE. These three cases are the ONLY places in
+# the whole 620-case matrix where a sensitive resource is recorded below its
+# headline level, and they exist because the two principals poll kube-system
+# configmaps at a volume the generator drops. That is a deliberate, reviewed
+# narrowing - and the way a deliberate narrowing turns into an accidental one is
+# by widening a case at a time while a prose note continues to describe the
+# original three. Held as a set, the exemption can be asserted for EQUALITY: a
+# fourth exempt case fails, a removed one fails, and a principal or verb that
+# drifts fails.
+#
+# NOTE the scoping, which is the control that keeps the exemption honest: the same
+# two principals reading `configmaps` in the DEFAULT namespace are recorded at
+# Metadata (Go L136, L159). The exemption is about kube-system, not about the
+# principals.
+KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS: Final[frozenset[tuple[str, str, str]]] = frozenset(
+    {
+        ("system:unsecured", "get", "kube-system"),
+        ("cluster-autoscaler", "get", "kube-system"),
+        ("cluster-autoscaler", "update", "kube-system"),
+    }
+)
+
+# The verbs the generated policy's "known APIs" rules record at Request rather
+# than at RequestResponse, because get and list responses can be large
+# (audit_policy_test.go L180 versus L181).
+#
+# This is the second exception to the headline mapping, and it is a rule rather
+# than an enumeration because it holds for every known API and not for a listed
+# set of cases: `clusterroles` reaches RequestResponse under a MUTATING verb and
+# Request under a read. AAP §0.10.2's "clusterroles at exactly RequestResponse" is
+# the mutating half of that, and §0.4.2.1's "configmaps(default) ... MUST be
+# metadata" is the AAP's own acknowledgement that these headline values are scoped
+# rather than universal.
+KNOWN_API_READ_VERBS: Final[frozenset[str]] = frozenset({"get", "list", "watch"})
+
+
+def required_sensitive_level(
+    resource: str, principal_name: str, verb: str, namespace: str
+) -> AuditLevel:
+    """The level the V6 boundary requires for one sensitive-resource request.
+
+    THE COMPLETE PARTITION, in one place, as a total function. Every one of the 94
+    sensitive-resource cases in the matrix is classified by this, so a consumer can
+    assert the boundary EXHAUSTIVELY instead of probing a row per resource and
+    hoping the rest agree.
+
+    The three branches, each with its authority:
+
+    * ``configmaps`` in an EXEMPT ``(principal, verb, namespace)`` triple is
+      ``None`` -- :data:`KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS`, Go L135 and L158. Every
+      other configmaps request is ``Metadata``, which is AAP §0.4.2.1's
+      "configmaps(default) ... MUST be metadata".
+    * ``clusterroles`` under a read verb is ``Request`` --
+      :data:`KNOWN_API_READ_VERBS`, Go L180 -- and ``RequestResponse`` under every
+      other verb, which is AAP §0.10.2's "clusterroles at exactly
+      RequestResponse", Go L181.
+    * everything else takes its headline value from
+      :data:`SENSITIVE_RESOURCE_LEVELS` unconditionally: ``secrets`` and
+      ``serviceaccounts/token`` are ``Request`` in all 19 of their cases and
+      ``tokenreviews`` is ``Metadata`` in all 12, with NO exceptions at all.
+
+    Args:
+        resource: The policy resource spelling, e.g. ``secrets`` or
+            ``serviceaccounts/token``.
+        principal_name: The requesting username.
+        verb: The verb, lower case, as the policy spells it.
+        namespace: The request namespace, ``""`` for cluster-scoped.
+
+    Returns:
+        The required level.
+
+    Raises:
+        KeyError: if ``resource`` is not one of the five sensitive resources. A
+            caller asking about anything else is asking the wrong question, and a
+            default answer would be a fabricated boundary.
+    """
+    headline = SENSITIVE_RESOURCE_LEVELS[resource]
+    if resource == "configmaps" and (principal_name, verb, namespace) in (
+        KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS
+    ):
+        return AuditLevel.NONE
+    if resource == "clusterroles" and verb in KNOWN_API_READ_VERBS:
+        return AuditLevel.REQUEST
+    return headline
+
+
+# The MEASURED cardinality of the partition, per resource and per required level.
+#
+# Measured over `expand()` in this session, not quoted: 94 sensitive-resource cases
+# in total. Pinned so the exhaustive assertion cannot be satisfied by a matrix that
+# quietly lost cases - an exhaustive check over an empty set is vacuous, and an
+# exhaustive check over half the set is worse because it looks complete.
+SENSITIVE_RESOURCE_PARTITION: Final[Mapping[str, Mapping[str, int]]] = MappingProxyType(
+    {
+        "secrets": MappingProxyType({AuditLevel.REQUEST.wire: 17}),
+        "serviceaccounts/token": MappingProxyType({AuditLevel.REQUEST.wire: 2}),
+        "configmaps": MappingProxyType(
+            {AuditLevel.METADATA.wire: 32, AuditLevel.NONE.wire: 3}
+        ),
+        "tokenreviews": MappingProxyType({AuditLevel.METADATA.wire: 12}),
+        "clusterroles": MappingProxyType(
+            {AuditLevel.REQUEST.wire: 12, AuditLevel.RESPONSE.wire: 16}
+        ),
     }
 )
 
@@ -927,7 +1026,10 @@ def resource(kind: str, *ns_group_sub: str) -> ResourceSelector:
 # Counted, not assumed:
 #   $ sed -n '94,116p' cluster/gce/gci/audit_policy_test.go | grep -c '= resource('
 #   23
-# The AAP characterises the matrix as using 24 selectors; the source declares 23.
+# The AAP characterises the matrix as using 24 selectors; the source declares 23,
+# and `test_matrix_vocabulary_matches_the_go_source` re-counts the declarations in
+# that file on every run so the discrepancy is settled by the oracle rather than
+# by this note. SELECTOR_COUNT at the end of this file carries the same guard.
 
 NODES: Final[ResourceSelector] = resource("nodes")  # Go local: nodes
 NODE_STATUS: Final[ResourceSelector] = resource("nodes", "", "", "status")  # nodeStatus
@@ -1990,14 +2092,30 @@ UNIQUE_BASE_NAME_COUNT: Final[int] = 585
 # Ids carrying a `#NN` suffix, i.e. cases whose `occurrence` is non-zero.
 DUPLICATE_SUFFIXED_ID_COUNT: Final[int] = 35
 
-# Shape of the invocation table. 29 and 27, measured with
-# `grep -c 'at\.test'` and `grep -c 'at\.testResources'`; the plan's prose says 30
-# and 28, and the code is authoritative.
+# Shape of the invocation table: one record per call site in audit_policy_test.go
+# L132-183. 29 = 27 `at.testResources(` + 2 `at.testNonResources(`.
+#
+# NOT SETTLED BY THIS COMMENT. Some prose in the plan quotes 30 (28 + 2) instead,
+# and a comment cannot adjudicate that: whoever reads it next has no way to tell a
+# measurement from a claim. So the numbers are re-counted IN THE SHIPPED ORACLE on
+# every run by tests/unit/shell/test_audit_policy.py's
+# `test_matrix_vocabulary_matches_the_go_source`, which scans
+# cluster/gce/gci/audit_policy_test.go for those two call-site spellings and fails
+# by name if either disagrees with the literal here. If the Go table is ever
+# edited, that test - not this comment - is what reports it, and the fix is to
+# re-measure both the call sites and TOTAL_CASE_COUNT together, because an
+# invocation gained or lost changes WHICH cases exist and therefore every id.
 INVOCATION_COUNT: Final[int] = 29
 RESOURCE_INVOCATION_COUNT: Final[int] = 27
 NON_RESOURCE_INVOCATION_COUNT: Final[int] = 2
 
-# Shape of the vocabulary: 14 principals, 23 selectors, 10 non-resource paths.
+# Shape of the vocabulary: 14 principals (the `allUsers` roster, L89), 23
+# selectors (the `= resource(...)` declarations, L94-116) and 10 non-resource
+# paths (two five-path groups, L164-165). All three are likewise re-counted in the
+# oracle by `test_matrix_vocabulary_matches_the_go_source`, and each is asserted
+# against the collection it describes by `test_case_matrix_shape_matches_the_oracle`
+# - the aggregate 620 alone cannot catch a drift here, because a fifteenth
+# principal balanced by a dropped selector still expands to 620 DIFFERENT cases.
 PRINCIPAL_COUNT: Final[int] = 14
 SELECTOR_COUNT: Final[int] = 23
 NON_RESOURCE_PATH_COUNT: Final[int] = 10

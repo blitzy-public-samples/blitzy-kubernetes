@@ -69,6 +69,7 @@ import {
   MAX_SAFE_PROSE_INPUT_LENGTH,
   SAFE_OVERSIZED_TEXT,
   SAFE_REDACTED,
+  SAFE_UNRECOGNISED_REASON,
 } from '../domain/safeText';
 import { renderWithProviders } from '../test/utils/renderWithProviders';
 import EncryptionAtRestPanel, {
@@ -949,11 +950,65 @@ describe('external prose is bounded and redacted', () => {
 
     const alert = screen.getByRole('alert');
     expect(alert.textContent ?? '').not.toContain('BEGIN PRIVATE KEY');
-    expect(alert).toHaveTextContent(SAFE_REDACTED);
-    // The locally authored sentence is unconditional, so the redaction marker never stands
+    // ALLOWLISTED, NOT SANITIZED, and that is a strengthening of this very case.
+    // `reason` is one of nineteen fixed `StatusReason` tokens declared in
+    // apimachinery/pkg/apis/meta/v1/types.go, so it is now matched against that list
+    // and anything else is refused outright rather than passed through a credential
+    // denylist. The distinction matters because a denylist can only remove what it
+    // recognises: this PEM block was caught, but `password=hunter2` in the same field
+    // was not, which is the CWE-200 gap. An allowlist has no such hole.
+    expect(alert).toHaveTextContent(SAFE_UNRECOGNISED_REASON);
+    // The locally authored sentence is unconditional, so the refusal marker never stands
     // alone and the reader still learns that no verdict was claimed.
     expect(alert).toHaveTextContent('nothing is reported as passing');
     expect(alert).toHaveTextContent('500');
+  });
+
+  it('refuses a short opaque reason that no credential pattern could catch', () => {
+    // THE CWE-200 CASE THE DENYLIST COULD NOT COVER. Eight ordinary characters carry no
+    // PEM armour, no dotted JWT structure and no base64 padding, so every shape rule
+    // passes them through. Only an allowlist keeps them out of the document.
+    renderWithProviders(
+      <EncryptionAtRestPanel
+        result={{
+          status: 'error',
+          error: {
+            kind: 'http',
+            message: 'the posture endpoint refused the request',
+            httpStatus: 500,
+            reason: 'hunter2',
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent ?? '').not.toContain('hunter2');
+    expect(alert).toHaveTextContent(SAFE_UNRECOGNISED_REASON);
+  });
+
+  it('still renders a genuine Kubernetes reason verbatim', () => {
+    // CONTROL: allowlisting must not blank the field for real values, or the panel
+    // would lose the one token that tells a refusal from a broken server.
+    renderWithProviders(
+      <EncryptionAtRestPanel
+        result={{
+          status: 'error',
+          error: {
+            kind: 'http',
+            message: 'the posture endpoint refused the request',
+            httpStatus: 403,
+            reason: 'Forbidden',
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Forbidden');
+    expect(alert.textContent ?? '').not.toContain(SAFE_UNRECOGNISED_REASON);
   });
 
   it('bounds an oversized reason and collapses control characters in it', () => {
@@ -973,7 +1028,10 @@ describe('external prose is bounded and redacted', () => {
     );
 
     const alert = screen.getByRole('alert');
-    expect(alert).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    // The allowlist refuses it before any length rule is reached, which is a shorter
+    // path to the same guarantee: an unrecognised reason never reaches the document at
+    // all, so there is nothing left for a bound to truncate.
+    expect(alert).toHaveTextContent(SAFE_UNRECOGNISED_REASON);
     expect(alert.textContent ?? '').not.toContain('zzzzzzzzzz');
   });
 

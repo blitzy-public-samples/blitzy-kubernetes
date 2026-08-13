@@ -42,6 +42,14 @@ stdout contract - over a ``tmp_path`` tree it builds and owns. It never reads
 ``hack/boilerplate/test/``, which is in any case a ``skipped_names`` entry and so
 invisible to a walk.
 
+That division of labour is only sound because the sibling module is ACTUALLY
+COLLECTED, and for a time it was not: ``testpaths`` named ``tests`` alone, so the
+one exact-equality assertion over the offender list lived in a file pytest never
+loaded, and "asserted there and nowhere else" meant asserted nowhere. It is now
+reached through the second ``testpaths`` entry in ``python/pyproject.toml``, which
+is what makes single-sourcing the expected list a simplification rather than a
+hole. Do not remove that entry without moving the assertion here first.
+
 INVARIANTS LOCKED BY THIS MODULE, in the order the tests appear:
 
 1.  The ``.py``, ``.ts`` and ``.tsx`` reference headers are REGISTERED with the
@@ -64,6 +72,9 @@ INVARIANTS LOCKED BY THIS MODULE, in the order the tests appear:
 11. ``main()`` returns 0 and prints one bare offending path per line - the exact
     contract ``hack/verify-boilerplate.sh`` reads.
 12. This file itself satisfies the gate it verifies.
+13. Suppressed verbose output holds NO operating-system resource, so importing or
+    reloading the checker leaks no file descriptor and raises no
+    ``ResourceWarning``.
 
 RULES: ``review_rules`` reports "No user rules provided." for this project, so no
 rule is cited and none is invented; the work is held to the AAP §0.11.1
@@ -86,6 +97,19 @@ STRUCTURE, and why it is what it is:
   autouse fixture declared inline in a test module can execute twice. Every
   fixture below is function-scoped and explicitly requested, which makes that
   hazard impossible by construction rather than by convention.
+
+  Do NOT "fix" this by moving those fixtures into a new ``conftest.py`` here.
+  The absence of one is a MANDATE, not an oversight: the AAP gives this folder
+  exactly one file and names ``conftest.py`` among the things it must not gain,
+  while separately requiring ``boilerplate_dir`` and ``boilerplate`` to be
+  defined as non-autouse fixtures - so inline is where they belong. The general
+  "fixtures live in conftest.py" rule is satisfied here by its own stated
+  purpose rather than by its letter: that rule exists to prevent double
+  execution, and double execution needs an autouse fixture, of which there are
+  none. ``addopts`` does not enable ``--doctest-modules`` either (see
+  ``python/pyproject.toml``), so the hazard is precluded twice over. Adding a
+  ``conftest.py`` would break the plan; making any fixture below autouse would
+  reintroduce the hazard. Both halves are load-bearing.
 * Standard library plus ``pytest``, and nothing else. No new distribution enters
   the tier for a module whose subject is a stdlib-only 300-line script.
 """
@@ -96,7 +120,7 @@ import importlib.util
 import re
 import sys
 import types
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -298,7 +322,7 @@ def boilerplate_dir(repo_root: Path) -> Path:
 
 
 @pytest.fixture
-def boilerplate(boilerplate_dir: Path) -> Iterator[types.ModuleType]:
+def boilerplate(boilerplate_dir: Path) -> types.ModuleType:
     """A freshly loaded checker whose ``args`` are already pointed at the real
     templates.
 
@@ -312,11 +336,16 @@ def boilerplate(boilerplate_dir: Path) -> Iterator[types.ModuleType]:
     ``normalize_files`` re-joins any non-absolute path onto rootdir again - which
     makes every file unopenable and reports all of them as false offenders.
 
-    Teardown closes ``verbose_out``. The checker binds it at IMPORT time to an
-    open ``/dev/null`` handle when ``verbose`` is falsey, so a later ``args``
-    patch never redirects it and, left open, it would leak a file descriptor per
-    test and could raise a ``ResourceWarning`` that this tier's
-    ``filterwarnings = ["error"]`` turns into a failure.
+    THERE IS DELIBERATELY NO TEARDOWN. This fixture used to close
+    ``verbose_out``, because the checker bound it at IMPORT time to an open
+    ``/dev/null`` handle whenever ``verbose`` was falsey: a later ``args`` patch
+    never redirected it, and left open it leaked a file descriptor per reload and
+    raised a ``ResourceWarning`` that this tier's ``filterwarnings = ["error"]``
+    turns into a failure. That cleanup was a workaround for a defect in the
+    checker, and the defect is now fixed at its source - ``verbose_out`` is an
+    in-memory sink holding no descriptor - so there is nothing left to release.
+    :func:`test_discarded_verbose_output_holds_no_file_descriptor` is the guard
+    that keeps it that way, and it would fail if the ``open()`` ever came back.
     """
     module = _load_boilerplate(boilerplate_dir)
 
@@ -332,12 +361,7 @@ def boilerplate(boilerplate_dir: Path) -> Iterator[types.ModuleType]:
         boilerplate_dir=str(boilerplate_dir),
         verbose=False,
     )
-    try:
-        yield module
-    finally:
-        stream = getattr(module, "verbose_out", None)
-        if stream is not None and stream is not sys.stderr and not stream.closed:
-            stream.close()
+    return module
 
 
 @pytest.fixture
@@ -1179,3 +1203,58 @@ def test_this_module_satisfies_the_gate_it_verifies(
         "keeping it YEAR-LESS; never relax the checker"
     )
 
+
+# ---------------------------------------------------------------------------
+# 13. The discarded-output sink holds no operating-system resource
+# ---------------------------------------------------------------------------
+
+
+def test_discarded_verbose_output_holds_no_file_descriptor(
+    boilerplate: types.ModuleType,
+) -> None:
+    """Locks the invariant that suppressed verbose output costs no descriptor.
+
+    The checker binds ``verbose_out`` at MODULE SCOPE, so whatever it binds is
+    created afresh on every import and every ``importlib.reload``. It used to bind
+    ``open("/dev/null", "w")`` and never close it, which made a diagnostic
+    convenience into a resource leak: ``hack/boilerplate/boilerplate_test.py``
+    reloads the module by design, so each reload left an unclosed handle and
+    emitted ``ResourceWarning: unclosed file '/dev/null'`` - and under this tier's
+    ``filterwarnings = ["error"]`` a warning is a failure. The :func:`boilerplate`
+    fixture carried a manual ``close()`` in its teardown purely to paper over it.
+
+    Asserting the ABSENCE of ``fileno`` rather than the presence of a particular
+    class is deliberate: it is the property that actually matters (no kernel
+    object is held) and it stays true if the sink is ever reimplemented, while
+    still failing immediately if a real file, socket or pipe comes back.
+    """
+    stream = boilerplate.verbose_out
+
+    assert stream is not sys.stderr, (
+        "the boilerplate fixture requests verbose=False, so verbose_out must be "
+        "the discarding sink rather than sys.stderr; a suppressed run that still "
+        "wrote to stderr would corrupt the stdout/stderr contract that "
+        "hack/verify-boilerplate.sh parses"
+    )
+
+    assert not hasattr(stream, "fileno"), (
+        "verbose_out exposes fileno(), so it is backed by a real operating-system "
+        "descriptor that nothing closes. The open('/dev/null') leak has returned: "
+        "every import and every importlib.reload now leaks a descriptor and raises "
+        "ResourceWarning. Bind an in-memory sink instead of opening a file"
+    )
+
+    # The sink must still be a usable print() target, or suppressing verbose
+    # output would turn every diagnostic call site into an AttributeError. Both
+    # writes print() performs are exercised: the value and the line terminator.
+    print("discarded diagnostic", file=stream)
+    print(file=stream)
+    stream.flush()
+
+    # And a reload must not accumulate anything, which is the leak restated as the
+    # behaviour a reader can check: the fixture's module is reloaded by other
+    # tests and by boilerplate_test.py, so this is the real usage pattern.
+    assert not hasattr(boilerplate.verbose_out, "fileno"), (
+        "verbose_out acquired a file descriptor after being written to and "
+        "flushed, so the sink is not stateless"
+    )

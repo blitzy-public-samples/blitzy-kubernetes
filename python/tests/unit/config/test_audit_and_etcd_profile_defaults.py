@@ -493,4 +493,3 @@ def test_hardened_audit_and_etcd_profile_defaults(
             f"precisely so that prose can never override the assignment; that ordering has "
             f"regressed."
         )
-

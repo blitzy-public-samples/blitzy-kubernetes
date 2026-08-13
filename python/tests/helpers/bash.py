@@ -131,6 +131,7 @@ __all__ = [
     "must_invoke_func",
     "must_invoke_func_with_args",
     "run_bash",
+    "shell_quote",
     "try_invoke_func",
 ]
 
@@ -330,6 +331,48 @@ ALLOWED_RAW_ARGUMENT_TOKENS: Final[frozenset[str]] = frozenset(
         '\'"$argon2id$v=19"\'',
     }
 )
+
+def shell_quote(value: str) -> str:
+    """Return ``value`` as ONE shell word that expands to exactly itself.
+
+    THE ONE QUOTING PRIMITIVE OF THIS TIER, and the reason it exists rather than
+    being open-coded at each site. The shell tier GENERATES a ``kube-env`` script and
+    then has bash ``source`` it, so every value that reaches a ``readonly VAR=…``
+    assignment crosses from DATA into CODE. Unquoted, a value containing a space
+    splits the assignment and turns the remainder into a command; one containing
+    ``$(…)``, a backtick or ``${…}`` is EVALUATED, because bash expands all three
+    inside an unquoted (and inside a double-quoted) assignment; one containing ``;``
+    or a newline ends the assignment and starts a statement. That is CWE-78, and it
+    is not hypothetical here: ``KubeHome`` is derived from pytest's ``tmp_path``, which
+    is derived from ``--basetemp`` -- an argument the runner accepts and therefore an
+    externally chosen path.
+
+    ``shlex.quote`` is the implementation because it is the standard library's
+    audited answer and because of a property that matters as much as the safety: it
+    is a NO-OP for every value made only of ``[A-Za-z0-9_@%+=:,./-]``. Every value
+    the ported shell tests actually carry is in that set -- ``/tmp/pytest-of-root/…``
+    paths, ``https://127.0.0.1:2379``, base64 such as ``Zm9v``, placeholder
+    identifiers such as ``CACertPath``, ``false`` -- so the rendered ``kube-env`` stays
+    BYTE-IDENTICAL to what Go's ``text/template`` writes for all of them, and the
+    renderer's fidelity to the oracle is preserved. Quoting appears only where a
+    value would otherwise have been interpreted, and there the interpretation was
+    the bug.
+
+    Single quotes are what ``shlex.quote`` emits, and single quotes are what makes
+    the guarantee total: inside them bash performs NO expansion at all, and an
+    embedded ``'`` is handled by closing, escaping and reopening. There is therefore
+    no value -- including one containing quotes of both kinds, a newline, or a NUL-free
+    binary smear -- that can escape the word.
+
+    Args:
+        value: The text the generated script must see, exactly.
+
+    Returns:
+        A single shell word. Safe values are returned unchanged; anything else is
+        single-quoted.
+    """
+    return shlex.quote(value)
+
 
 #: ``$0`` for every ``bash -c`` invocation this module makes.
 #:
@@ -735,10 +778,12 @@ def must_invoke_func(
 # stderr is readable on its own. F-008-RQ-001 requires that missing etcd
 # credentials with ETCD_APISERVER_ALLOW_INSECURE unset make the script refuse to
 # fall back to plaintext etcd -- asserted as returncode == 1 AND a specific
-# refusal on stderr, and the partial-credential branch must exit 1 too. Neither
-# assertion is writable against a helper that raises on non-zero or that merges
-# the streams, which is exactly why this posture is separate from MODE ONE
-# rather than a flag on it.
+# refusal on stderr (AAP §0.10.2 names the stream, and the shipped script emits
+# both fail-closed ERRORs with `>&2`; configure-kubeapiserver.sh lines 45 and
+# 49), and the partial-credential branch must exit 1 too. Neither assertion is
+# writable against a helper that raises on non-zero or that merges the streams,
+# which is exactly why this posture is separate from MODE ONE rather than a flag
+# on it.
 def try_invoke_func(
     func_name: str,
     *,
@@ -755,12 +800,14 @@ def try_invoke_func(
 
     * stdout and stderr are captured SEPARATELY, so a test can assert on a
       specific diagnostic without matching it against the script's normal
-      chatter. Which stream a diagnostic lands on is the SHIPPED script's
-      choice, not this module's, and it is worth checking rather than assuming:
-      ``configure-etcd-params`` emits its "refusing to fall back to plaintext
-      etcd" refusal with a plain ``echo``, so that one arrives on STDOUT even
-      though it is an error. Separating the streams is what lets a caller assert
-      against whichever one actually carries it;
+      chatter -- and, more importantly here, so that WHICH STREAM carries it is
+      itself assertable. For ``configure-etcd-params`` the stream is part of the
+      requirement, not an implementation detail: AAP §0.10.2, §0.4.2.1 and
+      §0.5.2.1 each place the "refusing to fall back to plaintext etcd" refusal on
+      STDERR, and the shipped script writes both fatal ERRORs with ``>&2`` while
+      keeping the non-fatal WARNING on stdout. A caller that matched the merged
+      concatenation would be satisfied by either stream and so could not tell a
+      correct refusal from one that regressed onto stdout;
     * the result is RETURNED whatever the exit code. Nothing about a non-zero
       exit raises here, because for a fail-closed control a non-zero exit is the
       behaviour being proven.

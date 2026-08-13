@@ -146,6 +146,7 @@ import {
   serviceAccountTokenHandler,
   warningHeaderValue,
 } from './handlers';
+import type { KubernetesStatusDetails } from './handlers';
 
 // ---------------------------------------------------------------------------
 // Local request helpers.
@@ -442,14 +443,49 @@ describe('the Kubernetes Status envelope', () => {
     });
   });
 
-  it('treats an empty qualified resource as no details rather than an empty one', () => {
-    expect(kubernetesStatus('BadRequest', 400, 'boom', '')).not.toHaveProperty('details');
+  it('distinguishes an OMITTED qualified resource from an EMPTY one', () => {
+    // The distinction the CONSTRUCTORS draw, which is about the `details` KEY and not
+    // about the members inside it.
+    //
+    // OMITTED -> no details at all. `NewBadRequest` and `NewUnauthorized` leave
+    // `Status.Details` nil and `omitempty` on the pointer drops the key; this is how
+    // `badRequestStatus` calls it, with three arguments.
+    expect(kubernetesStatus('BadRequest', 400, 'boom')).not.toHaveProperty('details');
+    // EMPTY STRING -> details ARE present, and EMPTY. `NewForbidden` and `NewNotFound`
+    // set `Details` unconditionally from a possibly-empty `GroupResource`; only their
+    // MESSAGE branches on `qualifiedResource.Empty()`. Dropping the key here made a
+    // served resource-less 403 structurally unlike a real one.
+    expect(kubernetesStatus('Forbidden', 403, 'boom', '')).toHaveProperty('details');
+    // `{}` and not `{group:'',kind:'',name:''}`: every StatusDetails member is itself
+    // tagged `omitempty`, so Go marshals an empty GroupResource and an empty name to
+    // exactly `"details":{}`. Asserted with `toEqual` rather than `toMatchObject`,
+    // because the claim is that the object is empty and a partial match cannot say so.
+    expect(kubernetesStatus('Forbidden', 403, 'boom', '').details).toEqual({});
   });
 
-  it('splits a core-group resource into an empty group', () => {
-    expect(kubernetesStatus('NotFound', 404, 'boom', 'pods', 'p')).toMatchObject({
-      details: { group: '', kind: 'pods', name: 'p' },
-    });
+  it('carries details on a resource-less 403, exactly as NewForbidden does', async () => {
+    const body = await forbiddenStatus('', '', 'nope').json();
+    expect(body.message).toBe('forbidden: nope');
+    // The regression this locks: the bare-forbidden branch is the one case where an
+    // empty GroupResource meets a real refusal, so it is where a missing `details`
+    // would have gone unnoticed. PRESENT and EMPTY is what `NewForbidden` puts on the
+    // wire there - `Details` is set unconditionally, and each of its members is
+    // dropped by its own `omitempty`.
+    expect(body.details).toEqual({});
+    expect(Object.hasOwn(body, 'details')).toBe(true);
+  });
+
+  it('splits a core-group resource and OMITS the empty group, as Go does', () => {
+    // The parse still yields an empty group for a core-group resource; the point is
+    // what reaches the wire. Every StatusDetails field is tagged `omitempty`
+    // (apimachinery/pkg/apis/meta/v1/types.go), so Go emits NO `group` key at all
+    // rather than `"group": ""`. This case previously asserted the `""`, which is a
+    // member the real API server never sends -- a consumer could depend on it here
+    // and lose it in production. Asserted with an exact `toEqual` so a reintroduced
+    // empty member fails rather than being tolerated by a subset match.
+    const status = kubernetesStatus('NotFound', 404, 'boom', 'pods', 'p');
+    expect(status.details).toEqual({ kind: 'pods', name: 'p' });
+    expect(Object.hasOwn(status.details ?? {}, 'group')).toBe(false);
   });
 
   it('splits a grouped resource at the FIRST dot, so a dotted group survives', () => {
@@ -491,12 +527,22 @@ describe('the Kubernetes Status envelope', () => {
     );
   });
 
-  it('prefixes an internal error and names no resource', async () => {
+  it('prefixes an internal error, names no resource, and CARRIES the cause', async () => {
+    // `apierrors.NewInternalError` sets
+    //   Details: &StatusDetails{Causes: []StatusCause{{Message: err.Error()}}}
+    // so the resource triple is genuinely absent but `causes` is genuinely PRESENT.
+    // This case previously asserted no `details` at all, which dropped the one member
+    // the real constructor populates. The cause holds `message` ALONE, because
+    // NewInternalError leaves Type (wire name `reason`) and Field unset and both are
+    // omitempty.
     const body = await internalErrorStatus('evaluation failed').json();
     expect(body.message).toBe('Internal error occurred: evaluation failed');
     expect(body.reason).toBe('InternalError');
     expect(body.code).toBe(INTERNAL_SERVER_ERROR_STATUS);
-    expect(body).not.toHaveProperty('details');
+    expect(body.details).toEqual({ causes: [{ message: 'evaluation failed' }] });
+    expect(Object.hasOwn(body.details ?? {}, 'group')).toBe(false);
+    expect(Object.hasOwn(body.details ?? {}, 'kind')).toBe(false);
+    expect(Object.hasOwn(body.details ?? {}, 'name')).toBe(false);
   });
 
   it('leaves a bad-request message unadorned', async () => {
@@ -806,10 +852,12 @@ describe('the audit-event endpoint', () => {
     const { status, body } = await exchange(auditUrl());
     expect(status).toBe(FORBIDDEN_STATUS);
     expect(asRecord(body)['reason']).toBe('Forbidden');
+    // No `name`: the request addressed a COLLECTION, and Go's `omitempty` omits an
+    // empty name rather than sending `"name": ""`. The group is non-empty here, so it
+    // is present -- which is what makes this a useful pair with the core-group case.
     expect(asRecord(body)['details']).toEqual({
       group: 'audit.k8s.io',
       kind: 'events',
-      name: '',
     });
     expect(asRecord(body)['message']).toContain('F-006-RQ-003');
   });
@@ -1024,7 +1072,9 @@ describe('Pod admission (V2)', () => {
         `${V2_GENERATED_ADMISSION_CONFIG.defaults.enforceVersion}": ` +
         'securityContext.privileged=true',
     );
-    expect(asRecord(body)['details']).toEqual({ group: '', kind: 'pods', name: 'privileged-pod' });
+    // No `group`: `pods` is a CORE-group resource, so `qualifiedResource.Group` is
+    // empty and Go's `omitempty` omits the key entirely.
+    expect(asRecord(body)['details']).toEqual({ kind: 'pods', name: 'privileged-pod' });
   });
 
   it('refuses the hostPID pod with 403', async () => {
@@ -1810,5 +1860,104 @@ describe('the default handler set', () => {
     // array is a pure expression over static data -- no clock, no randomness, no
     // per-call identity.
     expect(handlers.every((handler) => typeof handler === 'object')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `Status` wire fidelity against the Go source (finding A).
+// ---------------------------------------------------------------------------
+
+describe('the Status details serialise exactly as apimachinery does', () => {
+  /**
+   * WHAT THIS GROUP IS FOR, AND WHY IT IS NOT REDUNDANT. The cases above assert the
+   * bodies the factories produce. These assert the RULE those bodies follow, which
+   * is the thing a future factory can violate: every member of Go's `StatusDetails`
+   * carries `omitempty`
+   * (`staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go`), so no empty member
+   * may appear on the wire. A mock that emits one lets a consumer pass here against
+   * a field the real API server never sends, and then lose it in production -- which
+   * is the single failure mode a contract mock exists to prevent.
+   *
+   * Every expectation below was transcribed from the Go constructors in
+   * `staging/src/k8s.io/apimachinery/pkg/api/errors/errors.go`, not from memory:
+   *
+   *   NewForbidden     -> Details{Group, Kind, Name}
+   *   NewNotFound      -> Details{Group, Kind, Name}
+   *   NewInternalError -> Details{Causes: [{Message}]}   (no resource triple)
+   *   NewBadRequest    -> no Details at all
+   */
+
+  /** Every key present on a details object, sorted, for exact comparison. */
+  function detailKeys(details: KubernetesStatusDetails | undefined): string[] {
+    return Object.keys(details ?? {}).sort();
+  }
+
+  it.each([
+    {
+      label: 'a core-group resource with a name omits only group',
+      qualifiedResource: 'pods',
+      name: 'privileged-pod',
+      expected: ['kind', 'name'],
+    },
+    {
+      label: 'a core-group collection omits both group and name',
+      qualifiedResource: 'pods',
+      name: '',
+      expected: ['kind'],
+    },
+    {
+      label: 'a grouped collection omits only name',
+      qualifiedResource: 'events.audit.k8s.io',
+      name: '',
+      expected: ['group', 'kind'],
+    },
+    {
+      label: 'a grouped resource with a name omits nothing',
+      qualifiedResource: 'controls.posture.k8s.io',
+      name: 'V6',
+      expected: ['group', 'kind', 'name'],
+    },
+  ])('$label', ({ qualifiedResource, name, expected }) => {
+    const status = kubernetesStatus('Forbidden', 403, 'boom', qualifiedResource, name);
+
+    expect(detailKeys(status.details)).toEqual(expected);
+    // Positively: no member that IS emitted may be empty. An empty string reaching
+    // the wire is the exact defect, so it is asserted against directly rather than
+    // only implied by the key list.
+    for (const value of Object.values(status.details ?? {})) {
+      expect(value).not.toBe('');
+    }
+  });
+
+  it('never emits an empty causes array', () => {
+    // `causes` is `[]StatusCause` with `omitempty`, so an empty slice is omitted just
+    // as an empty string is. Without this, a factory could emit `"causes": []` and a
+    // consumer could read it as "the server reported no causes" when the real server
+    // says nothing about causes at all.
+    const status = kubernetesStatus('Forbidden', 403, 'boom', 'pods', 'p');
+    expect(Object.hasOwn(status.details ?? {}, 'causes')).toBe(false);
+  });
+
+  it('gives NewBadRequest no details whatsoever', async () => {
+    // CONTROL for the opposite direction: `NewBadRequest` sets no `Details` pointer,
+    // and a nil pointer with `omitempty` produces no key. A mock that invented an
+    // empty `details: {}` here would be as wrong as one that dropped `causes` from a
+    // 500 -- both put this tier out of step with the server it stands in for.
+    const body = await badRequestStatus('page must be a positive integer').json();
+    expect(body).not.toHaveProperty('details');
+    expect(body.message).toBe('page must be a positive integer');
+    expect(body.reason).toBe('BadRequest');
+  });
+
+  it('models a cause with message alone, as NewInternalError builds it', async () => {
+    const body = await internalErrorStatus('kms unreachable').json();
+    const causes = body.details?.causes ?? [];
+
+    expect(causes).toHaveLength(1);
+    // Exactly one member. `StatusCause.Type` serialises as `reason` and `Field` as
+    // `field`, both omitempty, and NewInternalError sets neither -- so a faithful
+    // cause carries `message` and nothing else.
+    expect(Object.keys(causes[0] ?? {})).toEqual(['message']);
+    expect(causes[0]?.message).toBe('kms unreachable');
   });
 });

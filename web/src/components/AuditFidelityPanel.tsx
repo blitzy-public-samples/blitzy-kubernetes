@@ -70,7 +70,7 @@ limitations under the License.
 //   2. Every rendered level carries its ordinal — "Request (3 of 4)" — so a
 //      lower level can never display as equivalent to, or better than, a higher
 //      one, and the legend spells the relation out in full.
-//   3. `describeSecretsLevelDeviation` compares an OBSERVED `secrets` event
+//   3. `describeLevelDeviation` compares an OBSERVED event
 //      against the required `Request` using those ranks and reports an
 //      over-collection and an under-collection as two DIFFERENT findings. A
 //      panel that only checked inequality could not tell a leak from a gap.
@@ -97,6 +97,7 @@ import { useCallback, useId, useMemo, useState } from 'react';
 import type { ChangeEvent, ReactElement } from 'react';
 
 import {
+  readCount,
   readNumber,
   readString,
   selectObservation,
@@ -104,7 +105,12 @@ import {
   type EffectiveVerdict,
 } from '../domain/evidence';
 import { V6_OBSERVATIONS, v6ResourceLevelObservation } from '../domain/observationIds';
-import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeLabel,
+  safeObservationValue,
+  safeProse,
+} from '../domain/safeText';
 import type { AuditEvent, AuditLevel } from '../hooks/useAuditEvents';
 import {
   AUDIT_LEVEL_ORDER,
@@ -569,24 +575,65 @@ type AuditLevelFilterValue = AuditLevel | typeof ALL_LEVELS_VALUE;
  * @returns a sentence naming the deviation, or `undefined` when the level is
  *   exactly the required one.
  */
-function describeSecretsLevelDeviation(observed: AuditLevel): string | undefined {
+function describeLevelDeviation(
+  observed: AuditLevel,
+  required: AuditLevel,
+  because?: string,
+): string | undefined {
   const observedRank = auditLevelRank(observed);
-  const requiredRank = auditLevelRank(SECRETS_REQUIRED_LEVEL);
+  const requiredRank = auditLevelRank(required);
+  if (observedRank === requiredRank) {
+    return undefined;
+  }
+
+  // The rationale is appended when the caller has one. `REQUIRED_LEVEL_ROWS`
+  // carries a `because` per resource explaining why THAT resource sits where it
+  // does, and it is the part an operator needs in order to act: "below the required
+  // RequestResponse" says what happened, "RBAC objects are held UP at the most
+  // verbose level for forensics" says why it matters.
+  const rationale = because === undefined || because === '' ? '' : ` Required because ${because}.`;
+
   if (observedRank > requiredRank) {
     return (
       `Audited at ${describeAuditLevel(observed)}, above the required ` +
-      `${describeAuditLevel(SECRETS_REQUIRED_LEVEL)}. A level above the required one records ` +
-      `the response body, so the payload reached the audit log.`
+      `${describeAuditLevel(required)}. ${describeOverCollection(observed)}${rationale}`
     );
   }
-  if (observedRank < requiredRank) {
-    return (
-      `Audited at ${describeAuditLevel(observed)}, below the required ` +
-      `${describeAuditLevel(SECRETS_REQUIRED_LEVEL)}. A level below the required one drops the ` +
-      `forensic record of the change.`
-    );
+  return (
+    `Audited at ${describeAuditLevel(observed)}, below the required ` +
+    `${describeAuditLevel(required)}. A level below the required one drops the forensic ` +
+    `record this resource is audited for.${rationale}`
+  );
+}
+
+/**
+ * Names what an OVER-COLLECTING level actually records, so the finding says what
+ * was disclosed rather than merely that a rank was exceeded.
+ *
+ * DERIVED FROM THE OBSERVED LEVEL, NOT FROM THE REQUIRED ONE. The previous text
+ * asserted "records the response body" for every over-collection, which is only
+ * true when the observed level is `RequestResponse`: a `configmaps` row required at
+ * `Metadata` and observed at `Request` over-collects by recording the REQUEST body,
+ * and telling an operator to look for a response body there sends them after
+ * something that is not present.
+ *
+ * @param observed - the level actually recorded.
+ * @returns a sentence naming what that level writes into the log.
+ */
+function describeOverCollection(observed: AuditLevel): string {
+  switch (observed) {
+    case 'RequestResponse':
+      return 'This level records the response body, so the payload reached the audit log.';
+    case 'Request':
+      return 'This level records the request body, so submitted content reached the audit log.';
+    case 'Metadata':
+      return 'This level records request metadata, so more was logged than this resource requires.';
+    case 'None':
+      // Unreachable while `None` is the lowest rank, so nothing can over-collect at
+      // it. Stated rather than defaulted, because a `switch` that silently fell
+      // through would be the place a reordered AUDIT_LEVEL_ORDER went unnoticed.
+      return 'This level records nothing, so it cannot over-collect.';
   }
-  return undefined;
 }
 
 /**
@@ -673,7 +720,9 @@ function auditEventFindings(event: AuditEvent): readonly string[] {
   if (event.responseObject !== undefined) {
     findings.push(SECRETS_RESPONSE_BODY_FINDING);
   }
-  const deviation = describeSecretsLevelDeviation(event.level);
+  // Correct to use the Secrets requirement here: this call site is per OBSERVED
+  // `secrets` EVENT, whose required level is by definition SECRETS_REQUIRED_LEVEL.
+  const deviation = describeLevelDeviation(event.level, SECRETS_REQUIRED_LEVEL);
   if (deviation !== undefined) {
     findings.push(deviation);
   }
@@ -798,7 +847,7 @@ const NO_OBSERVATIONS: readonly ControlObservation[] = Object.freeze([]);
  *
  * A level ABOVE the required one and a level BELOW it are reported as two different
  * violations, by rank rather than by inequality, for the same reason
- * {@link describeSecretsLevelDeviation} does it for events: above means the response
+ * {@link describeLevelDeviation} does it for events: above means the response
  * body reached the audit log, below means the forensic record was lost, and an
  * operator has to know which way to act.
  */
@@ -807,6 +856,7 @@ function requireLevel(
   identity: string,
   title: string,
   required: AuditLevel,
+  because?: string,
 ): AuditMeasurement {
   const observed = readString(observations, identity);
   if (observed.state !== 'reported') {
@@ -830,7 +880,12 @@ function requireLevel(
         `${describeAuditLevel(required)}.`,
     };
   }
-  const deviation = describeSecretsLevelDeviation(observed.value);
+  // The ACTUAL required level and the row's own rationale, not the Secrets
+  // requirement. This helper is called for four rows requiring three different
+  // levels; passing `SECRETS_REQUIRED_LEVEL` here described a clusterroles row
+  // required at RequestResponse as deviating from Request, so the verdict was right
+  // and the remediation guidance was wrong.
+  const deviation = describeLevelDeviation(observed.value, required, because);
   return {
     identity,
     title,
@@ -855,7 +910,7 @@ function requireLevel(
 function requireResponseObjectCount(observations: readonly ControlObservation[]): AuditMeasurement {
   const identity = V6_OBSERVATIONS.secretsResponseObjectCount;
   const title = `no observed ${SECRETS_RESOURCE} event carries a response body`;
-  const observed = readNumber(observations, identity);
+  const observed = readCount(observations, identity);
   if (observed.state !== 'reported') {
     return {
       identity,
@@ -927,7 +982,7 @@ function requireEventsObserved(
 ): AuditMeasurement {
   const identity = V6_OBSERVATIONS.auditEventsObserved;
   const title = 'at least one audit event was scanned';
-  const count = readNumber(observations, identity);
+  const count = readCount(observations, identity);
   if (count.state !== 'reported') {
     return { identity, title, result: 'indeterminate', detail: count.reason };
   }
@@ -992,7 +1047,7 @@ function requireExpectedEventsObserved(
       detail: 'Every expected audit event was observed, so each policy rule fired.',
     };
   }
-  const observed = readNumber(observations, V6_OBSERVATIONS.auditEventsObserved);
+  const observed = readCount(observations, V6_OBSERVATIONS.auditEventsObserved);
   const nothingScanned = observed.state === 'reported' && observed.value === 0;
   return nothingScanned
     ? {
@@ -1031,6 +1086,13 @@ function requireExpectedEventCount(
   if (expected.state !== 'reported') {
     return { identity, title, result: 'indeterminate', detail: expected.reason };
   }
+  // DELIBERATELY `readNumber` PLUS A LOCAL GUARD, WHERE THE OBSERVED COUNTS USE
+  // `readCount`. The two counts fail for different reasons and so carry different
+  // verdicts. This one is the panel's own claim about what SHOULD be audited, so a
+  // value that cannot be the size of a set is a CONTRADICTION in the claim and is
+  // `violated`. An OBSERVED count that cannot be a count means the measuring
+  // apparatus is broken, which makes the control unproven rather than refuted, so
+  // those sites read through `readCount` and surface `indeterminate` instead.
   if (!Number.isInteger(expected.value) || expected.value <= 0) {
     return {
       identity,
@@ -1041,7 +1103,7 @@ function requireExpectedEventCount(
         'size of a set of events.',
     };
   }
-  const observed = readNumber(observations, V6_OBSERVATIONS.auditEventsObserved);
+  const observed = readCount(observations, V6_OBSERVATIONS.auditEventsObserved);
   if (observed.state === 'reported' && observed.value < expected.value) {
     // THE EMPTY-LOG EXEMPTION, shared with `requireExpectedEventsObserved`. A shortfall
     // against the expected count is a CONTRADICTION only when events actually arrived: the
@@ -1116,6 +1178,7 @@ function buildAuditMeasurements(
         row.identity,
         `the policy rule for ${row.identity} projects at ${row.level} \u2014 ${row.because}`,
         row.level,
+        row.because,
       ),
     ),
   ];
@@ -1451,7 +1514,7 @@ function AuditFidelityError({ error, labelId }: AuditFidelityErrorProps): ReactE
       )}
       {error.reason === undefined ? null : (
         <span className="audit-fidelity-panel__error-reason">
-          {` Reason: ${safeProse(error.reason)}.`}
+          {` Reason: ${describeStatusReason(error.reason)}.`}
         </span>
       )}
       <span className="audit-fidelity-panel__state-detail">

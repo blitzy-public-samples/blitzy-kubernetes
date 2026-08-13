@@ -93,7 +93,12 @@ import {
 import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
 import { strictestVerdict } from '../domain/evidence';
 import { V7_OBSERVATIONS, V7_OUTCOME_TITLES } from '../domain/observationIds';
-import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeLabel,
+  safeObservationValue,
+  safeProse,
+} from '../domain/safeText';
 // The enabling posture and the two denial statuses, from the ONE place each is defined.
 // M16 gates the pass on the first two, so a literal here would be a second copy that
 // typechecks while disagreeing with the fixture the gate is measured against.
@@ -1316,7 +1321,7 @@ function renderError(error: ControlStatusError): ReactElement {
       <p className="node-isolation-panel__error-message">{safeErrorMessage(error.message)}</p>
       {error.reason !== undefined && error.reason !== '' ? (
         <p className="node-isolation-panel__error-reason">
-          {`Server reason: ${safeProse(error.reason)}`}
+          {`Server reason: ${describeStatusReason(error.reason)}`}
         </p>
       ) : null}
       {describeErrorDisambiguation(error).map((sentence) => (

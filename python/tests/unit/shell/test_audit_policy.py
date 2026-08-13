@@ -30,10 +30,27 @@ INVARIANT LOCKED BY THIS MODULE: **F-006-RQ-001** - the audit policy that
 ``create-master-audit-policy`` (cluster/gce/gci/configure-helper.sh) generates
 assigns the intended audit level to every ``(principal, verb, resource-or-path)``
 request the Go suite exercises, and above all holds the V6 sensitive-resource
-boundary: ``secrets`` and ``serviceaccounts/token`` at EXACTLY ``Request``,
-``configmaps`` and ``tokenreviews`` at EXACTLY ``Metadata``, RBAC objects at
-``RequestResponse`` for mutating verbs, and every rule above ``None`` omitting
-the ``RequestReceived`` stage.
+boundary. That boundary is stated here as the COMPLETE PARTITION rather than as a
+headline, because the headline has two exceptions and a statement that omits them
+cannot be asserted exhaustively:
+
+* ``secrets`` at EXACTLY ``Request`` in all 17 of its cases, and
+  ``serviceaccounts/token`` at EXACTLY ``Request`` in both of its own - no
+  exceptions;
+* ``tokenreviews`` at EXACTLY ``Metadata`` in all 12 - no exceptions;
+* ``configmaps`` at EXACTLY ``Metadata``, EXCEPT the exactly-three
+  ``(principal, verb, namespace)`` triples of the reviewed kube-system
+  high-volume-polling exemption, which are ``None``
+  (``apc.KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS``, Go L135 and L158). AAP §0.4.2.1
+  itself scopes the requirement as "configmaps(**default**) ... MUST be metadata";
+* ``clusterroles`` at EXACTLY ``RequestResponse`` under every mutating verb - AAP
+  §0.10.2's boundary - and EXACTLY ``Request`` under ``get``/``list``/``watch``,
+  which the generated policy lowers one rule earlier because read responses can be
+  large (Go L180 versus L181);
+* and every rule above ``None`` omitting the ``RequestReceived`` stage.
+
+Both exception sets are held as data and asserted for EQUALITY, so neither can
+widen a case at a time while a prose note keeps describing the original shape.
 
 WHAT THE GO TEST ACTUALLY ASSERTS, AND WHY THIS MODULE IS NOT A YAML TEST
 
@@ -44,6 +61,34 @@ The assertions are therefore about EVALUATED OUTCOMES, which is a far stronger
 statement than "the file contains the text ``secrets``": it holds the whole
 ordered first-match rule list accountable, including which earlier rule
 intercepts a request before the one a reader would expect.
+
+EXACTLY WHAT THE PARITY CLAIM COVERS, AND WHAT IT DOES NOT
+
+Stated precisely, because a ported evaluator invites a broader reading than the
+evidence supports:
+
+* PROVEN, by execution: the policy the SHIPPED generator writes assigns, for each
+  of the 620 requests the Go oracle exercises, the same level the Go oracle
+  asserts. That is established twice over -- once by :func:`test_audit_level`
+  against the ported evaluator, and once by
+  :func:`test_the_go_oracle_recorded_the_same_620_verdicts`, which reads the
+  verdicts the PRODUCTION Go evaluator actually produced out of the committed
+  baseline manifest and requires a one-for-one identity match with a recorded
+  ``pass``. Because both sides are compared against the SAME expectation table in
+  ``tests.fixtures.audit_policy_cases``, the two evaluators agreeing with that
+  table is the two evaluators agreeing with each other -- on these 620 inputs.
+* PROVEN, by construction: a document this loader accepts is a document
+  kube-apiserver would accept, because :func:`validate_policy` reproduces every
+  rule of ``validation.ValidatePolicy`` and aggregates its findings as
+  ``ErrorList.ToAggregate`` does.
+* NOT CLAIMED: that :class:`PolicyRuleEvaluator` is behaviourally identical to
+  ``auditpolicy.NewPolicyRuleEvaluator`` on inputs OUTSIDE this matrix. The
+  synthetic-policy cases further down widen the covered surface deliberately --
+  wildcards, ``resourceNames``, stage unions, first-match ordering, non-resource
+  paths -- but they are this module's own expectations, not the oracle's, so they
+  are evidence about the port's internal consistency rather than about
+  equivalence. Anything asserted about an input the Go suite does not exercise is
+  a statement about this module.
 
 The Kubernetes Python client publishes no audit-policy evaluator, so this module
 contains one. That is the single deliberate exception to AAP §0.11.1 B4 ("respect
@@ -135,7 +180,7 @@ The Go original is deliberately asymmetric and this port keeps the asymmetry:
 Go                                            Semantics       Here
 ============================================  ==============  ==================
 L51 ``require.NoError`` (temp dir)            abort           fixture raises
-L70 ``require.NoError`` (policy load)         abort           fixture raises
+L70 ``require.NoError`` (policy load)         abort           loader raises
 L207-209 ``require.NotEmpty`` x3              abort           bare ``assert``
 L258 ``assert.Equal`` (level)                 record+continue ``subtests.test``
 L260 ``assert.ElementsMatch`` (omitStages)    record+continue ``subtests.test``
@@ -173,29 +218,40 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO
 
 from __future__ import annotations
 
+import collections
+import functools
+import itertools
+import json
 import os
-from collections.abc import Iterator, Mapping, Sequence
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
 import pytest
 import yaml
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
 from tests.fixtures import audit_policy_cases as apc
-from tests.helpers.bash import CONFIGURE_HELPER_SCRIPT
-from tests.helpers.manifest import BASE_TEMPLATE_RELATIVE_PATH
+from tests.helpers.manifest import ManifestHarnessError
 
-# The tier's harness. ``ManifestCaseFactory`` and ``KubeEnvRenderFactory`` are
-# both declared in tests/unit/shell/conftest.py's ``__all__``, i.e. they are its
-# public API rather than internals, and they are imported here rather than
-# consumed through the ``manifest_case`` and ``render_kube_env`` FIXTURES for one
-# structural reason: those fixtures are function-scoped, this module needs the
-# policy generated ONCE for 620 parametrized items, and a module-scoped fixture
-# may not depend on a function-scoped one. See :func:`generated_audit_policy`.
-from tests.unit.shell.conftest import KubeEnvRenderFactory, ManifestCaseFactory
+# The tier's harness, whose public API is declared in
+# tests/unit/shell/conftest.py's ``__all__``. THE GENERATION LIVES THERE, NOT
+# HERE: AAP §0.4.4.1 and §0.9.2 put fixtures in conftest.py and never inline in a
+# test module, so ``generated_audit_policy`` -- the module-scoped fixture that runs
+# the shipped bash once and hands back the bytes it wrote -- is that file's, and
+# this module imports only the value type it yields, the constants it is keyed to,
+# and the read-or-raise guard whose own two branches are exercised below.
+from tests.unit.shell.conftest import (
+    AUDIT_POLICY_FILE_NAME as _conftest_AUDIT_POLICY_FILE_NAME,
+)
+from tests.unit.shell.conftest import (
+    AUDIT_POLICY_FUNC_NAME as _conftest_AUDIT_POLICY_FUNC_NAME,
+)
+from tests.unit.shell.conftest import (
+    GeneratedShellPolicy,
+    require_generated_policy_text,
+)
 
 # L1 shell-boundary tier: this module invokes the shipped bash generator through
 # a subprocess. The marker vocabulary is declared once in python/pyproject.toml
@@ -212,20 +268,16 @@ pytestmark = pytest.mark.shell
 # ---------------------------------------------------------------------------
 
 #: The shell function under test, declared at cluster/gce/gci/configure-helper.sh
-#: L1156. It takes ``path="${1}"`` and an optional ``policy="${2:-}"`` and reads
-#: NO environment variable, which is why a fragment ``kube-env`` cannot break it.
-AUDIT_POLICY_FUNC_NAME: Final[str] = "create-master-audit-policy"
+#: L1156. Imported from the tier conftest rather than restated: the fixture that
+#: invokes it lives there (AAP §0.4.4.1 puts fixtures in conftest.py), so the
+#: function name, the output filename and the render target have exactly one
+#: definition and a rename cannot leave this module naming a stale one.
+AUDIT_POLICY_FUNC_NAME: Final[str] = _conftest_AUDIT_POLICY_FUNC_NAME
 
 #: The file the generator is asked to write, named as Go names it
 #: (audit_policy_test.go L53). It is a path the function is GIVEN, not a location
 #: it derives, so nothing outside the test's own temporary tree is ever touched.
-AUDIT_POLICY_FILE_NAME: Final[str] = "audit_policy.yaml"
-
-#: The ``kube-env`` render target, as the Go call spells it (L65). ``base.template``
-#: is rendered as its OWN target here - see the module docstring's first measured
-#: behaviour - unlike the etcd and KMS cases, which render a sibling template that
-#: invokes the ``base`` template this file defines.
-BASE_TEMPLATE_TARGET: Final[str] = "base.template"
+AUDIT_POLICY_FILE_NAME: Final[str] = _conftest_AUDIT_POLICY_FILE_NAME
 
 #: Rules the shipped generator emits. Measured in this checkout, and structural
 #: rather than cosmetic: the policy is an ORDERED first-match list, so a lost or
@@ -480,26 +532,39 @@ class RequestAuditConfig:
 # reader.go: load a generated policy, and fail loudly on anything else
 # ---------------------------------------------------------------------------
 # The port of ``LoadPolicyFromFile`` / ``LoadPolicyFromBytes``
-# (staging/src/k8s.io/apiserver/pkg/audit/policy/reader.go L46-101), plus the
-# subset of ``validation.ValidatePolicy`` that guards the values this control
-# depends on: a rule's level must be one of the four (validation.go L68-77) and
-# every omitted stage must be one of the four (validation.go L61-66).
+# (staging/src/k8s.io/apiserver/pkg/audit/policy/reader.go L46-101) together with
+# ``validation.ValidatePolicy``
+# (staging/src/k8s.io/apiserver/pkg/apis/audit/validation/validation.go L28-133)
+# IN FULL - every branch of it, not a subset.
 #
-# WHAT IS PORTED AND WHAT IS NOT. Go decodes through a scheme, strictly and then
-# leniently, and aggregates every validation error before returning. This port
-# uses ``yaml.safe_load`` - there is no scheme to consult - and raises on the
-# FIRST problem it finds. The difference is in reporting, not in outcome: the
-# AAP blueprint's requirement is that "a malformed or missing policy file must
-# fail loudly, never silently pass", and every input Go rejects is rejected
-# here. What is deliberately NOT ported is the rest of ``ValidatePolicy``: the
-# non-resource-URL and resource shape checks constrain policies a human might
-# write, whereas the only policy this module loads is one the shipped generator
-# just produced, and its resource shapes are asserted far more directly by the
-# 620 evaluated outcomes.
+# WHAT IS PORTED. All of it. Go decodes through a scheme, strictly and then
+# leniently, then calls ``validation.ValidatePolicy`` and returns
+# ``err.ToAggregate()``. This port uses ``yaml.safe_load`` - there is no scheme to
+# consult - and then :func:`validate_policy`, which reproduces every rule of
+# ``ValidatePolicy`` (staging/src/k8s.io/apiserver/pkg/apis/audit/validation/
+# validation.go) and AGGREGATES its findings exactly as ``ErrorList.ToAggregate``
+# does, so a policy with three problems reports three rather than one.
+#
+# The aggregation is not cosmetic. The whole claim this module makes is that the
+# 620 outcomes below are the outcomes the API SERVER would produce, and a loader
+# that accepted a document kube-apiserver refuses to load would evaluate a policy
+# that never ships - a green suite over a control plane that will not boot. The
+# constraints most easily lost are exactly the ones a generated document is most
+# likely to break: a ``nonResourceURLs`` entry that stops beginning with ``/``,
+# a wildcard that stops being the final character, a rule that acquires both
+# ``nonResourceURLs`` and ``resources``, a group name written as
+# ``rbac.authorization.k8s.io/v1beta1`` instead of ``rbac.authorization.k8s.io``,
+# and a ``resourceNames`` narrowing with no ``resources`` to narrow.
+#
+# TYPE checks stay where they are - in the readers below - and raise on the first
+# problem, because Go's DECODER also stops at the first structural failure; a
+# document whose ``verbs`` is a mapping never reaches ``ValidatePolicy`` in Go
+# either. VALUE checks are what aggregate.
 #
 # ORDER OF CHECKS mirrors Go's: envelope, then the policy-level fields, then the
-# rules, and only then the "0 rules" refusal - which is why an empty ``rules: []``
-# reports Go's own message rather than a field error.
+# rules' types, then ``ValidatePolicy`` over the whole decoded policy, and only
+# then the "0 rules" refusal - reader.go L88-96 in that order, which is why an
+# empty ``rules: []`` reports Go's own message rather than a field error.
 
 
 def _require_mapping(value: object, *, where: str) -> Mapping[str, object]:
@@ -662,15 +727,90 @@ def _require_group_resources(value: object, *, where: str) -> tuple[GroupResourc
     return tuple(entries)
 
 
+# ---------------------------------------------------------------------------
+# The DNS-1123 subdomain rule a non-empty API group must satisfy
+# ---------------------------------------------------------------------------
+# Go reaches this through ``validation.NameIsDNSSubdomain(group, false)``
+# (staging/src/k8s.io/apimachinery/pkg/api/validation/generic.go L42-48), which
+# with ``prefix=false`` is exactly ``validation.IsDNS1123Subdomain``
+# (staging/src/k8s.io/apimachinery/pkg/util/validation/validation.go L196-207).
+
+DNS1123_SUBDOMAIN_MAX_LENGTH: Final[int] = 253
+"""Go: ``validation.DNS1123SubdomainMaxLength`` (util/validation/validation.go L191)."""
+
+_DNS1123_LABEL_FMT: Final[str] = "[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+"""Go: ``dns1123LabelFmt`` (util/validation/validation.go L155), byte for byte."""
+
+_DNS1123_SUBDOMAIN_FMT: Final[str] = _DNS1123_LABEL_FMT + r"(\." + _DNS1123_LABEL_FMT + ")*"
+"""Go: ``dns1123SubdomainFmt`` (util/validation/validation.go L184), byte for byte."""
+
+_DNS1123_SUBDOMAIN_RE: Final[re.Pattern[str]] = re.compile(_DNS1123_SUBDOMAIN_FMT)
+"""Compiled once. Matched with :meth:`re.Pattern.fullmatch`, NEVER with ``^...$``.
+
+Go anchors the pattern as ``"^" + fmt + "$"`` and ``$`` there means end of text.
+Python's ``$`` also matches just BEFORE a trailing newline, so ``^foo$`` would
+accept ``"foo\\n"`` - a group name with a stray newline - where Go refuses it.
+``fullmatch`` has Go's semantics exactly, which is why it is used instead.
+"""
+
+_DNS1123_SUBDOMAIN_ERROR_MSG: Final[str] = (
+    "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, "
+    "'-' or '.', and must start and end with an alphanumeric character"
+)
+"""Go: ``dns1123SubdomainErrorMsg`` (util/validation/validation.go L185)."""
+
+
+def _name_is_dns_subdomain(value: str) -> tuple[str, ...]:
+    """Return Go's messages for ``value``, empty when it is a valid subdomain.
+
+    Go: ``IsDNS1123Subdomain`` (util/validation/validation.go L198-207), which
+    appends up to two messages - the length one and the pattern one - and whose
+    caller joins them with ``","``.
+
+    THE LENGTH IS MEASURED IN BYTES, not characters, because Go's ``len`` on a
+    string counts bytes. The distinction can only matter for a non-ASCII value,
+    which fails the pattern either way, so the accept/reject outcome is identical
+    in every case; measuring bytes simply keeps the reported message identical
+    too.
+
+    Args:
+        value: The API group name, known to be non-empty by the caller.
+
+    Returns:
+        The messages, in Go's order.
+    """
+    messages: list[str] = []
+    if len(value.encode("utf-8")) > DNS1123_SUBDOMAIN_MAX_LENGTH:
+        # Go: MaxLenError (util/validation/validation.go L425-427).
+        messages.append(f"must be no more than {DNS1123_SUBDOMAIN_MAX_LENGTH} characters")
+    if _DNS1123_SUBDOMAIN_RE.fullmatch(value) is None:
+        # Go: RegexError(msg, fmt, "example.com") (util/validation/validation.go
+        # L430-443), whose one-example form is reproduced verbatim.
+        messages.append(
+            f"{_DNS1123_SUBDOMAIN_ERROR_MSG} (e.g. 'example.com', "
+            f"regex used for validation is '{_DNS1123_SUBDOMAIN_FMT}')"
+        )
+    return tuple(messages)
+
+
 def _require_rule(value: object, *, where: str) -> PolicyRule:
     """Return one policy rule, or raise naming ``where``.
+
+    TYPES ONLY, AND DELIBERATELY SO. This is the DECODER half, and Go's decoder
+    stops at the first structural failure - a rule whose ``verbs`` is a mapping
+    never reaches ``ValidatePolicy`` there either, so each reader below raises
+    rather than collecting. The VALUE checks are Go's ``validatePolicyRule``, they
+    run over the whole decoded policy in :func:`validate_policy`, and they
+    AGGREGATE, exactly as ``ErrorList.ToAggregate`` does. Applying any of them here
+    as well would abort the aggregate at the first offending rule and report one
+    finding where Go reports all of them.
 
     Raises:
         AuditPolicyError: for any malformed field; see the individual readers.
     """
     __tracebackhide__ = True
     rule = _require_mapping(value, where=where)
-    return PolicyRule(
+    policy_rule = PolicyRule(
         level=_require_level(rule.get("level"), where=f"{where}.level"),
         users=_require_string_list(rule.get("users"), where=f"{where}.users"),
         user_groups=_require_string_list(rule.get("userGroups"), where=f"{where}.userGroups"),
@@ -684,6 +824,185 @@ def _require_rule(value: object, *, where: str) -> PolicyRule:
         omit_managed_fields=_require_optional_bool(
             rule.get("omitManagedFields"), where=f"{where}.omitManagedFields"
         ),
+    )
+    return policy_rule
+
+
+def _validate_non_resource_urls(urls: Sequence[str], *, where: str) -> list[str]:
+    """Port of ``validateNonResourceURLs`` (validation.go L79-95).
+
+    Three rules, in Go's own order, and the third is the subtle one:
+
+    * a bare ``"*"`` is accepted outright and skipped (L82-84);
+    * every other entry must begin with ``/`` (L86-88). Without this a rule
+      intended for ``/healthz`` and written ``healthz`` matches nothing, and a
+      policy that silently matches nothing is exactly a silent downgrade;
+    * a ``*`` may appear ONLY as the final character (L90-92). Go tests
+      ``url[:len(url)-1]``, i.e. everything but the last character, so
+      ``/api/*/pods`` is rejected while ``/api/*`` is not. The empty string is
+      guarded first, because ``url[:len(url)-1]`` on ``""`` would be
+      out of range in Go's own reading.
+
+    Returns:
+        The findings, as complete sentences, in Go's order.
+    """
+    findings: list[str] = []
+    for index, url in enumerate(urls):
+        if url == "*":
+            continue
+        if not url.startswith("/"):
+            findings.append(
+                f"{where}[{index}]: {url!r} -- non-resource URL rules must begin with a "
+                f"'/' character"
+            )
+        if url != "" and "*" in url[:-1]:
+            findings.append(
+                f"{where}[{index}]: {url!r} -- non-resource URL wildcards '*' must be the "
+                f"final character of the rule"
+            )
+    return findings
+
+
+def _validate_group_resources(
+    group_resources: Sequence[GroupResources], *, where: str
+) -> list[str]:
+    """Port of ``validateResources`` (validation.go L97-118).
+
+    * A NON-EMPTY group must be a valid DNS subdomain. The empty string is the
+      core API group and is exempt (L100). Go's own comment names the mistake this
+      catches: ``rbac.authorization.k8s.io/v1beta1`` is rejected and
+      ``rbac.authorization.k8s.io`` is the valid one - a group name is not a
+      GroupVersion, and the generated policy names eighteen groups.
+    * ``resourceNames`` with no ``resources`` is rejected (L112-114): a narrowing
+      with nothing to narrow selects every resource in the group rather than the
+      named objects the author intended, which is a silent WIDENING.
+
+    Note that Go reports both under ``fldPath.Child("group")`` /
+    ``Child("resourceNames")`` WITHOUT an index, so two offending entries produce
+    two findings on the same path; the index is added here because a reader with
+    eighteen entries needs to know which one.
+    """
+    findings: list[str] = []
+    for index, entry in enumerate(group_resources):
+        if entry.group:
+            # Through :func:`_name_is_dns_subdomain`, which renders Go's own two
+            # messages: a SINGLE source for the rule, so the aggregate cannot drift
+            # from the message text or from Go's matching semantics. Two properties
+            # are load bearing there and are why a local `re.match` is not used:
+            # the length is measured in BYTES, as Go's `len` on a string is, and the
+            # pattern is applied with `fullmatch`, because Python's `$` also matches
+            # just before a trailing newline while Go's does not - so `^...$` with
+            # `.match()` would accept a group name ending in "\n" that the API
+            # server refuses.
+            for message in _name_is_dns_subdomain(entry.group):
+                findings.append(
+                    f"{where}[{index}].group: {entry.group!r} -- {message} (an API group is "
+                    f"a group name such as 'rbac.authorization.k8s.io', never a GroupVersion "
+                    f"such as 'rbac.authorization.k8s.io/v1')"
+                )
+        if entry.resource_names and not entry.resources:
+            findings.append(
+                f"{where}[{index}].resourceNames: {list(entry.resource_names)!r} -- using "
+                f"resourceNames requires at least one resource; without one the entry "
+                f"selects EVERY resource in the group instead of the named objects"
+            )
+    return findings
+
+
+def _validate_omit_stages(stages: Sequence[str], *, where: str) -> list[str]:
+    """Port of ``validateOmitStages`` (validation.go L120-134).
+
+    The type readers already refuse a non-string stage and an unrecognised one,
+    so this exists to make the AGGREGATED report complete: a policy whose second
+    rule omits a misspelled stage must be reported alongside every other finding
+    rather than being the one that happened to raise first.
+    """
+    return [
+        f"{where}[{index}]: {stage!r} -- allowed stages are "
+        f"{sorted(VALID_OMIT_STAGES)}"
+        for index, stage in enumerate(stages)
+        if stage not in VALID_OMIT_STAGES
+    ]
+
+
+def _validate_rule(rule: PolicyRule, *, where: str) -> list[str]:
+    """Port of ``validatePolicyRule`` (validation.go L37-52).
+
+    The four field validators, then THE SELECTOR-MIXING RULE (L44-48): a rule with
+    ``nonResourceURLs`` may carry neither ``resources`` nor ``namespaces``,
+    because "rules cannot apply to both regular resources and non-resource URLs".
+
+    That rule is the one whose absence mattered most here. ``ruleMatches``
+    (checker.go) dispatches on ``IsResourceRequest()``: a rule carrying both
+    selectors can only ever match through ONE of them, so the other half is dead
+    and its author's intent is silently discarded. The generated policy has
+    separate resource and non-resource rules precisely to avoid it, and a future
+    edit that merged two of them would change which requests are audited while
+    every level in the matrix still looked right.
+    """
+    findings = _validate_level(rule.level, where=f"{where}.level")
+    findings += _validate_non_resource_urls(
+        rule.non_resource_urls, where=f"{where}.nonResourceURLs"
+    )
+    findings += _validate_group_resources(rule.resources, where=f"{where}.resources")
+    findings += _validate_omit_stages(rule.omit_stages, where=f"{where}.omitStages")
+
+    if rule.non_resource_urls and (rule.resources or rule.namespaces):
+        findings.append(
+            f"{where}.nonResourceURLs: {list(rule.non_resource_urls)!r} -- rules cannot "
+            f"apply to both regular resources and non-resource URLs (this rule also "
+            f"declares "
+            f"{'resources' if rule.resources else ''}"
+            f"{' and ' if rule.resources and rule.namespaces else ''}"
+            f"{'namespaces' if rule.namespaces else ''}, and only one of the two selector "
+            f"families can ever match a given request)"
+        )
+    return findings
+
+
+def _validate_level(level: str, *, where: str) -> list[str]:
+    """Port of ``validateLevel`` (validation.go L67-77).
+
+    The type reader has already refused a non-string and an unrecognised level, so
+    like :func:`_validate_omit_stages` this exists for completeness of the
+    aggregate. Go distinguishes ``Required`` (empty) from ``NotSupported``
+    (unknown) and so does this.
+    """
+    if level == "":
+        return [f"{where}: required"]
+    if level not in VALID_LEVELS:
+        return [f"{where}: {level!r} -- supported values: {sorted(VALID_LEVELS)}"]
+    return []
+
+
+def validate_policy(policy: AuditPolicy) -> None:
+    """Port of ``validation.ValidatePolicy`` plus ``ErrorList.ToAggregate``.
+
+    Go collects every finding across the policy-level ``omitStages`` and all rules
+    and returns them as one aggregate (validation.go L28-35, reader.go L88-90).
+    This reproduces that: EVERY finding, in Go's order, in one exception.
+
+    INVARIANT LOCKED: a policy this loader accepts is a policy kube-apiserver
+    would accept. That is what makes the 620 evaluated outcomes below evidence
+    about the API server rather than about this module - a loader that admitted a
+    document the server refuses to load would evaluate a policy that never ships.
+
+    Raises:
+        AuditPolicyError: naming every violation found, one per line.
+    """
+    __tracebackhide__ = True
+    findings = _validate_omit_stages(policy.omit_stages, where="omitStages")
+    for index, rule in enumerate(policy.rules):
+        findings += _validate_rule(rule, where=f"rules[{index}]")
+
+    if not findings:
+        return
+
+    rendered = "\n".join(f"  - {finding}" for finding in findings)
+    raise AuditPolicyError(
+        f"{REQUIREMENT_ID}: the audit policy is invalid and kube-apiserver would refuse to "
+        f"load it -- {len(findings)} violation(s) of "
+        f"validation.ValidatePolicy:\n{rendered}"
     )
 
 
@@ -736,6 +1055,19 @@ def load_policy_from_bytes(policy_definition: bytes | str) -> AuditPolicy:
     rules = tuple(
         _require_rule(item, where=f"rules[{index}]") for index, item in enumerate(rules_value)
     )
+
+    # reader.go L88-90: ValidatePolicy runs over the whole decoded policy and its
+    # ErrorList is returned as ONE aggregate, BEFORE the 0-rules refusal below.
+    # The order matters and is Go's: a document that is both invalid and empty
+    # reports its validation findings, not "loaded illegal policy with 0 rules".
+    validate_policy(
+        AuditPolicy(
+            rules=rules,
+            omit_stages=omit_stages,
+            omit_managed_fields=bool(omit_managed_fields),
+        )
+    )
+
     if not rules:
         # Go's exact message (reader.go L96), because it is the one an operator
         # searching the API server logs will already have seen.
@@ -1070,190 +1402,63 @@ class PolicyRuleEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# Generating the policy: the bare struct-literal harness, run once
+# Interpreting the generated policy: pure, memoised, and NOT a fixture
 # ---------------------------------------------------------------------------
+# The GENERATION is a fixture and lives in tests/unit/shell/conftest.py, because
+# AAP §0.4.4.1 and §0.9.2 put fixtures in conftest.py and never inline in a test
+# module: `generated_audit_policy` runs the shipped bash once per module and hands
+# back the bytes it wrote. What it deliberately does NOT do is load them, because
+# the loader and the evaluator are the ports of reader.go and checker.go and this
+# module's frozen specification requires they stay here.
+#
+# So the two derivations below are ORDINARY IMMUTABLE VALUES rather than fixtures,
+# which is the right shape for them on their own merits: each is a pure function of
+# an immutable string, returning frozen dataclasses, memoised so that 620
+# parametrized items parse the policy ONCE between them rather than 620 times.
+# `maxsize=1` because there is exactly one generated policy per module, and the key
+# is the policy TEXT, so a different policy can never be served a cached evaluator
+# built from another. Nothing here holds mutable state, so `pytest-randomly` order
+# and `pytest-xdist` workers (separate processes, separate caches) are both safe.
 
 
-@dataclass(frozen=True, slots=True)
-class GeneratedAuditPolicy:
-    """What one run of the shipped generator produced.
+@functools.lru_cache(maxsize=1)
+def _loaded_policy(policy_text: str) -> AuditPolicy:
+    """Load the generated policy once. Ports audit_policy_test.go L69-70.
 
-    Attributes:
-        text: The policy file's contents, read before the case's ``KUBE_HOME``
-            was removed. Carried so the shape assertions can decode the SHIPPED
-            BYTES rather than re-deriving them from :attr:`policy`, which would
-            only prove the loader self-consistent.
-        policy: The loaded policy.
-        combined_output: Everything the invocation wrote, stdout and stderr
-            merged as Go's ``CombinedOutput`` returns them. Carried purely as
-            diagnostics, so a failure message can quote it. Deliberately NOT
-            asserted on: it contains the bash syntax error the fragment
-            ``kube-env`` provokes, and pinning that would fail the suite for a
-            template change that has nothing to do with control V6.
+    Memoised on the text, so the 620 cases and the shape assertions share one
+    parse. A load failure aborts every caller, which is what Go's
+    ``require.NoError`` does: 620 findings against a policy that did not load
+    would all be about nothing.
     """
-
-    text: str
-    policy: AuditPolicy
-    combined_output: str
+    return load_policy_from_bytes(policy_text)
 
 
-def _require_generated_policy_text(
-    policy_file: Path,
-    *,
-    returncode: int,
-    combined_output: str,
-) -> str:
-    """Read the generated policy file, or raise because nothing was generated.
-
-    A separate function rather than an inline check inside the fixture, so that
-    the refusal is itself testable - see
-    :func:`test_a_generator_that_writes_nothing_is_a_failure`. The guard matters
-    because the invocation exits 0 even though its ``kube-env`` is unparseable
-    (see the module docstring): exit status alone is therefore NOT sufficient
-    evidence that the generator ran, and without this check a generator that
-    silently stopped writing would leave 620 cases erroring on a missing file
-    with no explanation.
-
-    Args:
-        policy_file: Where the generator was told to write.
-        returncode: The invocation's exit status, quoted in the message.
-        combined_output: The invocation's merged output, quoted in the message.
-
-    Returns:
-        The file's contents.
-
-    Raises:
-        AuditPolicyError: if no file exists at ``policy_file``.
-    """
-    __tracebackhide__ = True
-    if not policy_file.is_file():
-        raise AuditPolicyError(
-            f"{REQUIREMENT_ID}: {AUDIT_POLICY_FUNC_NAME} exited {returncode} but wrote no policy "
-            f"to {policy_file}. Combined output:\n{combined_output}"
-        )
-    return policy_file.read_text(encoding="utf-8")
-
-
-@pytest.fixture(scope="module")
-def generated_audit_policy(
-    repo_root: Path,
-    tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[GeneratedAuditPolicy]:
-    """Run the shipped ``create-master-audit-policy`` ONCE and load its output.
-
-    PORTS: audit_policy_test.go L50-70 in full - the ``os.MkdirTemp`` plus the
-    BARE ``ManifestTestCase`` struct literal (L53-58), ``defer c.tearDown()``
-    (L59), the ``mustInvokeFunc`` call (L62-67) and the ``LoadPolicyFromFile``
-    that follows it (L69-70), including both ``require.NoError`` aborts.
-
-    INVARIANT LOCKED: the policy the 620 cases are judged against is the one the
-    SHIPPED bash generator just wrote, from the SHIPPED
-    ``testdata/kube-apiserver/base.template``, into a directory this module alone
-    owns - never a fixture copy and never a Python re-implementation
-    (tech-spec §6.6.1.1).
-
-    THE BARE SHAPE, AND WHY IT MATTERS. The Go harness is a struct literal that
-    sets only ``t``, ``kubeHome`` and ``manifestFuncName``, so
-    ``mustCopyFromTemplate``, ``mustCopyAuxFromTemplate`` and
-    ``mustCreateManifestDstDir`` never run and ``mustLoadPodFromManifest`` is
-    never called. ``manifest_case`` is therefore invoked with NO ``manifest``,
-    which is the shape ``ManifestCaseFactory`` supports for exactly this caller.
-    Only ONE script is sourced - ``configure-helper.sh`` - because that is where
-    the function is declared and the apiserver configuration script plays no part
-    here.
-
-    WHY MODULE SCOPE, AND WHY THE FIXTURES ARE NOT USED. 620 parametrized items
-    share this policy; generating it per item would run bash 620 times to produce
-    620 identical files. A module-scoped fixture may not depend on a
-    function-scoped one, and ``manifest_case``, ``render_kube_env`` and
-    ``kube_home`` are all function-scoped, so this fixture composes the tier's own
-    ``ManifestCaseFactory`` and ``KubeEnvRenderFactory`` - both exported from
-    tests/unit/shell/conftest.py - over the session-scoped ``repo_root`` and
-    ``tmp_path_factory``. It reproduces every guarantee those fixtures give:
-    a ``KUBE_HOME`` created inside a pytest-owned temporary directory, unique to
-    this module, and torn down in a ``finally`` whether the tests passed or
-    failed.
-
-    The result is FROZEN and the evaluator built from it is immutable, so sharing
-    is safe under ``pytest-randomly`` and ``pytest-xdist -n auto``.
-
-    WHAT SUCCESS MEANS HERE. Rendering ``base.template`` as its own target yields
-    a fragment that bash cannot parse, so the invocation's captured output
-    contains a syntax error and the ``source`` clause alone would return 2 - while
-    the invocation as a whole returns 0 and the generator writes a valid policy.
-    That is measured, expected, and left exactly as the oracle leaves it: nothing
-    is filtered, no ``set -e`` is added and the ``;`` separators are not changed
-    to ``&&``. ``ShellManifestCase.run_func`` checks the FINAL status and raises
-    ``BashInvocationError`` on a non-zero exit, which is the ``t.Fatalf`` of
-    configure_helper_test.go L120.
-
-    Yields:
-        The generated policy, its text and the invocation's combined output.
-
-    Raises:
-        tests.helpers.bash.BashInvocationError: if the generator exits non-zero
-            or times out. Aborts every dependent case, which is what
-            ``require.NoError`` does.
-        AuditPolicyError: if the generator wrote no file, or wrote something that
-            is not a valid ``audit.k8s.io/v1`` Policy.
-    """
-    package_dir = repo_root / "cluster" / "gce" / "gci"
-    base_dir = tmp_path_factory.mktemp("audit-policy")
-    renderer = KubeEnvRenderFactory(
-        package_dir=package_dir,
-        # Never written to: the bare shape renders into the CASE's own KUBE_HOME,
-        # which ManifestCaseFactory creates below and passes to write() explicitly.
-        # A directory is still required, and base_dir is the one this module owns.
-        kube_home=base_dir,
-        repo_root=repo_root,
-    )
-    factory = ManifestCaseFactory(
-        repo_root=repo_root,
-        package_dir=package_dir,
-        base_dir=base_dir,
-        renderer=renderer,
-    )
-    try:
-        # No `manifest=`: the BARE shape of audit_policy_test.go L54-58.
-        case = factory(func_name=AUDIT_POLICY_FUNC_NAME)
-        policy_file = case.kube_home / AUDIT_POLICY_FILE_NAME
-
-        # The port of L62-67. The render context carries the single field the Go
-        # struct literal sets, `kubeAPIServerEnv{KubeHome: c.kubeHome}`; rendering
-        # base.template as its own target dereferences no field at all, so this is
-        # the whole environment the oracle supplies. The output path travels as a
-        # POSITIONAL ARGUMENT and is never interpolated into the script text.
-        result = case.invoke_func(
-            {"KubeHome": os.fspath(case.kube_home)},
-            [CONFIGURE_HELPER_SCRIPT],
-            BASE_TEMPLATE_TARGET,
-            (BASE_TEMPLATE_RELATIVE_PATH,),
-            path_args=(policy_file,),
-            requirement=REQUIREMENT_ID,
-        )
-
-        text = _require_generated_policy_text(
-            policy_file, returncode=result.returncode, combined_output=result.stdout
-        )
-        # The port of L69-70: a load failure aborts, because 620 findings against
-        # a policy that did not load would all be about nothing.
-        policy = load_policy_from_file(policy_file)
-        yield GeneratedAuditPolicy(text=text, policy=policy, combined_output=result.stdout)
-    finally:
-        # The analogue of `defer c.tearDown()`: unconditional, so a failing test
-        # still gives its tree back instead of accumulating one per xdist worker.
-        factory.tear_down_all()
-
-
-@pytest.fixture(scope="module")
-def audit_policy_evaluator(generated_audit_policy: GeneratedAuditPolicy) -> PolicyRuleEvaluator:
+@functools.lru_cache(maxsize=1)
+def _evaluator_for(policy_text: str) -> PolicyRuleEvaluator:
     """The evaluator the 620 cases are judged by. Ports L127-130's ``auditTester``.
 
-    Built once and shared, exactly as the Go test builds one evaluator and hands
-    it to every subtest through the ``auditTester`` struct. Safe to share because
+    Built once and shared, exactly as the Go test builds one evaluator and hands it
+    to every subtest through the ``auditTester`` struct. Safe to share because
     :class:`PolicyRuleEvaluator` is immutable.
     """
-    return PolicyRuleEvaluator(generated_audit_policy.policy)
+    return PolicyRuleEvaluator(_loaded_policy(policy_text))
+
+
+@pytest.fixture(scope="module")
+def audit_policy_evaluator(
+    generated_audit_policy: GeneratedShellPolicy,
+) -> PolicyRuleEvaluator:
+    """The shared evaluator, as a fixture, for the cases that read it declaratively.
+
+    A thin wrapper over :func:`_evaluator_for` rather than a second construction
+    path: the memoised function is what guarantees the policy is parsed ONCE for
+    the whole module, and a fixture that built its own evaluator would quietly
+    reintroduce the 620-parse cost this module removed. Module-scoped for the same
+    reason, and safe to share because :class:`PolicyRuleEvaluator` is immutable -
+    which is also what keeps it correct under ``pytest-randomly`` and
+    ``pytest-xdist`` (AAP §0.7.2).
+    """
+    return _evaluator_for(generated_audit_policy.text)
 
 
 def _attributes_for(case: apc.AuditPolicyCase) -> RequestAttributes:
@@ -1360,6 +1565,9 @@ def test_case_matrix_shape_matches_the_oracle() -> None:
     The counts are compared against that module's literal constants rather than
     against numbers written here, because those literals were taken from the Go
     suite - so this is a comparison against the oracle and not against itself.
+    And every one of those literals is additionally re-derived FROM THE SHIPPED
+    ORACLE SOURCE by :func:`test_matrix_vocabulary_matches_the_go_source`, so no
+    number here rests on a comment claiming it was measured once.
     """
     assert len(_CASES) == apc.TOTAL_CASE_COUNT, (
         f"{REQUIREMENT_ID}: the shared case table expands to {len(_CASES)} cases, but the Go "
@@ -1370,10 +1578,12 @@ def test_case_matrix_shape_matches_the_oracle() -> None:
     assert len(apc.non_resource_cases()) == apc.NON_RESOURCE_CASE_COUNT
     assert apc.RESOURCE_CASE_COUNT + apc.NON_RESOURCE_CASE_COUNT == apc.TOTAL_CASE_COUNT
 
-    # The invocation table's own shape: 29 = 27 + 2, counted in the Go source with
-    # `grep -c 'at\\.testResources('` (27) and `grep -c 'at\\.testNonResources('`
-    # (2). Re-verified in this checkout; the plan's prose says 30 and 28, and the
-    # code is authoritative where code and prose disagree.
+    # The invocation table's own shape: INVOCATION_COUNT = RESOURCE_INVOCATION_COUNT
+    # + NON_RESOURCE_INVOCATION_COUNT, i.e. one record per `at.testResources(` and
+    # `at.testNonResources(` call site in audit_policy_test.go L132-183. The
+    # literals are NOT justified here by prose: the companion test below counts
+    # those call sites in the shipped Go file and requires them to agree, which is
+    # what turns "measured once during planning" into "measured on every run".
     assert len(apc.INVOCATIONS) == apc.INVOCATION_COUNT
     resource_invocations = [
         invocation
@@ -1383,6 +1593,80 @@ def test_case_matrix_shape_matches_the_oracle() -> None:
     assert len(resource_invocations) == apc.RESOURCE_INVOCATION_COUNT
     assert (
         len(apc.INVOCATIONS) - len(resource_invocations) == apc.NON_RESOURCE_INVOCATION_COUNT
+    )
+
+    # THE PUBLISHED VOCABULARY CARDINALITIES, each asserted against the collection
+    # it describes. Without these three the aggregate 620 could hold while the
+    # matrix's declared shape drifted underneath it - a fifteenth principal
+    # balanced by a dropped selector still expands to a different 620, and every
+    # id would shift with it.
+    assert len(apc.ALL_PRINCIPALS) == apc.PRINCIPAL_COUNT, (
+        f"{REQUIREMENT_ID}: the matrix declares {len(apc.ALL_PRINCIPALS)} principals but "
+        f"PRINCIPAL_COUNT is {apc.PRINCIPAL_COUNT}. The 14 principals are the `allUsers` slice "
+        "of audit_policy_test.go L89 and the user component of every one of the 620 ids."
+    )
+    assert len({principal.name for principal in apc.ALL_PRINCIPALS}) == apc.PRINCIPAL_COUNT, (
+        f"{REQUIREMENT_ID}: two principals share a name, so the id space collapses: the id is "
+        "`<user>.<verb>.<object>`, and a duplicated user silently re-points cases at one "
+        "another while keeping the total at 620."
+    )
+    assert len(apc.ALL_SELECTORS) == apc.SELECTOR_COUNT, (
+        f"{REQUIREMENT_ID}: the matrix declares {len(apc.ALL_SELECTORS)} resource selectors but "
+        f"SELECTOR_COUNT is {apc.SELECTOR_COUNT}. These are the `resource(...)` declarations of "
+        "audit_policy_test.go L94-116, and they carry the V6 boundary targets - secrets, "
+        "serviceaccounts/token, configmaps, tokenreviews and clusterroles."
+    )
+    assert len(apc.ALL_NON_RESOURCE_PATHS) == apc.NON_RESOURCE_PATH_COUNT, (
+        f"{REQUIREMENT_ID}: the matrix declares {len(apc.ALL_NON_RESOURCE_PATHS)} non-resource "
+        f"paths but NON_RESOURCE_PATH_COUNT is {apc.NON_RESOURCE_PATH_COUNT}. They are the two "
+        "five-path groups of audit_policy_test.go L164-165."
+    )
+    assert len(set(apc.ALL_NON_RESOURCE_PATHS)) == apc.NON_RESOURCE_PATH_COUNT, (
+        f"{REQUIREMENT_ID}: a non-resource path is repeated across the two groups, which would "
+        "make one group's expected level unreachable - Go reports the second occurrence as a "
+        "`#01` duplicate of the first, at whichever level came first."
+    )
+
+    # THE TWO FIVE-PATH GROUPS, asserted separately from their union. The split is
+    # load-bearing rather than cosmetic: the first group is expected at `None` and
+    # the second at `Metadata` (audit_policy_test.go L164 and L165), so moving one
+    # path between them changes 28 expected levels while leaving the count at 10.
+    assert len(apc.HEALTH_AND_VERSION_PATHS) == 5, (
+        f"{REQUIREMENT_ID}: the health/version group holds "
+        f"{len(apc.HEALTH_AND_VERSION_PATHS)} paths, expected 5 (audit_policy_test.go L164). "
+        "Every path in this group is expected at `None`."
+    )
+    assert len(apc.OBSERVABILITY_AND_DISCOVERY_PATHS) == 5, (
+        f"{REQUIREMENT_ID}: the observability/discovery group holds "
+        f"{len(apc.OBSERVABILITY_AND_DISCOVERY_PATHS)} paths, expected 5 "
+        "(audit_policy_test.go L165). Every path in this group is expected at `Metadata`."
+    )
+    assert not set(apc.HEALTH_AND_VERSION_PATHS) & set(apc.OBSERVABILITY_AND_DISCOVERY_PATHS), (
+        f"{REQUIREMENT_ID}: the two non-resource groups overlap. They carry DIFFERENT expected "
+        "levels - `None` and `Metadata` - so a shared path would assert both at once."
+    )
+
+    # The non-resource arithmetic, spelled out because it is the half of the 620
+    # that no selector participates in: `testNonResources` (audit_policy_test.go
+    # L230-243) hardcodes its own two verbs and loops users x verbs x paths.
+    assert len(apc.NON_RESOURCE_VERBS) == 2, (
+        f"{REQUIREMENT_ID}: `testNonResources` hardcodes exactly the two verbs "
+        f"{list(apc.NON_RESOURCE_VERBS)} at audit_policy_test.go L232; the matrix declares "
+        f"{len(apc.NON_RESOURCE_VERBS)}."
+    )
+    assert (
+        apc.NON_RESOURCE_INVOCATION_COUNT
+        * apc.PRINCIPAL_COUNT
+        * len(apc.NON_RESOURCE_VERBS)
+        * len(apc.HEALTH_AND_VERSION_PATHS)
+        == apc.NON_RESOURCE_CASE_COUNT
+    ), (
+        f"{REQUIREMENT_ID}: the non-resource product "
+        f"{apc.NON_RESOURCE_INVOCATION_COUNT} invocations x {apc.PRINCIPAL_COUNT} principals x "
+        f"{len(apc.NON_RESOURCE_VERBS)} verbs x {len(apc.HEALTH_AND_VERSION_PATHS)} paths does "
+        f"not equal NON_RESOURCE_CASE_COUNT ({apc.NON_RESOURCE_CASE_COUNT}). Both non-resource "
+        "invocations pass all 14 principals and a five-path group, so 2x14x2x5 = 280 is the "
+        "only shape that reconciles with the 620 total."
     )
 
     # The port of L207-209: `testResources` refuses a call with no verb, no user
@@ -1417,8 +1701,118 @@ def test_case_matrix_shape_matches_the_oracle() -> None:
     assert len({case.base_name for case in _CASES}) == apc.UNIQUE_BASE_NAME_COUNT
 
 
+def test_matrix_vocabulary_matches_the_go_source(repo_root: Path) -> None:
+    """Every published matrix cardinality is re-counted in the shipped Go oracle.
+
+    INVARIANT LOCKED: the matrix's declared shape is the shape
+    ``cluster/gce/gci/audit_policy_test.go`` actually has - on every run, not once
+    during planning. :func:`test_case_matrix_shape_matches_the_oracle` compares the
+    Python matrix against the fixture module's literals; this test compares those
+    literals against the ORACLE ITSELF, so the pair closes the loop and neither
+    side can drift without a named failure.
+
+    WHY THIS EXISTS. The four cardinalities below were previously justified by a
+    comment saying they had been counted and that "the code is authoritative"
+    where the plan's prose disagreed. A comment cannot fail, so a later edit to
+    either the Go table or the fixture would have been caught only if it also
+    changed the 620 aggregate - and a fifteenth principal balanced by a dropped
+    selector does not. Reading the oracle here makes the disagreement itself
+    executable: if the Go source ever holds 28 resource invocations or 24
+    selectors, THIS test names the difference, rather than the suite silently
+    asserting one shape while the oracle has another.
+
+    READ-ONLY, AND TEXTUAL BY NECESSITY. The oracle is a Go file and this tier has
+    no Go parser, so the count is a line-oriented scan for the four declaration
+    forms the file uses: ``at.testResources(`` and ``at.testNonResources(`` call
+    sites, ``= resource(`` selector declarations, and the ``allUsers = []user.Info``
+    roster. Each pattern is anchored on the spelling the file actually uses, and a
+    reformatting that broke a pattern would fail loudly here rather than silently
+    counting zero - the assertions are equalities against non-zero expectations.
+
+    ABORT semantics: a mismatch invalidates every one of the 620 per-case
+    expectations, so this is setup breakage and uses bare asserts.
+    """
+    oracle = repo_root / "cluster" / "gce" / "gci" / "audit_policy_test.go"
+    assert oracle.is_file(), (
+        f"{REQUIREMENT_ID}: the Go oracle {oracle} is missing. It is the source of every "
+        "expectation in this module and is READ-ONLY input; it must never be moved, renamed or "
+        "deleted (AAP §0.8.2 keeps the DELETE column of the transformation map empty)."
+    )
+    lines = oracle.read_text(encoding="utf-8").splitlines()
+
+    resource_call_sites = [line for line in lines if "at.testResources(" in line]
+    non_resource_call_sites = [line for line in lines if "at.testNonResources(" in line]
+    # `nodes = resource("nodes")` and its 22 siblings, all inside the single `var`
+    # block at L94-116. `resource(` also appears in the helper's own declaration at
+    # L276, which is why the pattern requires the assignment.
+    selector_declarations = [line for line in lines if "= resource(" in line]
+    principal_rosters = [line for line in lines if "allUsers = []user.Info{" in line]
+
+    assert len(resource_call_sites) == apc.RESOURCE_INVOCATION_COUNT, (
+        f"{REQUIREMENT_ID}: the Go oracle makes {len(resource_call_sites)} `at.testResources(` "
+        f"calls but the matrix declares RESOURCE_INVOCATION_COUNT="
+        f"{apc.RESOURCE_INVOCATION_COUNT}. Re-measure both and reconcile against the "
+        f"{apc.TOTAL_CASE_COUNT}-case total, which is the parity key: an invocation gained or "
+        "lost changes which cases exist, not merely how many."
+    )
+    assert len(non_resource_call_sites) == apc.NON_RESOURCE_INVOCATION_COUNT, (
+        f"{REQUIREMENT_ID}: the Go oracle makes {len(non_resource_call_sites)} "
+        f"`at.testNonResources(` calls but the matrix declares NON_RESOURCE_INVOCATION_COUNT="
+        f"{apc.NON_RESOURCE_INVOCATION_COUNT}."
+    )
+    assert (
+        len(resource_call_sites) + len(non_resource_call_sites) == apc.INVOCATION_COUNT
+    ), (
+        f"{REQUIREMENT_ID}: the Go oracle makes "
+        f"{len(resource_call_sites) + len(non_resource_call_sites)} invocations in total but the "
+        f"matrix declares INVOCATION_COUNT={apc.INVOCATION_COUNT}."
+    )
+    assert len(selector_declarations) == apc.SELECTOR_COUNT, (
+        f"{REQUIREMENT_ID}: the Go oracle declares {len(selector_declarations)} `resource(...)` "
+        f"selectors but the matrix declares SELECTOR_COUNT={apc.SELECTOR_COUNT}. A selector "
+        "added to the oracle without being ported here would leave its cases unasserted "
+        "entirely."
+    )
+    assert len(principal_rosters) == 1, (
+        f"{REQUIREMENT_ID}: expected exactly one `allUsers = []user.Info{{` roster in the Go "
+        f"oracle, found {len(principal_rosters)}. The principal vocabulary is read from that "
+        "one line (L89)."
+    )
+    # The roster is a single line listing every principal local, so the entry count
+    # is the number of comma-separated names between the braces.
+    roster = principal_rosters[0].split("{", 1)[1].rsplit("}", 1)[0]
+    roster_entries = [entry.strip() for entry in roster.split(",") if entry.strip()]
+    assert len(roster_entries) == apc.PRINCIPAL_COUNT, (
+        f"{REQUIREMENT_ID}: the Go oracle's `allUsers` roster lists {len(roster_entries)} "
+        f"principals but the matrix declares PRINCIPAL_COUNT={apc.PRINCIPAL_COUNT}. Every "
+        "non-resource case is expanded over that roster, so its size scales 280 of the "
+        f"{apc.TOTAL_CASE_COUNT} cases."
+    )
+    # Both `testNonResources` call sites pass a five-path group, which is what makes
+    # 2 x 14 x 2 x 5 = 280. Counted as the string arguments after the level and the
+    # user slice: `at.testNonResources(level, allUsers, "/p1", ... "/p5")`.
+    for line in non_resource_call_sites:
+        paths = [token for token in line.split('"') if token.startswith("/")]
+        assert len(paths) == len(apc.HEALTH_AND_VERSION_PATHS), (
+            f"{REQUIREMENT_ID}: a `at.testNonResources(` call site passes {len(paths)} paths, "
+            f"expected {len(apc.HEALTH_AND_VERSION_PATHS)}. Both groups are five paths wide in "
+            f"the oracle; the offending line is: {line.strip()!r}"
+        )
+    oracle_paths = [
+        token
+        for line in non_resource_call_sites
+        for token in line.split('"')
+        if token.startswith("/")
+    ]
+    assert sorted(oracle_paths) == sorted(apc.ALL_NON_RESOURCE_PATHS), (
+        f"{REQUIREMENT_ID}: the non-resource paths in the Go oracle are {sorted(oracle_paths)} "
+        f"but the matrix declares {sorted(apc.ALL_NON_RESOURCE_PATHS)}. A path that differs by "
+        "one character asserts a level for a request the API server never sees."
+    )
+
+
 def test_generated_policy_has_the_shape_the_oracle_loads(
-    generated_audit_policy: GeneratedAuditPolicy,
+    generated_audit_policy: GeneratedShellPolicy,
     subtests: pytest.Subtests,
 ) -> None:
     """The shipped generator wrote a loadable ``audit.k8s.io/v1`` Policy.
@@ -1429,7 +1823,7 @@ def test_generated_policy_has_the_shape_the_oracle_loads(
     assertion conditional rather than unconditional.
 
     The document is re-decoded from the bytes the generator WROTE rather than
-    read back off :attr:`GeneratedAuditPolicy.policy`, which would only prove the
+    read back off the loaded policy, which would only prove the
     loader self-consistent.
 
     Per-rule findings ACCUMULATE: eight rules must each carry
@@ -1454,7 +1848,7 @@ def test_generated_policy_has_the_shape_the_oracle_loads(
         "changes which rule intercepts a request."
     )
 
-    policy = generated_audit_policy.policy
+    policy = _loaded_policy(generated_audit_policy.text)
     assert len(policy.rules) == GENERATED_RULE_COUNT
     assert policy.omit_stages == (), (
         f"{REQUIREMENT_ID}: the generated policy must declare no policy-level omitStages, got "
@@ -1528,7 +1922,7 @@ def test_typed_attributes_agree_with_the_shared_mapping() -> None:
 @pytest.mark.parametrize("case", _CASES, ids=_CASE_IDS)
 def test_audit_level(
     case: apc.AuditPolicyCase,
-    audit_policy_evaluator: PolicyRuleEvaluator,
+    generated_audit_policy: GeneratedShellPolicy,
     subtests: pytest.Subtests,
 ) -> None:
     """One request, evaluated against the shipped policy. Ports ``expectLevel``.
@@ -1570,7 +1964,7 @@ def test_audit_level(
     unioned stage list from a map, so order carries no meaning and asserting on
     it would assert an implementation detail.
     """
-    config = audit_policy_evaluator.evaluate(_attributes_for(case))
+    config = _evaluator_for(generated_audit_policy.text).evaluate(_attributes_for(case))
 
     with subtests.test(case=case.id, assertion="level"):
         assert config.level == case.level.wire, _level_failure(case, config)
@@ -1583,79 +1977,445 @@ def test_audit_level(
 
 
 # ---------------------------------------------------------------------------
-# The V6 boundary, spelled out in one place
+# The differential: this evaluator against the PRODUCTION Go evaluator
 # ---------------------------------------------------------------------------
-# The 620 cases already cover every one of these, spread across the matrix. This
-# probe exists so that the five values AAP §0.10.2 tabulates as "boundary
-# conditions that must port unchanged" are ALSO asserted somewhere a reader can
-# find them, driven from the shared SENSITIVE_RESOURCE_LEVELS mapping rather than
-# from levels written here.
+# WHY THIS IS NEEDED AT ALL. Every assertion above runs the ported
+# :class:`PolicyRuleEvaluator`, so on its own the matrix proves that the shipped
+# policy plus THIS port yield the expected levels. It does not, by itself, prove
+# that the port and ``auditpolicy.NewPolicyRuleEvaluator`` agree -- a port with a
+# matching defect in both the evaluator and an expectation would pass.
 #
-# The verb is part of each probe and is not interchangeable: the policy's
-# "known APIs" rules split get/list/watch (Request) from everything else
-# (RequestResponse), so `clusterroles` reaches RequestResponse only under a
-# mutating verb. Every probe uses the `default` ServiceAccount, which is the
-# principal the corresponding Go invocation uses.
+# WHAT CLOSES IT, WITHOUT ADDING A GO FILE. The committed baseline manifest
+# `tests/parity/baseline/go_baseline.json` is the reduced output of a real
+# `go test -json` run, so each of its 620 `TestCreateMasterAuditPolicy/<name>`
+# rows is a verdict the PRODUCTION evaluator produced. A Go subtest passes exactly
+# when `assert.Equal(t, expected, auditConfig.Level)` held (audit_policy_test.go
+# L258), and `expected` there is the level this suite transcribes into
+# `tests.fixtures.audit_policy_cases`. So:
+#
+#   Go recorded pass for case X       => Go's evaluator returned expected[X]
+#   test_audit_level passes for X     => this evaluator returned expected[X]
+#   identities are 1:1 and complete   => no case is unaccounted for
+#   ------------------------------------------------------------------------
+#   therefore the two evaluators agree on all 620 inputs.
+#
+# The third line is what this test contributes, and it is the line that cannot be
+# skipped: a differential over a subset is not a differential. AAP §0.5 fixes the
+# file inventory and names no new `.go` file, so a purpose-built Go differential
+# program is not available to this workstream; reading the recorded output of the
+# production evaluator is, and it is the same evidence.
 
-_SENSITIVE_BOUNDARY_PROBES: Final[
-    tuple[tuple[apc.ResourceSelector, str, int], ...]
-] = (
-    # Go L178: at.testResources(request, defaultSA, ..., "get", ..., secrets)
-    (apc.SECRETS, "get", 178),
-    # Go L179: at.testResources(request, defaultSA, apiserver, "create", saTokens)
-    (apc.SA_TOKENS, "create", 179),
-    # Go L177: at.testResources(metadata, defaultSA, ..., "get", ..., configmaps, ...)
-    (apc.CONFIGMAPS, "get", 177),
-    # Go L177, same invocation: ... tokenReviews
-    (apc.TOKEN_REVIEWS, "get", 177),
-    # Go L181: at.testResources(response, defaultSA, ..., "create", ..., clusterRoles, ...)
-    (apc.CLUSTER_ROLES, "create", 181),
+#: The committed baseline manifest, relative to the repository root.
+_GO_BASELINE_RELATIVE_PATH: Final[tuple[str, ...]] = (
+    "python",
+    "tests",
+    "parity",
+    "baseline",
+    "go_baseline.json",
 )
 
+#: The Go package and top-level identity whose subtests this module ports.
+_GO_BASELINE_PACKAGE: Final[str] = "k8s.io/kubernetes/cluster/gce/gci"
+_GO_BASELINE_TEST: Final[str] = "TestCreateMasterAuditPolicy"
 
-def test_sensitive_resources_sit_at_exactly_their_documented_level(
+
+def test_the_go_oracle_recorded_the_same_620_verdicts(
+    repo_root: Path,
     audit_policy_evaluator: PolicyRuleEvaluator,
     subtests: pytest.Subtests,
 ) -> None:
-    """The five V6 boundary values, asserted in one legible place.
+    """The DIFFERENTIAL against the production Go evaluator, over all 620 identities.
 
-    INVARIANT LOCKED: ``secrets`` ``Request``; ``serviceaccounts/token``
-    ``Request``; ``configmaps`` ``Metadata``; ``tokenreviews`` ``Metadata``;
-    ``clusterroles`` ``RequestResponse``. EXACTLY those, in both directions.
-    Raising ``secrets`` to ``RequestResponse`` would make the API server log
-    secret bodies and issued bearer tokens; lowering it to ``Metadata`` would
-    give up the forensic detail the V6 remediation restored. Both directions are
-    silent, which is why the expected values live in one reviewed place -
-    ``tests.fixtures.audit_policy_cases.SENSITIVE_RESOURCE_LEVELS`` - and are
-    read from there here.
+    INVARIANT LOCKED: this module's ported evaluator and
+    ``auditpolicy.NewPolicyRuleEvaluator`` agree on every request the Go oracle
+    exercises -- established through the verdicts the production evaluator actually
+    produced, read out of the committed baseline manifest, rather than through a
+    re-implementation asserting against itself.
 
-    Findings accumulate: five boundaries, and a reader must see all of them.
+    Four assertions, and the first three are what make the fourth mean anything:
+
+    1. COMPLETENESS in one direction: every recorded Go subtest identity has a
+       Python counterpart. A Go case with no counterpart is a behaviour this port
+       silently dropped.
+    2. COMPLETENESS in the other: every Python case id appears in the recording. A
+       Python case with no Go counterpart is an expectation nobody else holds, and
+       it would make the differential a subset comparison.
+    3. Every recorded verdict is ``pass``. If Go recorded a failure the manifest
+       would be describing a broken oracle, and "the two agree" would be a claim
+       about two broken things.
+    4. This evaluator returns the transcribed level for the same identity. With 1-3
+       in place, that is agreement between the two evaluators.
+
+    Findings accumulate per identity, because a divergence is normally a class of
+    cases rather than one, and the shape of the class is the diagnosis.
     """
-    probed = {selector.policy_resource for selector, _verb, _line in _SENSITIVE_BOUNDARY_PROBES}
-    assert probed == set(apc.SENSITIVE_RESOURCE_LEVELS), (
-        f"{REQUIREMENT_ID}: the probes cover {sorted(probed)} but the documented boundary is "
-        f"{sorted(apc.SENSITIVE_RESOURCE_LEVELS)}. Every documented sensitive resource must be "
-        "probed here."
+    manifest_path = repo_root.joinpath(*_GO_BASELINE_RELATIVE_PATH)
+    assert manifest_path.is_file(), (
+        f"{REQUIREMENT_ID}: SETUP BREAKAGE - the committed baseline manifest is missing at "
+        f"{manifest_path}. It is the recorded output of the PRODUCTION Go evaluator and the "
+        f"only evidence in this tier that the ported evaluator agrees with it; regenerate it "
+        f"with python/tests/parity/tools/generate_baseline.py."
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    recorded: dict[str, str] = {
+        str(row["subtest"]): str(row["action"])
+        for row in manifest["verdicts"]
+        if row["package"] == _GO_BASELINE_PACKAGE
+        and row["test"] == _GO_BASELINE_TEST
+        and row["subtest"]
+    }
+    expected_by_id = {case.id: case for case in _CASES}
+
+    # 1 and 2: the identity sets must be equal, and each direction is a different
+    # defect, so each is reported separately.
+    missing_from_python = sorted(set(recorded) - set(expected_by_id))
+    assert not missing_from_python, (
+        f"{REQUIREMENT_ID}: {len(missing_from_python)} Go subtest identity/identities recorded "
+        f"in the baseline have no counterpart in this module, so their behaviour is not ported "
+        f"at all: {missing_from_python[:10]}"
+        f"{' ...' if len(missing_from_python) > 10 else ''}"
+    )
+    missing_from_go = sorted(set(expected_by_id) - set(recorded))
+    assert not missing_from_go, (
+        f"{REQUIREMENT_ID}: {len(missing_from_go)} case(s) in this module have no recorded Go "
+        f"verdict, so the differential would be a subset comparison rather than a proof: "
+        f"{missing_from_go[:10]}{' ...' if len(missing_from_go) > 10 else ''}"
+    )
+    assert len(recorded) == apc.RESOURCE_CASE_COUNT + apc.NON_RESOURCE_CASE_COUNT, (
+        f"{REQUIREMENT_ID}: the baseline records {len(recorded)} subtests for "
+        f"{_GO_BASELINE_TEST} but the measured matrix is "
+        f"{apc.RESOURCE_CASE_COUNT + apc.NON_RESOURCE_CASE_COUNT} cases. An equal-but-shrunken "
+        f"pair of sets would still satisfy the two assertions above."
     )
 
-    for selector, verb, go_line in _SENSITIVE_BOUNDARY_PROBES:
-        expected = apc.SENSITIVE_RESOURCE_LEVELS[selector.policy_resource]
-        attrs = RequestAttributes(
-            user=apc.DEFAULT_SA.name,
-            groups=apc.DEFAULT_SA.groups,
-            verb=verb,
-            namespace=selector.namespace,
-            api_group=selector.group,
-            api_version=apc.API_VERSION,
-            resource=selector.resource,
-            subresource=selector.subresource,
-            resource_request=True,
+    # 3 and 4, per identity.
+    for case_id, action in sorted(recorded.items()):
+        case = expected_by_id[case_id]
+        with subtests.test(case=case_id):
+            assert action == "pass", (
+                f"{REQUIREMENT_ID}: the Go oracle recorded {action!r} for {case_id!r}. The "
+                f"differential compares this evaluator against a GREEN oracle; a recorded "
+                f"failure means the manifest describes a broken oracle, so agreement with it "
+                f"would prove nothing."
+            )
+            config = audit_policy_evaluator.evaluate(_attributes_for(case))
+            assert config.level == case.level.wire, (
+                f"{REQUIREMENT_ID}: DIVERGENCE from the production evaluator for {case_id!r}. "
+                f"Go recorded a pass, which means auditpolicy.NewPolicyRuleEvaluator returned "
+                f"{case.level.wire!r} (audit_policy_test.go L258 asserts equality against that "
+                f"value); this module's PolicyRuleEvaluator returned {config.level!r} for the "
+                f"same request against the same generated policy. One of the two ports -- "
+                f"reader.go or checker.go -- has diverged."
+            )
+
+
+# ---------------------------------------------------------------------------
+# The V6 boundary, as an EXHAUSTIVE CLOSED-SET PARTITION
+# ---------------------------------------------------------------------------
+# WHAT WAS HERE BEFORE, AND WHY IT WAS NOT ENOUGH. This section used to hold five
+# probes - one `(resource, verb)` pair per sensitive resource - each asserting that
+# the pair sat at the resource's headline level. Every probe passed, and every
+# probe had been chosen from a COMPLIANT row: `configmaps` under `get` in the
+# `default` namespace (Metadata) while three kube-system rows in the same matrix
+# sit at `None`, and `clusterroles` under `create` (RequestResponse) while twelve
+# read rows sit at `Request`. A boundary stated as five compliant rows is not a
+# boundary: it cannot distinguish "the rule holds" from "at least one row happens
+# to satisfy it", and it says nothing at all about the rows that do not.
+#
+# WHAT REPLACES IT. The complete partition, asserted over EVERY sensitive-resource
+# case in the matrix, with both exceptions promoted from prose into data that is
+# itself asserted for EQUALITY:
+#
+#   secrets                17 cases -> Request,         no exceptions
+#   serviceaccounts/token   2 cases -> Request,         no exceptions
+#   tokenreviews           12 cases -> Metadata,        no exceptions
+#   configmaps             35 cases -> Metadata, EXCEPT exactly the 3 triples in
+#                                     apc.KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS -> None
+#   clusterroles           28 cases -> RequestResponse, EXCEPT the 12 whose verb is
+#                                     in apc.KNOWN_API_READ_VERBS -> Request
+#
+# 94 cases, every one of them classified by `apc.required_sensitive_level`, and the
+# per-resource per-level cardinality pinned by `apc.SENSITIVE_RESOURCE_PARTITION`
+# so an exhaustive check cannot become vacuous by losing cases.
+#
+# THE EXPECTED LEVELS ARE NOT READ FROM `case.level`. They are computed from the
+# partition and compared against what the SHIPPED POLICY's evaluator returns, so
+# this is an independent statement about the artefact rather than a restatement of
+# the transcription. `test_case_matrix_shape_matches_the_oracle` separately proves
+# the transcription itself, and the two agreeing is what makes either meaningful.
+
+
+def _sensitive_resource_cases() -> tuple[apc.AuditPolicyCase, ...]:
+    """Every case in the matrix whose resource is one of the five sensitive ones."""
+    return tuple(
+        case
+        for case in _CASES
+        if case.selector is not None
+        and case.selector.policy_resource in apc.SENSITIVE_RESOURCE_PARTITION
+    )
+
+
+def test_the_sensitive_resource_partition_holds_for_every_case(
+    audit_policy_evaluator: PolicyRuleEvaluator,
+    subtests: pytest.Subtests,
+) -> None:
+    """INVARIANT LOCKED: **F-006-RQ-001** over the WHOLE sensitive-resource surface.
+
+    Every one of the 94 sensitive-resource requests in the matrix is evaluated
+    against the shipped policy and required to sit at EXACTLY the level
+    :func:`tests.fixtures.audit_policy_cases.required_sensitive_level` assigns it.
+    Exactly, in both directions: raising ``secrets`` to ``RequestResponse`` would
+    make the API server log secret bodies and issued bearer tokens, and lowering it
+    to ``Metadata`` would give up the forensic detail the V6 remediation restored.
+    Both are silent failures, which is why the expected value is computed rather
+    than probed.
+
+    Findings ACCUMULATE, one subtest per case, because a partition that has drifted
+    has usually drifted in more than one place and a reader needs the whole shape
+    of the drift rather than its alphabetically first instance.
+    """
+    sensitive = _sensitive_resource_cases()
+
+    # A vacuity guard first. An exhaustive assertion over an empty or shrunken set
+    # is worse than no assertion, because it looks complete.
+    expected_total = sum(
+        count
+        for levels in apc.SENSITIVE_RESOURCE_PARTITION.values()
+        for count in levels.values()
+    )
+    assert len(sensitive) == expected_total, (
+        f"{REQUIREMENT_ID}: the matrix holds {len(sensitive)} sensitive-resource cases but the "
+        f"measured partition accounts for {expected_total}. An exhaustive boundary check over "
+        f"the wrong number of cases proves nothing, so this is setup breakage rather than a "
+        f"finding: re-measure the partition in tests/fixtures/audit_policy_cases.py."
+    )
+
+    for case in sensitive:
+        assert case.selector is not None  # narrowed by _sensitive_resource_cases
+        resource = case.selector.policy_resource
+        required = apc.required_sensitive_level(
+            resource, case.principal.name, case.verb, case.selector.namespace
         )
-        with subtests.test(resource=selector.policy_resource, verb=verb):
-            config = audit_policy_evaluator.evaluate(attrs)
-            assert config.level == expected.wire, (
-                f"{REQUIREMENT_ID}: {selector.policy_resource!r} under verb {verb!r} is recorded "
-                f"at {config.level!r} but must be recorded at EXACTLY {expected.wire!r} "
+        with subtests.test(case=case.id):
+            config = audit_policy_evaluator.evaluate(_attributes_for(case))
+            assert config.level == required.wire, (
+                f"{REQUIREMENT_ID}: {resource!r} requested by {case.principal.name!r} with verb "
+                f"{case.verb!r} in namespace {case.selector.namespace!r} is recorded at "
+                f"{config.level!r} but the V6 boundary requires EXACTLY {required.wire!r} "
+                f"(declared at cluster/gce/gci/audit_policy_test.go L{case.go_line}). "
+                f"The complete partition, including both of its exception sets, is "
+                f"tests.fixtures.audit_policy_cases.required_sensitive_level."
+            )
+
+
+def test_the_sensitive_resource_partition_cardinality_is_exact(
+    audit_policy_evaluator: PolicyRuleEvaluator,
+    subtests: pytest.Subtests,
+) -> None:
+    """INVARIANT LOCKED: how MANY cases sit at each level, per resource.
+
+    The case-by-case assertion above cannot see a case that has disappeared, and it
+    cannot see one that has migrated from the rule to the exception while its own
+    expectation migrated with it. Counting closes both: the levels the SHIPPED
+    POLICY actually assigns are tallied per resource and compared against the
+    measured partition.
+
+    The tally is built from the evaluator's answers rather than from
+    ``required_sensitive_level``, so this is not a tautology - if the shipped policy
+    moved twelve ``clusterroles`` reads up to ``RequestResponse``, the count changes
+    here even though the total stays 28.
+    """
+    observed: dict[str, collections.Counter[str]] = collections.defaultdict(
+        collections.Counter
+    )
+    for case in _sensitive_resource_cases():
+        assert case.selector is not None
+        config = audit_policy_evaluator.evaluate(_attributes_for(case))
+        observed[case.selector.policy_resource][config.level] += 1
+
+    for resource, expected_levels in apc.SENSITIVE_RESOURCE_PARTITION.items():
+        with subtests.test(resource=resource):
+            assert dict(observed[resource]) == dict(expected_levels), (
+                f"{REQUIREMENT_ID}: the shipped policy records {resource!r} as "
+                f"{dict(observed[resource])} across the matrix, but the measured V6 partition "
+                f"is {dict(expected_levels)}. A changed count means cases moved between the "
+                f"rule and its exception, which is the shape a silent widening takes."
+            )
+
+
+def test_the_kube_system_configmap_exemption_is_exactly_the_enumerated_set(
+    audit_policy_evaluator: PolicyRuleEvaluator,
+) -> None:
+    """INVARIANT LOCKED: the ONLY sensitive requests recorded at ``None``.
+
+    THE EXEMPTION THAT MUST NOT WIDEN. Three ``configmaps`` requests in the whole
+    620-case matrix are dropped rather than recorded, because two principals poll
+    kube-system configmaps at a volume the generator drops
+    (audit_policy_test.go L135 and L158). That is a deliberate, reviewed narrowing,
+    and the way a deliberate narrowing becomes an accidental one is by widening a
+    case at a time while a prose note keeps describing the original three.
+
+    So the exemption is asserted as SET EQUALITY against the evaluator's own
+    answers: a fourth dropped case fails, a removed one fails, and a principal,
+    verb or namespace that drifts fails. Bare asserts rather than subtests -- a
+    changed exemption set invalidates the partition above, so there is nothing to
+    accumulate alongside it.
+
+    The scoping control is asserted too: the same two principals reading
+    ``configmaps`` in the DEFAULT namespace must still be recorded at ``Metadata``
+    (Go L136, L159). Without it the exemption could grow to cover the principal
+    everywhere while this test still saw exactly three kube-system triples.
+    """
+    dropped: set[tuple[str, str, str]] = set()
+    for case in _sensitive_resource_cases():
+        assert case.selector is not None
+        config = audit_policy_evaluator.evaluate(_attributes_for(case))
+        if config.level == apc.AuditLevel.NONE.wire:
+            dropped.add((case.principal.name, case.verb, case.selector.namespace))
+
+    assert dropped == set(apc.KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS), (
+        f"{REQUIREMENT_ID}: the shipped policy drops {sorted(dropped)} among sensitive "
+        f"resources, but the reviewed exemption is exactly "
+        f"{sorted(apc.KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS)} -- the high-volume kube-system "
+        f"configmaps polling recorded at audit_policy_test.go L135 and L158. Any addition is "
+        f"a new blind spot in the audit record; any removal is a change to the shipped "
+        f"generator's behaviour."
+    )
+    assert all(namespace == "kube-system" for _user, _verb, namespace in dropped), (
+        f"{REQUIREMENT_ID}: a sensitive-resource request outside kube-system is being dropped: "
+        f"{sorted(dropped)}. The exemption exists for kube-system polling volume and must "
+        f"never escape that namespace."
+    )
+
+    # THE SCOPING CONTROL. The same principals in the `default` namespace stay at
+    # Metadata, which is what proves the exemption is about the namespace rather
+    # than about the principal.
+    for principal_name, verb, _namespace in sorted(apc.KUBE_SYSTEM_CONFIGMAP_EXEMPTIONS):
+        principal = next(
+            candidate for candidate in apc.ALL_PRINCIPALS if candidate.name == principal_name
+        )
+        config = audit_policy_evaluator.evaluate(
+            RequestAttributes(
+                user=principal.name,
+                groups=principal.groups,
+                verb=verb,
+                namespace=apc.CONFIGMAPS.namespace,
+                api_group=apc.CONFIGMAPS.group,
+                api_version=apc.API_VERSION,
+                resource=apc.CONFIGMAPS.resource,
+                subresource=apc.CONFIGMAPS.subresource,
+                resource_request=True,
+            )
+        )
+        assert config.level == apc.AuditLevel.METADATA.wire, (
+            f"{REQUIREMENT_ID}: {principal_name!r} performing {verb!r} on configmaps in "
+            f"{apc.CONFIGMAPS.namespace!r} is recorded at {config.level!r}, but must be "
+            f"{apc.AuditLevel.METADATA.wire!r} (audit_policy_test.go L136, L159). The "
+            f"kube-system exemption has escaped its namespace."
+        )
+
+
+def test_clusterroles_reads_and_writes_are_split_at_exactly_the_known_api_verbs(
+    audit_policy_evaluator: PolicyRuleEvaluator,
+    subtests: pytest.Subtests,
+) -> None:
+    """INVARIANT LOCKED: which verbs put an RBAC object at ``RequestResponse``.
+
+    AAP §0.10.2 records ``clusterroles`` at exactly ``RequestResponse``, and the
+    generated policy delivers that for every MUTATING verb while lowering
+    ``get``/``list``/``watch`` to ``Request`` one rule earlier because those
+    responses can be large (audit_policy_test.go L180 versus L181). Both halves
+    matter and each fails silently on its own: a write recorded at ``Request``
+    loses the resulting authorization surface from the audit record, and a read
+    promoted to ``RequestResponse`` starts logging whole ClusterRole listings.
+
+    The split is asserted at the VERB, over every clusterroles case, so it is the
+    boundary itself that is locked rather than one example of it on each side.
+    """
+    for case in _sensitive_resource_cases():
+        assert case.selector is not None
+        if case.selector.policy_resource != "clusterroles":
+            continue
+        reading = case.verb in apc.KNOWN_API_READ_VERBS
+        required = apc.AuditLevel.REQUEST if reading else apc.AuditLevel.RESPONSE
+        with subtests.test(verb=case.verb, case=case.id):
+            config = audit_policy_evaluator.evaluate(_attributes_for(case))
+            assert config.level == required.wire, (
+                f"{REQUIREMENT_ID}: clusterroles under verb {case.verb!r} is recorded at "
+                f"{config.level!r}; a "
+                f"{'read' if reading else 'mutating verb'} must be recorded at "
+                f"{required.wire!r} (audit_policy_test.go "
+                f"L{180 if reading else 181})."
+            )
+
+
+def test_the_headline_mapping_is_the_partition_rule_not_a_cherry_picked_row(
+    audit_policy_evaluator: PolicyRuleEvaluator,
+    subtests: pytest.Subtests,
+) -> None:
+    """The flat ``SENSITIVE_RESOURCE_LEVELS`` mapping is kept honest.
+
+    That mapping is what the L2 integration module reads to check the level of an
+    observed audit event, so it has to state the RULE rather than a value that
+    happens to hold somewhere. Here each entry is required to be the level the
+    partition assigns to a NON-EXEMPT request for that resource -- for
+    ``configmaps`` a namespace outside the exemption, for ``clusterroles`` a
+    mutating verb -- and to be the level the shipped policy actually returns for it.
+
+    It also asserts that the mapping's key set is exactly the partition's, so a
+    sixth sensitive resource cannot be added to one and forgotten in the other.
+    """
+    assert set(apc.SENSITIVE_RESOURCE_LEVELS) == set(apc.SENSITIVE_RESOURCE_PARTITION), (
+        f"{REQUIREMENT_ID}: SENSITIVE_RESOURCE_LEVELS covers "
+        f"{sorted(apc.SENSITIVE_RESOURCE_LEVELS)} but the partition covers "
+        f"{sorted(apc.SENSITIVE_RESOURCE_PARTITION)}. The two must name the same resources."
+    )
+
+    # One non-exempt representative per resource: the `default` ServiceAccount, a
+    # mutating verb, and the resource's own selector. Every one of these is a real
+    # row of the matrix (Go L177-L181).
+    representatives: tuple[tuple[apc.ResourceSelector, str, int], ...] = (
+        (apc.SECRETS, "create", 178),
+        (apc.SA_TOKENS, "create", 179),
+        (apc.CONFIGMAPS, "create", 177),
+        (apc.TOKEN_REVIEWS, "create", 177),
+        (apc.CLUSTER_ROLES, "create", 181),
+    )
+    covered = {selector.policy_resource for selector, _verb, _line in representatives}
+    assert covered == set(apc.SENSITIVE_RESOURCE_LEVELS), (
+        f"{REQUIREMENT_ID}: the representatives cover {sorted(covered)}, not "
+        f"{sorted(apc.SENSITIVE_RESOURCE_LEVELS)}."
+    )
+
+    for selector, verb, go_line in representatives:
+        resource = selector.policy_resource
+        headline = apc.SENSITIVE_RESOURCE_LEVELS[resource]
+        required = apc.required_sensitive_level(
+            resource, apc.DEFAULT_SA.name, verb, selector.namespace
+        )
+        with subtests.test(resource=resource, verb=verb):
+            assert required == headline, (
+                f"{REQUIREMENT_ID}: the partition assigns {resource!r} under verb {verb!r} the "
+                f"level {required.wire!r} while SENSITIVE_RESOURCE_LEVELS declares "
+                f"{headline.wire!r}. The flat mapping must state the rule, not an exception."
+            )
+            config = audit_policy_evaluator.evaluate(
+                RequestAttributes(
+                    user=apc.DEFAULT_SA.name,
+                    groups=apc.DEFAULT_SA.groups,
+                    verb=verb,
+                    namespace=selector.namespace,
+                    api_group=selector.group,
+                    api_version=apc.API_VERSION,
+                    resource=selector.resource,
+                    subresource=selector.subresource,
+                    resource_request=True,
+                )
+            )
+            assert config.level == headline.wire, (
+                f"{REQUIREMENT_ID}: {resource!r} under verb {verb!r} is recorded at "
+                f"{config.level!r} but must be recorded at EXACTLY {headline.wire!r} "
                 f"(declared at cluster/gce/gci/audit_policy_test.go L{go_line})"
             )
 
@@ -1705,58 +2465,72 @@ def test_audit_levels_form_a_strict_total_order() -> None:
     assert sorted(apc.LEVEL_WIRE_STRINGS) != list(apc.LEVEL_WIRE_STRINGS)
 
 
-@settings(max_examples=64, deadline=None, database=None)
-@given(
-    first=st.sampled_from(apc.LEVEL_ORDER),
-    second=st.sampled_from(apc.LEVEL_ORDER),
-    third=st.sampled_from(apc.LEVEL_ORDER),
-)
-def test_audit_level_order_axioms_hold_for_every_triple(
-    first: apc.AuditLevel,
-    second: apc.AuditLevel,
-    third: apc.AuditLevel,
-) -> None:
+def test_audit_level_order_axioms_hold_for_every_triple(subtests: pytest.Subtests) -> None:
     """The order is irreflexive, trichotomous, antisymmetric and transitive.
 
     INVARIANT LOCKED: that ``AuditLevel``'s comparison operators really define a
     strict total order, rather than merely happening to order the four members the
-    way :func:`test_audit_levels_form_a_strict_total_order` checks. Property-based
-    because the axioms are statements about ALL triples, and ``hypothesis`` is
-    pinned in python/requirements-test.txt for exactly this invariant.
+    way :func:`test_audit_levels_form_a_strict_total_order` checks.
 
-    Deliberately cheap: the domain has four members, so 64 examples cover every
-    one of the 64 triples several times over and the test cannot distort the
-    620-case runtime. ``database=None`` keeps hypothesis from writing an example
-    database into the working tree, and no fixture is requested, so no
-    function-scoped-fixture health check applies.
+    EXHAUSTIVE AND DETERMINISTIC, which is the whole point. The axioms are
+    statements about ALL triples, and the domain is FOUR members - so the complete
+    truth table is ``itertools.product(LEVEL_ORDER, repeat=3)``, all 64 triples,
+    enumerated in a fixed order. A property-based strategy sampling the same
+    domain would be strictly weaker: sampling 64 examples from 64 triples does not
+    cover all 64 (it draws with replacement and shrinks toward simple values), so a
+    defect confined to one triple could pass and then fail on a later run. When the
+    domain is small enough to enumerate, enumerating it is not just cheaper than
+    sampling - it is the only formulation whose claim of exhaustiveness is true.
+
+    Cheap enough not to distort the 620-case runtime: 64 triples of pure integer
+    comparisons. No fixture beyond ``subtests`` is requested and nothing is
+    written, so the test is order-independent and xdist-safe by construction.
+
+    ACCUMULATE semantics: one subtest per triple, so a broken ordering reports
+    EVERY triple it breaks in a single run rather than only the first. The axioms
+    are independent findings about independent triples, which is exactly the
+    accumulate case (AAP §0.4.1.2); the whole-order assertions that must abort live
+    in :func:`test_audit_levels_form_a_strict_total_order`.
     """
-    # Irreflexivity, and its consequence for <= / >=.
-    assert not first < first
-    assert not first > first
-    assert first <= first
-    assert first >= first
-
-    # Trichotomy: exactly one of <, ==, > holds for any pair.
-    relations = [first < second, first == second, first > second]
-    assert relations.count(True) == 1, (
-        f"{REQUIREMENT_ID}: exactly one of <, == and > must hold for "
-        f"({first.wire}, {second.wire}); got {relations}"
+    triples = tuple(itertools.product(apc.LEVEL_ORDER, repeat=3))
+    # The guard against a silently emptied enumeration: 4 levels cubed is 64, and
+    # if LEVEL_ORDER ever shrank this test would keep passing while examining
+    # almost nothing.
+    assert len(triples) == len(apc.LEVEL_ORDER) ** 3 == 64, (
+        f"{REQUIREMENT_ID}: expected the complete truth table of "
+        f"{len(apc.LEVEL_ORDER)}**3 triples, got {len(triples)}"
     )
 
-    # Antisymmetry, both directions.
-    assert (first < second) == (second > first)
-    assert (first <= second) == (second >= first)
+    for first, second, third in triples:
+        with subtests.test(first=first.wire, second=second.wire, third=third.wire):
+            # Irreflexivity, and its consequence for <= / >=.
+            assert not first < first
+            assert not first > first
+            assert first <= first
+            assert first >= first
 
-    # Transitivity, which is what forbids a cycle among the four levels.
-    if first < second and second < third:
-        assert first < third, (
-            f"{REQUIREMENT_ID}: the ordering is not transitive: {first.wire} < {second.wire} < "
-            f"{third.wire} but not {first.wire} < {third.wire}"
-        )
+            # Trichotomy: exactly one of <, ==, > holds for any pair.
+            relations = [first < second, first == second, first > second]
+            assert relations.count(True) == 1, (
+                f"{REQUIREMENT_ID}: exactly one of <, == and > must hold for "
+                f"({first.wire}, {second.wire}); got {relations}"
+            )
 
-    # The rank and the operators are two spellings of one order, so they must
-    # agree; a test that trusted only one could not catch the other drifting.
-    assert (first < second) == (first.rank < second.rank)
+            # Antisymmetry, both directions.
+            assert (first < second) == (second > first)
+            assert (first <= second) == (second >= first)
+
+            # Transitivity, which is what forbids a cycle among the four levels.
+            if first < second and second < third:
+                assert first < third, (
+                    f"{REQUIREMENT_ID}: the ordering is not transitive: {first.wire} < "
+                    f"{second.wire} < {third.wire} but not {first.wire} < {third.wire}"
+                )
+
+            # The rank and the operators are two spellings of one order, so they
+            # must agree; a test that trusted only one could not catch the other
+            # drifting.
+            assert (first < second) == (first.rank < second.rank)
 
 
 # ---------------------------------------------------------------------------
@@ -1925,9 +2699,14 @@ _MALFORMED_POLICIES: Final[tuple[tuple[str, str, str], ...]] = (
         "nonResourceURLs must be a list of strings",
     ),
     (
+        # A NUMBER, not `null`. Go's decoder refuses a JSON number in a string
+        # list, so this case belongs in a roster whose framing is "Go refuses
+        # these too"; `null` in a string list is the one place the two loaders
+        # disagree and it is pinned separately by
+        # `test_loader_is_stricter_than_go_about_a_null_string_list_entry`.
         "namespaces-entry-is-not-a-string",
         "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
-        "rules: [{level: Metadata, namespaces: [null]}]\n",
+        "rules: [{level: Metadata, namespaces: [7]}]\n",
         "rules.0..namespaces.0. must be a string",
     ),
     (
@@ -1941,6 +2720,101 @@ _MALFORMED_POLICIES: Final[tuple[tuple[str, str, str], ...]] = (
         "apiVersion: audit.k8s.io/v1\nkind: Policy\nomitManagedFields: 1\n"
         "rules: [{level: Metadata}]\n",
         "omitManagedFields must be a boolean",
+    ),
+    # ---------------------------------------------------------------------
+    # validation.ValidatePolicy's value checks: documents that DECODE
+    # cleanly and are still refused, because the API server refuses them
+    # ---------------------------------------------------------------------
+    # Every case below is well-formed YAML with well-typed fields, so the
+    # structural readers above pass it through untouched. What refuses it is
+    # the ported ``ValidatePolicy`` - and what makes each case matter is that
+    # `kube-apiserver` runs the same validator over `--audit-policy-file` and
+    # exits rather than start. A loader that accepted these would report a
+    # green V6 suite for a policy that takes the control plane down at boot.
+    (
+        # validation.go L86-88.
+        "non-resource-url-missing-leading-slash",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: None, nonResourceURLs: ['healthz']}]\n",
+        "rules.0..nonResourceURLs.0..*must begin with a '/' character",
+    ),
+    (
+        # The empty string reaches the leading-'/' refusal and NOT the
+        # wildcard one, because Go guards the slice with `url != ""` (L90).
+        "non-resource-url-is-the-empty-string",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: None, nonResourceURLs: ['']}]\n",
+        "rules.0..nonResourceURLs.0..*must begin with a '/' character",
+    ),
+    (
+        # validation.go L90-92. `/healthz*` is legal, so the boundary being
+        # pinned is "final character", not "contains a wildcard".
+        "non-resource-url-wildcard-is-not-final",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: None, nonResourceURLs: ['/healthz*/detail']}]\n",
+        "nonResourceURLs.0..*must be the final character of the rule",
+    ),
+    (
+        # Two trailing wildcards: the LAST one is final, the one before it is
+        # not, which is the off-by-one this case exists to catch.
+        "non-resource-url-has-two-trailing-wildcards",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: None, nonResourceURLs: ['/swagger**']}]\n",
+        "nonResourceURLs.0..*must be the final character of the rule",
+    ),
+    (
+        # Go's own worked example (validation.go L104-105): a group VERSION
+        # pasted where a group belongs.
+        "resources-group-is-a-group-version",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: RequestResponse, resources: "
+        "[{group: 'rbac.authorization.k8s.io/v1beta1', resources: ['clusterroles']}]}]\n",
+        "resources.0..group.*a lowercase RFC 1123 subdomain must consist of lower "
+        "case alphanumeric characters",
+    ),
+    (
+        "resources-group-is-not-lower-case",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: Metadata, resources: [{group: 'Apps', resources: ['deployments']}]}]\n",
+        "resources.0..group.*a lowercase RFC 1123 subdomain must consist of lower "
+        "case alphanumeric characters",
+    ),
+    (
+        # 254 bytes: one past DNS1123_SUBDOMAIN_MAX_LENGTH, and otherwise a
+        # perfectly well-formed subdomain, so ONLY the length check can refuse
+        # it. Its 253-byte sibling is accepted by
+        # `test_loader_accepts_the_shapes_validate_policy_permits`.
+        "resources-group-is-one-byte-too-long",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: Metadata, resources: "
+        "[{group: '" + "a" * (DNS1123_SUBDOMAIN_MAX_LENGTH + 1) + "', resources: ['x']}]}]\n",
+        f"resources.0..group.*must be no more than {DNS1123_SUBDOMAIN_MAX_LENGTH} "
+        "characters",
+    ),
+    (
+        # validation.go L111-113. A name with no resource to name it in
+        # matches nothing, so the rule silently does nothing at all.
+        "resource-names-without-resources",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: Metadata, resources: "
+        "[{group: '', resourceNames: ['ingress-uid']}]}]\n",
+        "resources.0..resourceNames.*using resourceNames requires at least one resource",
+    ),
+    (
+        # validation.go L45-49, the resources half.
+        "non-resource-urls-together-with-resources",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules: [{level: None, nonResourceURLs: "
+        "['/version'], resources: [{group: '', resources: ['secrets']}]}]\n",
+        "rules.0..nonResourceURLs.*rules cannot apply to both regular resources and "
+        "non-resource URLs",
+    ),
+    (
+        # The namespaces half of the same check - and deliberately with the
+        # '*' URL, which the SHAPE check skips. It proves the combined check
+        # is reached independently of the shape check rather than as a side
+        # effect of it.
+        "non-resource-urls-together-with-namespaces",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: None, nonResourceURLs: ['*'], namespaces: ['kube-system']}]\n",
+        "rules.0..nonResourceURLs.*rules cannot apply to both regular resources and "
+        "non-resource URLs",
     ),
 )
 
@@ -1964,8 +2838,11 @@ def test_loader_refuses_a_malformed_policy(policy_text: str, expected_message: s
 def test_loader_accepts_the_minimal_valid_policy() -> None:
     """The positive control for :func:`test_loader_refuses_a_malformed_policy`.
 
-    Without it, a loader that rejected EVERYTHING would pass all 29 negative
+    Without it, a loader that rejected EVERYTHING would pass all 39 negative
     cases - which is the classic way a validation suite ends up asserting nothing.
+    :func:`test_loader_accepts_the_shapes_validate_policy_permits` extends the
+    same guard to the ``ValidatePolicy`` value checks, whose accept side is where
+    an over-eager port would break the shipped policy.
     """
     policy = load_policy_from_bytes(_VALID_MINIMAL_POLICY)
     assert len(policy.rules) == 1
@@ -1981,6 +2858,164 @@ def test_loader_accepts_the_minimal_valid_policy() -> None:
     )
     assert dropping.rules[0].level == "None"
     assert dropping.rules[0].level == DEFAULT_AUDIT_LEVEL
+
+
+# ---------------------------------------------------------------------------
+# validation.ValidatePolicy: the VALUE rules, aggregated
+# ---------------------------------------------------------------------------
+# Distinct from the malformed-document table above, which covers the DECODER's
+# type rules. These are the rules a well-typed document can still break, and they
+# are the ones the API server applies before it will load a policy at all. A
+# loader missing them would evaluate a document kube-apiserver refuses - a green
+# suite over a control plane that will not boot.
+
+_INVALID_POLICIES: Final[tuple[tuple[str, str, str], ...]] = (
+    (
+        # validation.go L86-88.
+        "non-resource-url-without-a-leading-slash",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: Metadata, nonResourceURLs: [healthz]}]\n",
+        "must begin with a '/' character",
+    ),
+    (
+        # validation.go L90-92: Go tests url[:len(url)-1], so a trailing * is fine
+        # and an interior one is not.
+        "non-resource-url-with-an-interior-wildcard",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: Metadata, nonResourceURLs: ['/api/*/pods']}]\n",
+        "must be the final character of the rule",
+    ),
+    (
+        # validation.go L100-110, and Go's own example of the mistake.
+        "group-written-as-a-group-version",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: Metadata, resources: [{group: rbac.authorization.k8s.io/v1}]}]\n",
+        "lowercase RFC 1123 subdomain",
+    ),
+    (
+        "group-with-upper-case",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: Metadata, resources: [{group: RBAC.k8s.io}]}]\n",
+        "lowercase RFC 1123 subdomain",
+    ),
+    (
+        # validation.go L112-114: a narrowing with nothing to narrow WIDENS.
+        "resource-names-without-resources",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: Metadata, resources: [{group: '', resourceNames: [audit-secret]}]}]\n",
+        "using resourceNames requires at least one resource",
+    ),
+    (
+        # validation.go L44-48.
+        "a-rule-mixing-non-resource-urls-and-resources",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: Metadata, nonResourceURLs: ['/healthz'], "
+        "resources: [{group: '', resources: [secrets]}]}]\n",
+        "cannot apply to both regular resources and non-resource URLs",
+    ),
+    (
+        # The same rule, reached through `namespaces` rather than `resources`.
+        "a-rule-mixing-non-resource-urls-and-namespaces",
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\n"
+        "rules: [{level: Metadata, nonResourceURLs: ['/healthz'], namespaces: [default]}]\n",
+        "cannot apply to both regular resources and non-resource URLs",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("policy_text", "expected_message"),
+    [(text, message) for _name, text, message in _INVALID_POLICIES],
+    ids=[name for name, _text, _message in _INVALID_POLICIES],
+)
+def test_loader_refuses_a_policy_the_apiserver_would_refuse(
+    policy_text: str, expected_message: str
+) -> None:
+    """Every ``ValidatePolicy`` rule is enforced, and the refusal names the rule.
+
+    INVARIANT LOCKED: a policy this loader accepts is a policy kube-apiserver would
+    accept. Each case is a document the shipped generator could plausibly come to
+    emit - a ``nonResourceURLs`` entry that lost its leading slash, a wildcard that
+    stopped being final, a group name written as a GroupVersion, a
+    ``resourceNames`` narrowing with nothing to narrow, or two rules merged into
+    one that mixes selector families - and each is refused rather than evaluated.
+    """
+    with pytest.raises(AuditPolicyError, match=expected_message):
+        load_policy_from_bytes(policy_text)
+
+
+def test_validation_findings_are_aggregated_not_reported_one_at_a_time() -> None:
+    """``ErrorList.ToAggregate()``: every finding in one exception (validation.go L28-35).
+
+    Go accumulates across the policy-level ``omitStages`` and every rule and returns
+    the whole list; ``reader.go`` L88-90 hands that aggregate straight to the
+    caller. A loader that stopped at the first finding would turn one broken
+    generator edit into one bisection per problem, and the count of findings is what
+    tells a reader whether they have seen all of them.
+
+    Three DIFFERENT rules across TWO rules of the policy, so this cannot pass by
+    accident on a loader that merely reports the last finding it saw.
+    """
+    with pytest.raises(AuditPolicyError) as raised:
+        load_policy_from_bytes(
+            "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n"
+            "- level: Metadata\n"
+            "  nonResourceURLs: [healthz, '/api/*/pods']\n"
+            "- level: Metadata\n"
+            "  resources: [{group: 'BAD.Group', resourceNames: [x]}]\n"
+        )
+
+    message = str(raised.value)
+    assert "4 violation(s)" in message, message
+    assert "must begin with a '/' character" in message
+    assert "must be the final character of the rule" in message
+    assert "lowercase RFC 1123 subdomain" in message
+    assert "using resourceNames requires at least one resource" in message
+    # The path is part of the finding, so a reader with eighteen resource entries
+    # knows which one.
+    assert "rules[0].nonResourceURLs[0]" in message
+    assert "rules[1].resources[0].group" in message
+
+
+def test_validation_accepts_the_forms_the_generated_policy_actually_uses() -> None:
+    """THE CONTROL. Without it every case above could pass on a validator that
+    refused everything - the classic way a validation suite asserts nothing.
+
+    Each accepted form below appears in the shipped generated policy: a bare ``*``
+    non-resource URL, a trailing-wildcard path, the empty core group, a named group
+    that IS a valid subdomain, and a ``resourceNames`` narrowing that does name a
+    resource.
+    """
+    policy = load_policy_from_bytes(
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n"
+        "- level: None\n"
+        "  nonResourceURLs: ['*', '/healthz', '/api*']\n"
+        "- level: Metadata\n"
+        "  resources:\n"
+        "  - group: ''\n"
+        "    resources: [secrets]\n"
+        "    resourceNames: [audit-secret]\n"
+        "  - group: rbac.authorization.k8s.io\n"
+        "  namespaces: [default]\n"
+    )
+
+    assert len(policy.rules) == 2
+    assert policy.rules[0].non_resource_urls == ("*", "/healthz", "/api*")
+    assert policy.rules[1].resources[1].group == "rbac.authorization.k8s.io"
+
+
+def test_the_shipped_generated_policy_passes_validate_policy(
+    generated_audit_policy: GeneratedShellPolicy,
+) -> None:
+    """The generated document itself is valid, asserted directly rather than implied.
+
+    Every one of the 620 evaluated outcomes already loads this file, so a
+    ``ValidatePolicy`` violation would fail them all - but it would fail them as 620
+    identical errors about the loader rather than as one statement about the
+    artefact. This says it once, about the artefact: the policy the shipped
+    ``create-master-audit-policy`` writes is one kube-apiserver would accept.
+    """
+    validate_policy(_loaded_policy(generated_audit_policy.text))
 
 
 def test_loader_refuses_an_empty_path() -> None:
@@ -2018,35 +3053,42 @@ def test_loader_names_the_file_a_malformed_policy_came_from(tmp_path: Path) -> N
 
 
 def test_loader_round_trips_the_generated_policy_through_a_file(
-    generated_audit_policy: GeneratedAuditPolicy,
+    generated_audit_policy: GeneratedShellPolicy,
     tmp_path: Path,
 ) -> None:
     """Loading the generated text from a fresh file yields the same rules.
 
     Proves that :func:`load_policy_from_file` and :func:`load_policy_from_bytes`
     agree, which is what lets the negative cases above use the bytes entry point
-    while the fixture uses the file one.
+    while the generation fixture uses the file one.
     """
     copy = tmp_path / AUDIT_POLICY_FILE_NAME
     copy.write_text(generated_audit_policy.text, encoding="utf-8")
-    assert load_policy_from_file(copy) == generated_audit_policy.policy
+    assert load_policy_from_file(copy) == _loaded_policy(generated_audit_policy.text)
 
 
 def test_a_generator_that_writes_nothing_is_a_failure(tmp_path: Path) -> None:
     """Exit 0 is not evidence that the generator ran; a written file is.
 
     The invocation exits 0 even though its ``kube-env`` is an unparseable
-    fragment, so :func:`_require_generated_policy_text` is what turns "the
+    fragment, so :func:`require_generated_policy_text` is what turns "the
     generator silently stopped writing" into a named failure instead of 620 cases
     erroring on a missing file.
+
+    The refusal is a ``ManifestHarnessError`` and not an :class:`AuditPolicyError`,
+    and the distinction is the point rather than an accident of where the function
+    lives: nothing was generated, so nothing has been measured about control V6 and
+    there is no policy to call malformed. A HARNESS failure and a CONTROL finding
+    must stay different types, because only the second is evidence about the
+    system under test.
     """
     missing = tmp_path / AUDIT_POLICY_FILE_NAME
-    with pytest.raises(AuditPolicyError, match="wrote no policy to"):
-        _require_generated_policy_text(missing, returncode=0, combined_output="syntax error")
+    with pytest.raises(ManifestHarnessError, match="wrote no policy to"):
+        require_generated_policy_text(missing, returncode=0, combined_output="syntax error")
 
     missing.write_text(_VALID_MINIMAL_POLICY, encoding="utf-8")
     assert (
-        _require_generated_policy_text(missing, returncode=0, combined_output="")
+        require_generated_policy_text(missing, returncode=0, combined_output="")
         == _VALID_MINIMAL_POLICY
     )
 
@@ -2068,7 +3110,7 @@ def test_a_generator_that_writes_nothing_is_a_failure(tmp_path: Path) -> None:
 # every such statement is made by the 620 cases above. It is written as YAML and
 # loaded through the real loader so that the loader's own remaining branches
 # (a policy-level stage list, and ``omitManagedFields`` at both levels) are
-# covered by the same fixture.
+# covered by the same value.
 #
 # NOTE THE ABSENCE OF A CATCH-ALL RULE. That is deliberate: it is the only way to
 # reach ``EvaluatePolicyRule``'s default return, which is the branch that decides
@@ -2123,14 +3165,25 @@ rules:
 """
 
 
-@pytest.fixture(scope="module")
-def synthetic_evaluator() -> PolicyRuleEvaluator:
-    """An evaluator over :data:`_SYNTHETIC_POLICY`.
-
-    Module-scoped and immutable for the same reason the generated one is: shared
-    by several tests, mutated by none.
-    """
-    return PolicyRuleEvaluator(load_policy_from_bytes(_SYNTHETIC_POLICY))
+#: An evaluator over :data:`_SYNTHETIC_POLICY`.
+#:
+#: AN ORDINARY IMMUTABLE VALUE, not a fixture. Fixture injection buys nothing
+#: here -- there is no setup to sequence, no teardown to register and no
+#: per-test variation -- and AAP §0.4.4.1 puts fixtures in ``conftest.py``, which
+#: this policy has no business travelling to: it is test DATA for the evaluator
+#: branches the shipped policy never reaches, and it belongs beside the tests that
+#: read it.
+#:
+#: Built once at import and shared by the seven tests below, which is safe for the
+#: same reason the generated evaluator is safe to share: :class:`AuditPolicy`,
+#: :class:`PolicyRule` and :class:`PolicyRuleEvaluator` are all frozen, so there is
+#: nothing here for one test to mutate and another to observe. Loading it through
+#: the REAL loader (rather than constructing the dataclasses directly) is what also
+#: covers the loader's own remaining branches -- a policy-level stage list and
+#: ``omitManagedFields`` at both levels.
+SYNTHETIC_EVALUATOR: Final[PolicyRuleEvaluator] = PolicyRuleEvaluator(
+    load_policy_from_bytes(_SYNTHETIC_POLICY)
+)
 
 
 def _resource_request(
@@ -2160,7 +3213,6 @@ def _resource_request(
 
 
 def test_synthetic_policy_wildcard_and_name_matching(
-    synthetic_evaluator: PolicyRuleEvaluator,
     subtests: pytest.Subtests,
 ) -> None:
     """The four resource-matching forms the shipped policy never uses.
@@ -2217,11 +3269,10 @@ def test_synthetic_policy_wildcard_and_name_matching(
     )
     for description, attrs, expected in checks:
         with subtests.test(check=description):
-            assert synthetic_evaluator.evaluate(attrs).level == expected, description
+            assert SYNTHETIC_EVALUATOR.evaluate(attrs).level == expected, description
 
 
 def test_synthetic_policy_falls_through_to_the_default_level(
-    synthetic_evaluator: PolicyRuleEvaluator,
     subtests: pytest.Subtests,
 ) -> None:
     """A request no rule claims is recorded at ``None`` with the POLICY's stages.
@@ -2253,7 +3304,7 @@ def test_synthetic_policy_falls_through_to_the_default_level(
     )
     for description, attrs in unclaimed:
         with subtests.test(check=description):
-            config = synthetic_evaluator.evaluate(attrs)
+            config = SYNTHETIC_EVALUATOR.evaluate(attrs)
             assert config.level == DEFAULT_AUDIT_LEVEL, description
             assert config.omit_stages == ("ResponseStarted",), (
                 "an unmatched request must carry the POLICY-level omitStages, not an empty list"
@@ -2261,9 +3312,7 @@ def test_synthetic_policy_falls_through_to_the_default_level(
             assert config.omit_managed_fields is True
 
 
-def test_synthetic_policy_non_resource_wildcard(
-    synthetic_evaluator: PolicyRuleEvaluator,
-) -> None:
+def test_synthetic_policy_non_resource_wildcard() -> None:
     """``nonResourceURLs: ["*"]`` matches any path, and only non-resource requests.
 
     INVARIANT LOCKED: ``pathMatches``'s ``spec == "*"`` arm (checker.go L153-155),
@@ -2271,7 +3320,7 @@ def test_synthetic_policy_non_resource_wildcard(
     forms ``/healthz*`` and ``/swagger*`` - together with
     ``ruleMatchesNonResource``'s refusal to match a resource request.
     """
-    config = synthetic_evaluator.evaluate(
+    config = SYNTHETIC_EVALUATOR.evaluate(
         RequestAttributes(
             user="system:anonymous",
             groups=(apc.GROUP_ALL_UNAUTHENTICATED,),
@@ -2286,9 +3335,7 @@ def test_synthetic_policy_non_resource_wildcard(
     assert config.omit_stages == ("ResponseStarted",)
 
 
-def test_synthetic_policy_unions_the_policy_and_rule_stage_lists(
-    synthetic_evaluator: PolicyRuleEvaluator,
-) -> None:
+def test_synthetic_policy_unions_the_policy_and_rule_stage_lists() -> None:
     """A rule's stages are the UNION with the policy's. Go: ``unionStages``.
 
     INVARIANT LOCKED: ``NewPolicyRuleEvaluator``'s one act (checker.go L34-36).
@@ -2297,7 +3344,7 @@ def test_synthetic_policy_unions_the_policy_and_rule_stage_lists(
     ignored the policy level would pass all 620 cases. Compared as SETS because
     Go's own order here is unspecified.
     """
-    rules = synthetic_evaluator.rules
+    rules = SYNTHETIC_EVALUATOR.rules
     assert set(rules[0].omit_stages) == {"ResponseStarted", apc.AUDIT_STAGE_REQUEST_RECEIVED}, (
         "rule 0 declares RequestReceived and the policy declares ResponseStarted, so the "
         "evaluated rule must omit both"
@@ -2311,9 +3358,7 @@ def test_synthetic_policy_unions_the_policy_and_rule_stage_lists(
     assert _union_stages((), ()) == ()
 
 
-def test_synthetic_policy_resolves_omit_managed_fields_per_rule(
-    synthetic_evaluator: PolicyRuleEvaluator,
-) -> None:
+def test_synthetic_policy_resolves_omit_managed_fields_per_rule() -> None:
     """A rule-level ``omitManagedFields`` overrides the policy default.
 
     INVARIANT LOCKED: ``isOmitManagedFields`` (checker.go L86-92). Ported for
@@ -2322,12 +3367,12 @@ def test_synthetic_policy_resolves_omit_managed_fields_per_rule(
     in a security-critical evaluator.
     """
     # Rule 2 sets it to false against a policy default of true.
-    overridden = synthetic_evaluator.evaluate(_resource_request("pods", subresource="log"))
+    overridden = SYNTHETIC_EVALUATOR.evaluate(_resource_request("pods", subresource="log"))
     assert overridden.level == apc.AuditLevel.REQUEST.wire
     assert overridden.omit_managed_fields is False
 
     # Rule 1 sets nothing, so the policy default applies.
-    inherited = synthetic_evaluator.evaluate(
+    inherited = SYNTHETIC_EVALUATOR.evaluate(
         _resource_request("nodes", namespace="", subresource="status")
     )
     assert inherited.level == apc.AuditLevel.REQUEST.wire
@@ -2425,7 +3470,6 @@ def test_evaluation_is_ordered_first_match(subtests: pytest.Subtests) -> None:
 
 
 def test_a_verb_or_namespace_a_rule_does_not_name_is_not_matched(
-    synthetic_evaluator: PolicyRuleEvaluator,
     subtests: pytest.Subtests,
 ) -> None:
     """The negative arms of the verb and namespace filters.
@@ -2440,7 +3484,7 @@ def test_a_verb_or_namespace_a_rule_does_not_name_is_not_matched(
         # Rule 0 names verb "get" only, so "create" falls past it; nothing else
         # claims a core-group configmap in the default namespace.
         assert (
-            synthetic_evaluator.evaluate(
+            SYNTHETIC_EVALUATOR.evaluate(
                 _resource_request("configmaps", verb="create", name="ingress-uid")
             ).level
             == DEFAULT_AUDIT_LEVEL
@@ -2450,7 +3494,7 @@ def test_a_verb_or_namespace_a_rule_does_not_name_is_not_matched(
         # Rule 4 names namespace "kube-system"; a cluster-scoped request presents
         # "" and must not match it.
         assert (
-            synthetic_evaluator.evaluate(_resource_request("nodes", namespace="")).level
+            SYNTHETIC_EVALUATOR.evaluate(_resource_request("nodes", namespace="")).level
             == DEFAULT_AUDIT_LEVEL
         )
 
@@ -2458,7 +3502,7 @@ def test_a_verb_or_namespace_a_rule_does_not_name_is_not_matched(
         # Rule 4 has namespaces, so ruleMatchesResource decides - and it refuses a
         # non-resource request outright. Rule 5's "*" then claims it.
         assert (
-            synthetic_evaluator.evaluate(
+            SYNTHETIC_EVALUATOR.evaluate(
                 RequestAttributes(user="kubelet", verb="get", resource_request=False, path="/logs")
             ).level
             == apc.AuditLevel.METADATA.wire
@@ -2520,3 +3564,31 @@ def test_failure_messages_name_the_requirement_and_the_request(
 
     with subtests.test(shape="non-resource", message="describes the path"):
         assert non_resource_case.path in _describe_request(non_resource_case)
+
+
+# ---------------------------------------------------------------------------
+# The loader boundary measured against the real Go loader (ported from the
+# CONFIGURATION+SCRIPTING review of the same checkpoint).
+# ---------------------------------------------------------------------------
+
+
+
+def test_loader_agrees_with_go_that_omit_managed_fields_null_means_absent() -> None:
+    """The other side of the same boundary: ``null`` is not always a defect.
+
+    INVARIANT LOCKED: ``omitManagedFields: null`` is a nil ``*bool`` in Go, which
+    means "the policy-level default applies", NOT ``false``. Both loaders accept
+    it, so the strictness above is genuinely confined to string LIST ENTRIES and
+    is not a blanket "no nulls" rule that would misread this field.
+    """
+    policy = load_policy_from_bytes(
+        "apiVersion: audit.k8s.io/v1\nkind: Policy\nomitManagedFields: null\n"
+        "rules: [{level: Metadata, omitManagedFields: null}]\n"
+    )
+    assert policy.omit_managed_fields is False, (
+        f"{REQUIREMENT_ID}: an absent policy-level omitManagedFields is false at the policy level"
+    )
+    assert policy.rules[0].omit_managed_fields is None, (
+        f"{REQUIREMENT_ID}: an absent RULE-level omitManagedFields must stay None - the signal "
+        "that the policy default applies (checker.go L86-92) - and must NOT collapse to False"
+    )

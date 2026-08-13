@@ -202,6 +202,12 @@ _BASE64_BODY_PATTERN: Final = re.compile(r"^[A-Za-z0-9+/]{40,}={0,2}$")
 #: The token whose declarations are counted across ``cluster/``.
 _FAILURE_POLICY_TOKEN: Final = "failurePolicy"
 
+#: A YAML comment marker. A line beginning with it (after optional indentation)
+#: declares nothing, so it is excluded from the textual count - otherwise prose
+#: mentioning the token would fail a security gate, and a gate that fires on prose
+#: is a gate that gets weakened.
+_YAML_COMMENT_MARKER: Final = "#"
+
 #: The one declaration that may exist, as it is written in the shipped file.
 #: Compared against the stripped line so that re-indentation is not a failure
 #: but a changed VALUE is.
@@ -217,6 +223,66 @@ _EXPECTED_FAILURE_POLICY_DECLARATION: Final = (
 #: it; this one exists because a count of zero must never read as "no
 #: violations found".
 _CLUSTER_SCAN_FILE_FLOOR: Final = 100
+
+#: The two admission-webhook configuration kinds. Both are enumerated, not just
+#: the Mutating one this repository ships: a ValidatingWebhookConfiguration has
+#: the same ``failurePolicy`` field with the same fail-open default on the beta
+#: API, so a scan that only looked for Mutating configurations would be blind to
+#: exactly half of the surface it claims to cover.
+_WEBHOOK_CONFIGURATION_KINDS: Final = frozenset(
+    {"MutatingWebhookConfiguration", "ValidatingWebhookConfiguration"}
+)
+
+#: The API-VERSION-DEPENDENT default of ``failurePolicy``, transcribed from the
+#: defaulting functions rather than assumed, because the two disagree and the
+#: disagreement is the whole point:
+#:
+#:   pkg/apis/admissionregistration/v1/defaults.go       -> Fail    (fail-CLOSED)
+#:   pkg/apis/admissionregistration/v1beta1/defaults.go  -> Ignore  (fail-OPEN)
+#:
+#: A webhook that OMITS the field is therefore not neutral: on the beta API it is
+#: silently fail-open, which is precisely the weakness V5 closed, and it
+#: contributes no ``failurePolicy`` text for a token count to notice. Resolving the
+#: effective value per API version is what makes the repository-wide guard
+#: semantic instead of textual.
+_FAILURE_POLICY_DEFAULT_BY_API_VERSION: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "admissionregistration.k8s.io/v1": "Fail",
+        "admissionregistration.k8s.io/v1beta1": "Ignore",
+    }
+)
+
+#: Text tokens that make a file a CANDIDATE for the decoding scan.
+#:
+#: BY CONTENT, NEVER BY SUFFIX, and that is the wider of the two readings on
+#: purpose: ``cluster/gce/manifests/`` names Kubernetes objects ``.manifest``, some
+#: are ``.json``, and an object is not exempt from this invariant because of how its
+#: file happens to be named. Every file under ``cluster/`` is therefore read and
+#: triaged on what it SAYS, so a webhook in a file with no recognised extension is
+#: still decoded and accounted for.
+#:
+#: Triage is deliberately textual and deliberately WIDER than the kinds themselves: a file
+#: naming a webhook kind, declaring a ``webhooks`` list, or mentioning
+#: ``failurePolicy`` at all must be decoded and accounted for. A candidate that
+#: cannot be decoded is a FAILURE rather than a skip - see
+#: :func:`test_every_webhook_under_cluster_fails_closed`. Seven templated YAML
+#: files under ``cluster/`` do not parse as YAML at all (Go-template and sed
+#: placeholders); measured, none of them is a candidate, and if one ever becomes
+#: one the scan reports it instead of stepping over it.
+_WEBHOOK_CANDIDATE_TOKENS: Final = (
+    *sorted(_WEBHOOK_CONFIGURATION_KINDS),
+    "webhooks:",
+    _FAILURE_POLICY_TOKEN,
+)
+
+#: THE EXACTLY-ENUMERATED SET of admission webhooks this deployment tree declares,
+#: as ``(relative POSIX path, webhook name)``. Held as data and asserted for SET
+#: EQUALITY, so a NEW webhook anywhere under ``cluster/`` fails a named node even
+#: when it is itself fail-closed - because none of this module's other assertions
+#: (timeoutSeconds, sideEffects, admissionReviewVersions, the rule scope, the CA
+#: placeholder) would be applied to it, and an unasserted webhook is how the next
+#: fail-open one arrives.
+_EXPECTED_WEBHOOKS: Final = frozenset({(_MANIFEST_RELATIVE_POSIX, _EXPECTED_NAME)})
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +353,15 @@ def _scan_tree_for_token(root: Path, token: str, *, relative_to: Path) -> _TreeS
     in the file. On the file that cannot be decoded at all, the residual risk is
     a FALSE FAILURE rather than a false pass, which is the safe direction.
 
+    COMMENT LINES ARE NOT DECLARATIONS and are excluded. A YAML line whose first
+    non-space character is ``#`` cannot declare a key, so counting it would make a
+    legitimate documentation edit - "# NOTE: failurePolicy is intentionally Fail" -
+    fail a security gate. That is not a harmless false positive: a gate that fires
+    on prose is a gate that gets weakened the first time it inconveniences
+    somebody. An INLINE trailing comment on a real declaration
+    (``failurePolicy: Fail  # required by V5``) is still counted, because the
+    declaration is genuinely there.
+
     Args:
         root: Directory to walk. Every regular file beneath it is read.
         token: Literal substring to search for. Not a regular expression: the
@@ -320,7 +395,7 @@ def _scan_tree_for_token(root: Path, token: str, *, relative_to: Path) -> _TreeS
             continue
 
         for number, line in enumerate(text.splitlines(), start=1):
-            if token in line:
+            if token in line and not line.lstrip().startswith(_YAML_COMMENT_MARKER):
                 hits.append(
                     _TokenHit(relative_path=relative_path, line_number=number, line=line)
                 )
@@ -815,13 +890,31 @@ def test_ca_bundle_is_a_placeholder(repo_root: Path, subtests: pytest.Subtests) 
 
 
 def test_failure_policy_declared_exactly_once_under_cluster(repo_root: Path) -> None:
-    """INVARIANT: ``cluster/`` declares ``failurePolicy`` exactly ONCE, and it is ``Fail``.
+    """The ``failurePolicy`` TOKEN appears exactly once under ``cluster/``, reading ``Fail``.
 
-    THE ONLY ASSERTION IN THIS MODULE THAT CAN SEE A SECOND WEBHOOK. Every test
-    above reads one known file, so all of them stay green when somebody adds a
-    brand-new fail-open MutatingWebhookConfiguration somewhere else under
-    ``cluster/``. Counting declarations across the whole deployment tree is what
-    catches that, and it is why this test exists at all.
+    A TEXTUAL COMPANION TO :func:`test_every_webhook_under_cluster_fails_closed`,
+    AND SUBORDINATE TO IT. On its own this check cannot decide the invariant, for
+    two reasons that are worth stating plainly because they were once mistaken for
+    coverage:
+
+    * A WEBHOOK THAT OMITS THE FIELD CONTRIBUTES NO TOKEN. Absence is not
+      neutral - it is defaulted, and what it defaults to depends on the API
+      version: ``admissionregistration.k8s.io/v1`` defaults ``failurePolicy`` to
+      ``Fail`` (pkg/apis/admissionregistration/v1/defaults.go) but ``v1beta1``
+      defaults it to ``Ignore`` (.../v1beta1/defaults.go), which is FAIL-OPEN and
+      is exactly the weakness V5 closed. A ``v1beta1`` webhook with the field
+      omitted would leave this count at one and pass.
+    * A COMMENT COUNTS. The token is matched as text, so prose mentioning
+      ``failurePolicy`` inflates the count and a legitimate documentation edit
+      fails the gate for no security reason.
+
+    So the SEMANTIC verdict belongs to the decoding scan, which resolves each
+    webhook's EFFECTIVE policy from its own API version. What this test still adds,
+    and the reason it is kept rather than deleted: it is a cheap TRIPWIRE on the
+    shape of the shipped declaration - one occurrence, in the reviewed file,
+    reading exactly ``failurePolicy: Fail``. That catches a re-indented or
+    duplicated declaration, and it is the assertion that fails if the reviewed
+    manifest is quietly replaced by a differently-formatted one.
 
     Pure Python, no subprocess: this tier is defined as subprocess-free
     (AAP §0.5.2.2), and ``grep``'s recursion, symlink and binary-file rules vary
@@ -905,3 +998,323 @@ def test_failure_policy_declared_exactly_once_under_cluster(repo_root: Path) -> 
         f"what it declares is not."
     )
 
+
+@dataclass(frozen=True)
+class _DiscoveredWebhook:
+    """One webhook, resolved from a decoded document under ``cluster/``."""
+
+    #: Repository-relative POSIX path of the file that declares it.
+    relative_path: str
+    #: Zero-based index of the YAML document within that file.
+    document_index: int
+    #: ``kind`` of the enclosing configuration.
+    kind: str
+    #: ``apiVersion`` of the enclosing configuration, which is what decides the
+    #: default policy when the field is omitted.
+    api_version: str
+    #: Zero-based index within ``webhooks``.
+    webhook_index: int
+    #: ``webhooks[i].name``, or ``None`` when unnamed.
+    name: str | None
+    #: The literal value of ``failurePolicy``, or ``None`` when the field is
+    #: absent. Kept distinct from :attr:`effective_policy` on purpose: "absent"
+    #: and "explicitly Fail" are different facts and the distinction is asserted.
+    declared_policy: object | None
+    #: The policy the API server would apply: the declared value when present,
+    #: otherwise the API version's default, or ``None`` when the API version is
+    #: unrecognised and no default can be resolved.
+    effective_policy: str | None
+
+    def render(self) -> str:
+        """One line naming this webhook and both its declared and effective policy."""
+        return (
+            f"{self.relative_path} doc[{self.document_index}] {self.kind}"
+            f"({self.api_version}) webhooks[{self.webhook_index}]"
+            f" name={self.name!r} declared={self.declared_policy!r}"
+            f" effective={self.effective_policy!r}"
+        )
+
+
+@dataclass(frozen=True)
+class _WebhookScan:
+    """Outcome of decoding every webhook-configuration candidate under ``cluster/``."""
+
+    #: Every webhook found, in walk order.
+    webhooks: tuple[_DiscoveredWebhook, ...]
+    #: Candidate files that were decoded successfully.
+    decoded: tuple[str, ...]
+    #: Candidate files that could NOT be decoded, with the reason. Never skipped:
+    #: a candidate whose content is opaque is an unasserted webhook posture.
+    undecodable: tuple[tuple[str, str], ...]
+    #: Documents whose ``kind`` is a webhook configuration but whose ``webhooks``
+    #: field is not a list of mappings, so no policy can be resolved from them.
+    malformed: tuple[str, ...]
+    #: Files that declare a ``webhooks:`` list under an UNRECOGNISED kind. Reported
+    #: rather than ignored, because a kind this module does not know is a kind
+    #: whose failure semantics it cannot vouch for.
+    unknown_kinds: tuple[str, ...]
+    #: Total files walked, for the vacuity floor.
+    files_walked: int
+    #: Files that could not be read as UTF-8 text.
+    unreadable: tuple[str, ...]
+
+    def render_webhooks(self) -> str:
+        """Every discovered webhook, one per line, for a failure message."""
+        if not self.webhooks:
+            return "    (none)"
+        return "\n".join(f"    {hook.render()}" for hook in self.webhooks)
+
+
+def _scan_tree_for_webhooks(root: Path, *, relative_to: Path) -> _WebhookScan:
+    """Decode every webhook-configuration candidate under ``root`` and resolve its policy.
+
+    THE SEMANTIC SCAN, and the answer to the token count's two blind spots: it sees
+    a webhook that OMITS ``failurePolicy`` (resolving the API version's default
+    instead of finding nothing) and it cannot be confused by a comment, because it
+    reads decoded documents rather than lines of text.
+
+    FAIL-CLOSED BY CONSTRUCTION. Every way this walk could fail to look at
+    something is recorded and separately asserted on, so no hole reads as a pass:
+    a file that is not UTF-8 text, a candidate that does not parse, a webhook
+    configuration whose ``webhooks`` field is the wrong shape, and a ``webhooks:``
+    list under a kind this module does not recognise. Triage is by TEXT and is
+    wider than the kinds, so a candidate is caught before it is decoded - which is
+    what makes an undecodable one reportable rather than invisible.
+    """
+    __tracebackhide__ = True
+    webhooks: list[_DiscoveredWebhook] = []
+    decoded: list[str] = []
+    undecodable: list[tuple[str, str]] = []
+    malformed: list[str] = []
+    unknown_kinds: list[str] = []
+    unreadable: list[str] = []
+    files_walked = 0
+
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        files_walked += 1
+        relative = path.relative_to(relative_to).as_posix()
+
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            unreadable.append(f"{relative}: {type(exc).__name__}")
+            continue
+
+        if not any(token in text for token in _WEBHOOK_CANDIDATE_TOKENS):
+            continue
+
+        try:
+            documents = list(yaml.safe_load_all(text))
+        except yaml.YAMLError as exc:
+            undecodable.append((relative, type(exc).__name__))
+            continue
+        decoded.append(relative)
+
+        for doc_index, document in enumerate(documents):
+            if not isinstance(document, Mapping):
+                continue
+            kind = document.get("kind")
+            raw_webhooks = document.get("webhooks")
+
+            if kind not in _WEBHOOK_CONFIGURATION_KINDS:
+                if raw_webhooks is not None:
+                    unknown_kinds.append(f"{relative} doc[{doc_index}] kind={kind!r}")
+                continue
+
+            if not isinstance(raw_webhooks, list) or not all(
+                isinstance(entry, Mapping) for entry in raw_webhooks
+            ):
+                malformed.append(
+                    f"{relative} doc[{doc_index}] kind={kind!r} webhooks={raw_webhooks!r}"
+                )
+                continue
+
+            api_version = str(document.get("apiVersion"))
+            for hook_index, entry in enumerate(raw_webhooks):
+                declared = entry.get(_FAILURE_POLICY_TOKEN)
+                effective = (
+                    declared
+                    if isinstance(declared, str)
+                    else _FAILURE_POLICY_DEFAULT_BY_API_VERSION.get(api_version)
+                )
+                raw_name = entry.get("name")
+                webhooks.append(
+                    _DiscoveredWebhook(
+                        relative_path=relative,
+                        document_index=doc_index,
+                        kind=str(kind),
+                        api_version=api_version,
+                        webhook_index=hook_index,
+                        name=raw_name if isinstance(raw_name, str) else None,
+                        declared_policy=declared,
+                        effective_policy=effective if isinstance(effective, str) else None,
+                    )
+                )
+
+    return _WebhookScan(
+        webhooks=tuple(webhooks),
+        decoded=tuple(decoded),
+        undecodable=tuple(undecodable),
+        malformed=tuple(malformed),
+        unknown_kinds=tuple(unknown_kinds),
+        files_walked=files_walked,
+        unreadable=tuple(unreadable),
+    )
+
+
+def test_every_webhook_under_cluster_fails_closed(
+    repo_root: Path, subtests: pytest.Subtests
+) -> None:
+    """INVARIANT: every admission webhook under ``cluster/`` is EXPLICITLY ``Fail``.
+
+    THE REPOSITORY-WIDE GUARD, MADE SEMANTIC. Its predecessor counted occurrences
+    of the ``failurePolicy`` token, which could not see the one arrangement that
+    matters most: a webhook that OMITS the field. Omission is not neutral, and what
+    it means depends on the API version -
+    ``admissionregistration.k8s.io/v1`` defaults to ``Fail`` while ``v1beta1``
+    defaults to ``Ignore`` - so a ``v1beta1`` webhook with no ``failurePolicy``
+    line is FAIL-OPEN, reopens the weakness V5 closed, and contributes nothing for a
+    text count to notice. A comment mentioning the token, meanwhile, counted as a
+    declaration. This test decodes documents instead, so neither is possible.
+
+    EXPLICIT IS REQUIRED, NOT MERELY EFFECTIVE. Each webhook must DECLARE ``Fail``,
+    not inherit it. Relying on the ``v1`` default would make the posture depend on
+    which API version the object happens to be written against, so a future
+    migration to a beta or alpha group version would silently invert it with no
+    diff to the ``failurePolicy`` line - there being none. AAP §0.10.2 states the
+    boundary as ``failurePolicy: Fail``, and this asserts exactly that.
+
+    THE SET IS CLOSED. The discovered ``(file, webhook name)`` pairs must EQUAL
+    :data:`_EXPECTED_WEBHOOKS`, so a new webhook fails here even when it is itself
+    fail-closed: none of this module's other assertions - the timeout, the side
+    effects, the review versions, the rule scope, the CA placeholder - would be
+    applied to it, and an unasserted webhook is how the next fail-open one arrives.
+
+    FIVE GUARDS AGAINST A VACUOUS PASS, one per way the walk could fail to look:
+    unreadable files, undecodable candidates, malformed ``webhooks`` fields,
+    ``webhooks`` under an unrecognised kind, and a degenerate file count. Each is
+    asserted separately so the report names which hole opened.
+
+    ACCUMULATE semantics for the per-webhook verdicts, so a tree with several
+    fail-open webhooks names all of them in one run rather than stopping at the
+    first.
+    """
+    cluster_dir = repo_root / _CLUSTER_DIR_NAME
+    assert cluster_dir.is_dir(), (
+        f"{_REQUIREMENT} SETUP BREAKAGE: {_CLUSTER_DIR_NAME}/ is not a directory under "
+        f"{repo_root}. The repository-wide invariant cannot be evaluated over a tree that is "
+        f"not there, and must never be reported as satisfied by default."
+    )
+
+    scan = _scan_tree_for_webhooks(cluster_dir, relative_to=repo_root)
+
+    # Guard 1: a file this walk could not read is a webhook it could not have seen.
+    assert not scan.unreadable, (
+        f"{_REQUIREMENT} SETUP BREAKAGE: {len(scan.unreadable)} file(s) under "
+        f"{_CLUSTER_DIR_NAME}/ could not be read as UTF-8 text, so the webhook scan covered "
+        f"an incomplete tree: {list(scan.unreadable)!r}"
+    )
+
+    # Guard 2: THE ONE THAT MATTERS MOST. A candidate file mentions a webhook kind,
+    # a `webhooks:` list or `failurePolicy`, so it is exactly where a webhook would
+    # be - and if it cannot be decoded, its posture is unknown rather than absent.
+    # Seven templated YAML files under cluster/ fail to parse; measured, none is a
+    # candidate. If one ever becomes one, this fails instead of stepping over it.
+    assert not scan.undecodable, (
+        f"{_REQUIREMENT} SETUP BREAKAGE: {len(scan.undecodable)} candidate file(s) under "
+        f"{_CLUSTER_DIR_NAME}/ mention a webhook kind, a 'webhooks:' list or "
+        f"{_FAILURE_POLICY_TOKEN!r} but could not be decoded as YAML: "
+        f"{list(scan.undecodable)!r}. An undecodable candidate is an UNASSERTED webhook "
+        f"posture, so it fails here rather than being skipped. Render the template before "
+        f"scanning, or move the object into a decodable file."
+    )
+
+    # Guard 3: a webhook configuration whose `webhooks` field is not a list of
+    # mappings yields no resolvable policy, so it cannot be silently passed over.
+    assert not scan.malformed, (
+        f"{_REQUIREMENT} SETUP BREAKAGE: {len(scan.malformed)} webhook configuration(s) under "
+        f"{_CLUSTER_DIR_NAME}/ declare a 'webhooks' field that is not a list of mappings, so "
+        f"no failure policy could be resolved from them: {list(scan.malformed)!r}"
+    )
+
+    # Guard 4: a `webhooks:` list under a kind this module does not know is a
+    # posture it cannot vouch for.
+    assert not scan.unknown_kinds, (
+        f"{_REQUIREMENT}: {len(scan.unknown_kinds)} document(s) under {_CLUSTER_DIR_NAME}/ "
+        f"declare a 'webhooks' list under a kind this module does not recognise: "
+        f"{list(scan.unknown_kinds)!r}. Recognised kinds are "
+        f"{sorted(_WEBHOOK_CONFIGURATION_KINDS)}. Add the kind to "
+        f"_WEBHOOK_CONFIGURATION_KINDS together with its defaulting behaviour, so its "
+        f"failure semantics are asserted rather than assumed."
+    )
+
+    # Guard 5: coarse tripwire against a walk pointed at the wrong root.
+    assert scan.files_walked >= _CLUSTER_SCAN_FILE_FLOOR, (
+        f"{_REQUIREMENT} SETUP BREAKAGE - VACUOUS SCAN: the walk of {_CLUSTER_DIR_NAME}/ read "
+        f"only {scan.files_walked} file(s), below the floor of {_CLUSTER_SCAN_FILE_FLOOR}. "
+        f"259 were measured in this tree, so a count this low means the walk is broken rather "
+        f"than that the tree shrank."
+    )
+
+    # THE CLOSED SET. Asserted before the per-webhook verdicts so that "a webhook
+    # disappeared" and "a webhook appeared" are reported as such rather than as an
+    # absence of failures.
+    discovered = {(hook.relative_path, hook.name) for hook in scan.webhooks}
+    assert discovered == set(_EXPECTED_WEBHOOKS), (
+        f"{_REQUIREMENT} VIOLATED: the admission webhooks declared under "
+        f"{_CLUSTER_DIR_NAME}/ are {sorted(discovered)}, expected exactly "
+        f"{sorted(_EXPECTED_WEBHOOKS)}. A webhook that appeared here is one whose timeout, "
+        f"side effects, review versions, rule scope and CA bundle NOTHING in this suite "
+        f"asserts - so it fails even if its own failurePolicy is Fail. A webhook that "
+        f"disappeared has taken the V5 posture with it. All discovered webhooks:\n"
+        f"{scan.render_webhooks()}"
+    )
+
+    # THE INVARIANT, per webhook, accumulated.
+    for hook in scan.webhooks:
+        with subtests.test(path=hook.relative_path, webhook=hook.name):
+            assert hook.declared_policy == _EXPECTED_FAILURE_POLICY, (
+                f"{_REQUIREMENT} VIOLATED: {hook.render()} must DECLARE "
+                f"{_FAILURE_POLICY_TOKEN}: {_EXPECTED_FAILURE_POLICY!r}. Its declared value is "
+                f"{hook.declared_policy!r} and the policy the API server would apply is "
+                f"{hook.effective_policy!r}. An OMITTED field is the dangerous case: "
+                f"{_EXPECTED_API_VERSION} defaults it to {_EXPECTED_FAILURE_POLICY!r} but "
+                f"admissionregistration.k8s.io/v1beta1 defaults it to "
+                f"{_FAIL_OPEN_FAILURE_POLICY!r}, so an omission makes the posture depend on the "
+                f"group version and a later migration would invert it with no visible diff. "
+                f"Declare it explicitly."
+            )
+            assert hook.effective_policy == _EXPECTED_FAILURE_POLICY, (
+                f"{_REQUIREMENT} VIOLATED: {hook.render()} resolves to an effective "
+                f"{_FAILURE_POLICY_TOKEN} of {hook.effective_policy!r}, not "
+                f"{_EXPECTED_FAILURE_POLICY!r}. An unresolved (None) value means the apiVersion "
+                f"is one whose defaulting this module has not transcribed; add it to "
+                f"_FAILURE_POLICY_DEFAULT_BY_API_VERSION rather than assuming it is safe."
+            )
+
+
+def test_the_webhook_scan_sees_the_reviewed_manifest(repo_root: Path) -> None:
+    """VACUITY CONTROL for the decoding scan: it really did decode the known file.
+
+    :func:`test_every_webhook_under_cluster_fails_closed` would report a clean pass
+    over a walk that decoded NOTHING - an empty set of webhooks equals an empty set
+    of expectations only if the expectation is also empty, but a mis-rooted walk
+    combined with a future edit to :data:`_EXPECTED_WEBHOOKS` could reach exactly
+    that state. This test asserts positively that the reviewed manifest was among
+    the files DECODED, and that the expectation set is non-empty, so the scan
+    cannot be satisfied by looking at nothing.
+    """
+    scan = _scan_tree_for_webhooks(repo_root / _CLUSTER_DIR_NAME, relative_to=repo_root)
+
+    assert _EXPECTED_WEBHOOKS, (
+        f"{_REQUIREMENT}: _EXPECTED_WEBHOOKS is empty, so the closed-set assertion would be "
+        f"satisfied by a scan that found no webhooks at all."
+    )
+    assert _MANIFEST_RELATIVE_POSIX in scan.decoded, (
+        f"{_REQUIREMENT} SETUP BREAKAGE - VACUOUS SCAN: the walk of {_CLUSTER_DIR_NAME}/ read "
+        f"{scan.files_walked} file(s) but {_MANIFEST_RELATIVE_POSIX} was not among the "
+        f"{len(scan.decoded)} candidate file(s) it decoded. Any verdict about webhook failure "
+        f"policy from this scan would be meaningless. Decoded: {list(scan.decoded)!r}"
+    )

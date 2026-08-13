@@ -110,6 +110,7 @@ import {
 } from '../domain/evidence';
 import { V8_OBSERVATIONS } from '../domain/observationIds';
 import {
+  describeStatusReason,
   isSafeAbsolutePath,
   safeLabel,
   safeObservationValue,
@@ -940,12 +941,26 @@ function requireDiagnosticPhrase(
 }
 
 /**
- * Requires the diagnostic to be MEASURED SILENT — the compatibility default's signature.
+ * Requires the diagnostic to be MEASURED SILENT — the MUTUAL-TLS path's signature.
  *
- * The shim path prints nothing at all, and that silence is precisely what distinguishes it
- * from an operator's explicit opt-in. Requiring an explicit `null` rather than accepting an
- * absent field is the same rule as {@link requireNoEndpoint}: an absence that was measured
- * is evidence, and an absence nobody looked for is not.
+ * `configure-etcd-params` prints only on the fallback and abort paths: the
+ * all-credentials branch appends its four flags and says nothing
+ * (cluster/gce/gci/configure-kubeapiserver.sh L21-L25). Requiring that silence closes
+ * the case where a payload claims mutual TLS while the shell actually printed a
+ * warning — which would mean the branch that ran was not this one, and the endpoint
+ * and flags reported alongside describe a boot that did not happen.
+ *
+ * NOT USED FOR THE COMPATIBILITY DEFAULT, though it once was. That path was believed
+ * to print nothing, and silence was taken as what told it apart from an operator's
+ * explicit opt-in. Executing the shell disproved it: the branch guard is
+ * `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`, so unset and explicit
+ * `true` are the SAME branch and emit the SAME warning. What tells them apart is
+ * whether the variable was explicitly supplied, which `readBranch` reads from
+ * `V8_OBSERVATIONS.unitTestCompatibilityDefault`.
+ *
+ * Requiring an explicit `null` rather than accepting an absent field is the same rule
+ * as {@link requireNoEndpoint}: an absence that was measured is evidence, and an
+ * absence nobody looked for is not.
  */
 function requireNoDiagnostic(observations: readonly ControlObservation[]): EtcdMeasurement {
   const identity = V8_OBSERVATIONS.diagnostic;
@@ -1282,8 +1297,29 @@ function buildEtcdEvidence(observations: readonly ControlObservation[]): EtcdTra
       ),
       requireOutcome(observations, 'plaintext-loopback'),
       requireExitCode(observations, 0, 'the direct invocation was allowed to continue'),
-      // The silence IS the measurement here, and it is the mirror of the warning above.
-      requireNoDiagnostic(observations),
+      // THE SAME WARNING AS THE EXPLICIT OPT-IN, and this was measured against the
+      // shipped shell rather than assumed. `configure-etcd-params` tests
+      // `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`
+      // (cluster/gce/gci/configure-kubeapiserver.sh L41), so an UNSET variable takes
+      // the identical branch to an explicit `true` and emits the identical WARNING on
+      // stdout. Executing all three states confirms it:
+      //   unset          -> rc=0, http endpoint, 1 WARNING, 0 ERROR
+      //   explicit true  -> rc=0, http endpoint, 1 WARNING, 0 ERROR
+      //   explicit false -> rc=1, no endpoint,   0 WARNING, 1 ERROR
+      //
+      // This branch previously required the diagnostic to be SILENT, which rejected
+      // truthful evidence and accepted an impossible one: a report of the shim path
+      // carrying the warning the shell actually writes was marked VIOLATED, while a
+      // report claiming silence -- a state the shell cannot produce -- was SATISFIED.
+      // The two plaintext branches are distinguished by
+      // `V8_OBSERVATIONS.unitTestCompatibilityDefault` (see `readBranch`), i.e. by
+      // whether the variable was explicitly supplied, and by nothing else.
+      requireDiagnosticPhrase(
+        observations,
+        ETCD_PLAINTEXT_WARNING_MESSAGE,
+        'the plaintext transport was announced with a warning, as it is on every ' +
+          'permitted-plaintext path',
+      ),
     );
   } else {
     measurements.push(
@@ -1486,7 +1522,7 @@ function PostureError({ error }: { readonly error: ControlStatusError }): ReactE
         {error.reason !== undefined ? (
           <>
             <dt>Reason</dt>
-            <dd>{safeProse(error.reason)}</dd>
+            <dd>{describeStatusReason(error.reason)}</dd>
           </>
         ) : null}
       </dl>

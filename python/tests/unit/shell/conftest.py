@@ -205,7 +205,9 @@ from tests.fixtures.etcd_env_cases import (
 # ``bash.must_invoke_func`` and :meth:`BashInvoker.must_invoke_func` can never be
 # confused for one another at a call site inside this file.
 from tests.helpers import bash
+from tests.helpers.bash import shell_quote
 from tests.helpers.manifest import (
+    BASE_TEMPLATE_RELATIVE_PATH,
     ENV_SCRIPT_FILE_NAME,
     MANIFEST_DESTINATION_RELATIVE_PATH,
     MANIFEST_SOURCES_RELATIVE_PATH,
@@ -219,17 +221,23 @@ from tests.helpers.manifest import (
 )
 
 __all__ = [
+    "AUDIT_POLICY_BASE_TEMPLATE_TARGET",
+    "AUDIT_POLICY_FILE_NAME",
+    "AUDIT_POLICY_FUNC_NAME",
     "KUBE_ENV_J2_RELATIVE_PATH",
     "KUBE_ENV_J2_TARGET",
     "BashInvoker",
+    "GeneratedShellPolicy",
     "KubeEnvRenderFactory",
     "ManifestCaseFactory",
     "ShellManifestCase",
     "bash_invoke",
     "gci_cwd",
+    "generated_audit_policy",
     "kube_home",
     "manifest_case",
     "render_kube_env",
+    "require_generated_policy_text",
 ]
 
 # ---------------------------------------------------------------------------
@@ -253,6 +261,39 @@ KUBE_ENV_J2_RELATIVE_PATH: Final[tuple[str, ...]] = (
 # Go's ParseFiles names each parsed template that way, and the file defines no
 # inner template, so its whole body IS the template.
 KUBE_ENV_J2_TARGET: Final[str] = "kube_env.j2"
+
+
+# ---------------------------------------------------------------------------
+# The audit-policy generation this tier performs ONCE per module
+# ---------------------------------------------------------------------------
+# These three constants and the fixture at the foot of this file serve
+# tests/unit/shell/test_audit_policy.py, whose 620 parametrized cases are all
+# judged against ONE run of the shipped generator. They live HERE, not there,
+# because AAP §0.4.4.1 and §0.9.2 put fixtures in conftest.py and never inline in
+# a test module -- and because the invocation is shell-harness work, which is what
+# this file owns. What stays in the test module is everything that INTERPRETS the
+# result: the ports of reader.go and checker.go, which that module's frozen
+# specification requires be kept there ("keep the evaluator inside this module ...
+# no 44th file may be created"). So the split is exactly along the tier boundary:
+# this file RUNS bash and hands over bytes; that module decides what the bytes
+# mean.
+
+#: The shell function under test, declared at cluster/gce/gci/configure-helper.sh
+#: L1156. It takes ``path="${1}"`` and an optional ``policy="${2:-}"`` and reads NO
+#: environment variable, which is why a fragment ``kube-env`` cannot break it.
+AUDIT_POLICY_FUNC_NAME: Final[str] = "create-master-audit-policy"
+
+#: The file the generator is asked to write, named as Go names it
+#: (audit_policy_test.go L53). It is a path the function is GIVEN, not a location
+#: it derives, so nothing outside the module's own temporary tree is ever touched.
+AUDIT_POLICY_FILE_NAME: Final[str] = "audit_policy.yaml"
+
+#: The ``kube-env`` render target for that invocation, as the Go call spells it
+#: (audit_policy_test.go L65). ``base.template`` is rendered as its OWN target
+#: here, unlike the etcd and KMS cases which render a sibling template that
+#: invokes the ``base`` template this file defines -- see the fixture's docstring
+#: for the measured consequence.
+AUDIT_POLICY_BASE_TEMPLATE_TARGET: Final[str] = "base.template"
 
 
 # ---------------------------------------------------------------------------
@@ -300,15 +341,18 @@ class _Substitution:
 class _Invocation:
     """``{{template "name" .Field}}``: render an associated template.
 
-    ``argument`` is ``None`` for ``{{template "name"}}``, which Go renders with a
-    nil dot, and an empty tuple for ``{{template "name" .}}``, which passes the
-    whole dot. The shipped trio uses ``{{ template "base" .KubeHome }}``, whose
-    argument is a STRING -- which is why ``base.template`` dereferences the bare
-    ``{{.}}`` for ``readonly KUBE_HOME=``.
+    ``argument`` is an empty tuple for ``{{template "name" .}}``, which passes the
+    whole dot, and a field path otherwise. The shipped trio uses
+    ``{{ template "base" .KubeHome }}``, whose argument is a STRING -- which is why
+    ``base.template`` dereferences the bare ``{{.}}`` for ``readonly KUBE_HOME=``.
+
+    The ARGUMENT-LESS form ``{{template "name"}}`` never reaches here: Go renders it
+    with a nil dot and this renderer refuses it at parse time rather than guessing.
+    See the refusal in :func:`_parse_nodes`.
     """
 
     name: str
-    argument: tuple[str, ...] | None
+    argument: tuple[str, ...]
     action: str
 
 
@@ -363,24 +407,80 @@ def _parse_field_expression(expression: str, *, origin: str, action: str) -> tup
     return segments
 
 
-def _tokenize(text: str) -> list[tuple[bool, str]]:
+def _tokenize(text: str, *, origin: str) -> list[tuple[bool, str]]:
     """Split template text into ``(is_action, payload)`` tokens, in order.
 
     Literal runs keep every byte, including the newlines around each action:
     Go trims whitespace only for the explicit ``{{- -}}`` forms, which none of
     these templates uses, and a renderer that trimmed would differ from the
     oracle on every line.
+
+    AN UNMATCHED ``{{`` IS AN ERROR, NOT TEXT. Go's parser reports
+    ``unclosed action`` and refuses to execute the template at all. Treating the
+    opener as a literal -- which is what falling out of the regex loop did -- turned a
+    template the oracle REJECTS into one that renders, and it renders wrongly in the
+    worst possible way: the intended substitution is missing while ``{{.KubeHome``
+    appears verbatim in a ``readonly`` assignment, so the shell test then fails
+    somewhere else entirely, for a reason that has nothing to do with the control it
+    was written to check.
+
+    Args:
+        text: The template text.
+        origin: The file being tokenized, for the error message.
+
+    Returns:
+        The token stream.
+
+    Raises:
+        ManifestHarnessError: if a literal run contains an unclosed ``{{``.
     """
+    __tracebackhide__ = True
     tokens: list[tuple[bool, str]] = []
     position = 0
     for match in _ACTION_PATTERN.finditer(text):
         if match.start() > position:
-            tokens.append((False, text[position : match.start()]))
+            literal = text[position : match.start()]
+            _reject_unclosed_action(literal, offset=position, text=text, origin=origin)
+            tokens.append((False, literal))
         tokens.append((True, match.group(1).strip()))
         position = match.end()
     if position < len(text):
-        tokens.append((False, text[position:]))
+        trailing = text[position:]
+        _reject_unclosed_action(trailing, offset=position, text=text, origin=origin)
+        tokens.append((False, trailing))
     return tokens
+
+
+def _reject_unclosed_action(literal: str, *, offset: int, text: str, origin: str) -> None:
+    """Refuse a literal run that opens an action it never closes. Go: ``unclosed action``.
+
+    Only the OPENING delimiter is checked. A stray ``}}`` is ordinary text to Go's
+    parser as well -- it has no meaning outside an action -- so refusing it would be
+    stricter than the oracle, and being stricter than the oracle is its own kind of
+    divergence.
+
+    Args:
+        literal: The literal run to inspect.
+        offset: Where that run starts in ``text``, so the line number is the real one.
+        text: The whole template, for computing the line number.
+        origin: The file being parsed.
+
+    Raises:
+        ManifestHarnessError: if ``literal`` contains ``{{``.
+    """
+    __tracebackhide__ = True
+    index = literal.find("{{")
+    if index < 0:
+        return
+    line = text.count("\n", 0, offset + index) + 1
+    excerpt = literal[index : index + 60].replace("\n", "\\n")
+    raise ManifestHarnessError(
+        f"unclosed action in {origin} at line {line}: {excerpt!r} opens '{{{{' and never closes "
+        "it. Go's text/template reports 'unclosed action' and refuses to execute the template, "
+        "so this renderer refuses it too rather than emitting the opener as literal text -- "
+        "which would drop the intended substitution AND write '{{' into a readonly assignment, "
+        "and the shell test would then fail somewhere unrelated."
+    )
 
 
 def _parse_nodes(
@@ -455,11 +555,30 @@ def _parse_nodes(
         invocation = _INVOCATION_PATTERN.match(payload)
         if invocation is not None:
             expression = invocation.group(2)
-            argument = (
-                _parse_field_expression(expression, origin=origin, action=payload)
-                if expression
-                else None
-            )
+            if not expression:
+                # REFUSED RATHER THAN APPROXIMATED. Go renders
+                # `{{template "name"}}` with a NIL dot, so every field reference
+                # inside the invoked template errors -- and base.template's body is
+                # `readonly KUBE_HOME={{.}}`, which under a nil dot renders the
+                # literal text "<no value>" into a readonly assignment rather than a
+                # path. This renderer used to pass the CURRENT dot instead, which is
+                # a different program: the invoked template would silently succeed
+                # against data Go never gave it, and the generated kube-env would
+                # differ from the oracle's while both runs reported success.
+                #
+                # No shipped template uses the form -- etcd.template line 1 and
+                # kms.template line 1 both write
+                # `{{ template "base" .KubeHome }}` -- so refusing costs nothing and
+                # closes the divergence at the only point it can enter.
+                raise ManifestHarnessError(
+                    f"action {{{{{payload}}}}} in {origin} invokes a template with NO argument. "
+                    "Go renders that with a nil dot, so every field reference inside the invoked "
+                    "template fails and a bare '{{.}}' renders the literal '<no value>'. This "
+                    "renderer refuses the form rather than substituting the current dot, which "
+                    "would be a different program. Pass the data explicitly, as the shipped "
+                    'templates do with \'{{ template "base" .KubeHome }}\'.'
+                )
+            argument = _parse_field_expression(expression, origin=origin, action=payload)
             nodes.append(_Invocation(invocation.group(1), argument, payload))
             index += 1
             continue
@@ -505,8 +624,9 @@ def _parse_template_files(paths: Sequence[Path]) -> _TemplateSet:
             raise ManifestHarnessError(
                 f"failed to read the kube-env template {path}: {exc}"
             ) from exc
+        origin = os.fspath(path)
         nodes, _, definitions = _parse_nodes(
-            _tokenize(text), 0, origin=os.fspath(path), terminated=False
+            _tokenize(text, origin=origin), 0, origin=origin, terminated=False
         )
         templates.update(definitions)
         templates[path.name] = nodes
@@ -546,7 +666,7 @@ def _lookup(dot: object, path: Sequence[str], *, action: str) -> object:
 
 
 def _format_value(value: object, *, action: str) -> str:
-    """Format one value the way Go's template output does.
+    """Format one value for a ``{{…}}`` substitution, SHELL-QUOTED.
 
     A bool renders as the LOWERCASE ``true``/``false`` Go prints, which is
     load-bearing: tests/fixtures/templates/kube_env.j2 must emit the literal
@@ -555,6 +675,33 @@ def _format_value(value: object, *, action: str) -> str:
     ``${ETCD_APISERVER_ALLOW_INSECURE:-true}`` and bash substitutes that default
     for an empty value as well as an unset one -- so anything but ``false``
     selects the permissive branch.
+
+    EVERY SUBSTITUTED VALUE IS SHELL-QUOTED, and this is the ONLY place it happens.
+
+    Each of the four kube-env templates -- the three shipped under
+    cluster/gce/gci/testdata/kube-apiserver/ and this tier's own kube_env.j2 --
+    writes every substitution as the right-hand side of a ``readonly VAR={{.Field}}``
+    assignment, and the generated file is then SOURCED by bash. That makes each value
+    a crossing from data into code: unquoted, a value containing a space splits the
+    assignment and executes the remainder, and one containing ``$(…)``, a backtick or
+    ``${…}`` is evaluated rather than read. ``KubeHome`` is derived from ``tmp_path``
+    and therefore from ``--basetemp``, an externally supplied argument, so the path is
+    not under this module's control. :func:`tests.helpers.bash.shell_quote` closes
+    that, and it is applied HERE -- at the substitution -- rather than in
+    :meth:`KubeEnvRenderFactory.context`, because a context value may ALSO be the
+    subject of a ``{{if}}`` guard (kms.template line 3 guards
+    ``.EncryptionProviderConfig`` and line 4 substitutes it), and a pre-quoted empty
+    string would read as truthy and flip that branch.
+
+    FIDELITY TO THE ORACLE IS PRESERVED, not traded away. ``shlex.quote`` returns
+    ``[A-Za-z0-9_@%+=:,./-]`` values unchanged, and every value the ported cases carry
+    -- ``tmp_path`` paths, ``https://127.0.0.1:2379``, base64, placeholder identifiers,
+    ``false`` -- is in that set, so the rendered text is byte-identical to Go's
+    ``text/template`` output for all of them. Quoting only appears where the value
+    would otherwise have been interpreted, and in bash an assignment of a
+    single-quoted word yields exactly the same VARIABLE VALUE as the unquoted form
+    would have yielded had it been safe -- so no case's observable environment
+    changes.
 
     Raises:
         ManifestHarnessError: for ``None`` and for any type the shipped
@@ -566,7 +713,7 @@ def _format_value(value: object, *, action: str) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return value
+        return shell_quote(value)
     if isinstance(value, int):
         return str(value)
     raise ManifestHarnessError(
@@ -625,9 +772,9 @@ def _render_nodes(nodes: Sequence[_Node], dot: object, templates: _TemplateSet) 
                     "the target depends on -- base.template first, since etcd.template and "
                     "kms.template both invoke the 'base' template it defines."
                 )
-            inner_dot = (
-                dot if node.argument is None else _lookup(dot, node.argument, action=node.action)
-            )
+            # The argument is always present: the no-argument form is refused at
+            # parse time, so there is no nil-dot case to model here.
+            inner_dot = _lookup(dot, node.argument, action=node.action)
             chunks.append(_render_nodes(templates[node.name], inner_dot, templates))
     return "".join(chunks)
 
@@ -1681,11 +1828,13 @@ class BashInvoker:
         """Invoke like :meth:`must_invoke_func`, but treat a non-zero exit as data.
 
         Separated streams and no raise, which is what lets the V8 fail-closed
-        module assert ``returncode == 1`` and match the refusal in the same test.
-        Which stream a diagnostic lands on is the SHIPPED script's choice and
-        worth checking rather than assuming: ``configure-etcd-params`` emits both
-        its WARNING and its "refusing to fall back to plaintext etcd" ERROR with
-        a bare ``echo``, so they arrive on STDOUT.
+        module assert ``returncode == 1`` and match the refusal on the stream AAP
+        §0.10.2 names in the same test. Which stream a diagnostic lands on is the
+        SHIPPED script's choice: ``configure-etcd-params`` emits its "refusing to
+        fall back to plaintext etcd" ERROR and its partial-credential ERROR with
+        ``>&2`` (configure-kubeapiserver.sh lines 65 and 70), while its local/dev
+        WARNING stays on stdout -- so a caller can require the refusal on stderr
+        and require it ABSENT from stdout, which a merged capture cannot express.
 
         Args:
             func_name: The shell function to call.
@@ -2010,7 +2159,7 @@ def manifest_case(
         case = manifest_case(func_name="create-master-audit-policy")
         case.invoke_func(
             render_kube_env.context(KubeAPIServerEnv(), kube_home=case.kube_home),
-            [CONFIGURE_HELPER_SCRIPT],
+            [bash.CONFIGURE_HELPER_SCRIPT],
             "base.template",
             (BASE_TEMPLATE_RELATIVE_PATH,),
             path_args=(policy_file,),
@@ -2062,7 +2211,8 @@ def bash_invoke(gci_cwd: Path) -> BashInvoker:
       ``configure-etcd-params`` must exit 1 both when all six etcd credentials
       are absent and ``ETCD_APISERVER_ALLOW_INSECURE`` is not ``true``, and when
       they are only PARTIALLY present -- asserted together with its refusal
-      message, which it emits on stdout.
+      message, which it emits on STDERR (``>&2``, configure-kubeapiserver.sh
+      lines 45 and 49) as AAP §0.10.2 requires.
     * :meth:`~BashInvoker.run_bash` for the nameref call shape
       ``configure-etcd-params`` requires.
     * :meth:`~BashInvoker.must_invoke_func_with_args` for
@@ -2078,3 +2228,185 @@ def bash_invoke(gci_cwd: Path) -> BashInvoker:
     oracle case into a failure that says nothing about the control under test.
     """
     return BashInvoker(cwd=gci_cwd)
+
+
+# ---------------------------------------------------------------------------
+# The audit-policy artifact: generated ONCE per module, held immutably
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedShellPolicy:
+    """One run of the shipped ``create-master-audit-policy``, as bytes and nothing more.
+
+    Frozen, and holding only strings and a path: 620 parametrized cases share a
+    single instance, so anything mutable here would be cross-test contamination
+    under ``pytest-randomly`` and ``pytest-xdist -n auto`` (AAP §0.7.2).
+
+    Deliberately NOT a loaded policy. Loading and evaluating are ports of
+    ``reader.go`` and ``checker.go`` and belong to
+    tests/unit/shell/test_audit_policy.py by that module's own specification; this
+    tier's job ends at "the shipped bash ran and wrote these bytes". Keeping the
+    boundary there is also what lets this fixture live in a conftest at all,
+    since the loader is not importable from here.
+
+    Attributes:
+        text: The policy file's contents, read while the case's ``KUBE_HOME``
+            still existed. Carried so consumers decode the SHIPPED BYTES rather
+            than re-deriving them from a parsed form, which would only prove a
+            loader self-consistent.
+        path: Where the generator was told to write. Inside a directory this
+            fixture owns, and already removed by the time a consumer sees the
+            object -- carried for failure messages, never to be re-read.
+        combined_output: Everything the invocation wrote, stdout and stderr
+            merged as Go's ``CombinedOutput`` returns them. Diagnostics only:
+            it contains the bash syntax error the fragment ``kube-env`` provokes
+            (see :func:`generated_audit_policy`), so pinning it would fail the
+            suite for a template change that has nothing to do with control V6.
+    """
+
+    text: str
+    path: Path
+    combined_output: str
+
+
+def require_generated_policy_text(
+    policy_file: Path,
+    *,
+    returncode: int,
+    combined_output: str,
+) -> str:
+    """Read the generated policy file, or raise because nothing was generated.
+
+    A separate public function rather than an inline check inside the fixture, so
+    that the refusal is itself testable -- tests/unit/shell/test_audit_policy.py
+    exercises both of its branches directly.
+
+    WHY THE CHECK EXISTS AT ALL. The invocation exits 0 even though its
+    ``kube-env`` is an unparseable fragment (see :func:`generated_audit_policy`),
+    so exit status alone is NOT evidence that the generator ran. Without this,
+    a generator that silently stopped writing would leave every dependent case
+    erroring on a missing file with no explanation of why.
+
+    Args:
+        policy_file: Where the generator was told to write.
+        returncode: The invocation's exit status, quoted in the message.
+        combined_output: The invocation's merged output, quoted in the message.
+
+    Returns:
+        The file's contents.
+
+    Raises:
+        ManifestHarnessError: if no file exists at ``policy_file``. A harness
+            failure rather than a control finding: nothing was measured, so
+            nothing may be reported about the control.
+    """
+    __tracebackhide__ = True
+    if not policy_file.is_file():
+        raise ManifestHarnessError(
+            f"{AUDIT_POLICY_FUNC_NAME} exited {returncode} but wrote no policy to "
+            f"{policy_file}. Combined output:\n{combined_output}"
+        )
+    return policy_file.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def generated_audit_policy(
+    repo_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[GeneratedShellPolicy]:
+    """Run the shipped ``create-master-audit-policy`` ONCE and hand over its bytes.
+
+    PORTS: audit_policy_test.go L50-70 in full -- the ``os.MkdirTemp`` plus the
+    BARE ``ManifestTestCase`` struct literal (L53-58), ``defer c.tearDown()``
+    (L59) and the ``mustInvokeFunc`` call (L62-67). The ``LoadPolicyFromFile``
+    that follows at L69-70 is the consumer's, not this fixture's, because the
+    loader lives in the test module.
+
+    INVARIANT LOCKED: the policy every dependent case is judged against is the one
+    the SHIPPED bash generator just wrote, from the SHIPPED
+    ``testdata/kube-apiserver/base.template``, into a directory this fixture alone
+    owns -- never a fixture copy and never a Python re-implementation
+    (tech-spec §6.6.1.1).
+
+    THE BARE SHAPE, AND WHY IT MATTERS. The Go harness is a struct literal setting
+    only ``t``, ``kubeHome`` and ``manifestFuncName``, so ``mustCopyFromTemplate``,
+    ``mustCopyAuxFromTemplate`` and ``mustCreateManifestDstDir`` never run and
+    ``mustLoadPodFromManifest`` is never called. :class:`ManifestCaseFactory` is
+    therefore invoked with NO ``manifest``, which is the shape it supports for
+    exactly this caller. Only ONE script is sourced -- ``configure-helper.sh`` --
+    because that is where the function is declared and the apiserver configuration
+    script plays no part here.
+
+    WHY MODULE SCOPE, AND WHY THE FUNCTION-SCOPED FIXTURES ARE NOT USED. 620
+    parametrized items share this policy; generating it per item would run bash 620
+    times to produce 620 identical files. A module-scoped fixture may not depend on
+    a function-scoped one, and :func:`kube_home`, :func:`render_kube_env` and
+    :func:`manifest_case` are all function-scoped, so this composes
+    :class:`KubeEnvRenderFactory` and :class:`ManifestCaseFactory` directly over the
+    session-scoped :func:`repo_root` and pytest's ``tmp_path_factory``. It
+    reproduces every guarantee those fixtures give: a ``KUBE_HOME`` inside a
+    pytest-owned temporary directory, unique to the requesting module, torn down in
+    a ``finally`` whether its tests passed or failed.
+
+    WHAT SUCCESS MEANS HERE, and it looks exactly like a failure until understood.
+    Rendering ``base.template`` as its own target yields the file's stray trailing
+    text after ``{{end}}`` -- measured as exactly ``'}\\n\\n'`` -- so sourcing it
+    prints a bash syntax error and the ``source`` clause ALONE returns 2, while the
+    invocation as a whole returns 0 because ``;`` composition yields the LAST
+    command's status. The generator still writes a valid policy. That is measured,
+    expected, and left exactly as the oracle leaves it: nothing is filtered, no
+    ``set -e`` is added and the ``;`` separators are not changed to ``&&``.
+
+    Yields:
+        The generated policy's text, path and the invocation's combined output.
+
+    Raises:
+        tests.helpers.bash.BashInvocationError: if the generator exits non-zero or
+            times out. Aborts every dependent case, which is what Go's
+            ``require.NoError`` does.
+        ManifestHarnessError: if the generator wrote no file at all.
+    """
+    package_dir = gci_package_dir(repo_root)
+    base_dir = tmp_path_factory.mktemp("audit-policy")
+    renderer = KubeEnvRenderFactory(
+        package_dir=package_dir,
+        # Never written to: the bare shape renders into the CASE's own KUBE_HOME,
+        # which ManifestCaseFactory creates below and passes to write() explicitly.
+        # A directory is still required, and base_dir is the one this fixture owns.
+        kube_home=base_dir,
+        repo_root=repo_root,
+    )
+    factory = ManifestCaseFactory(
+        repo_root=repo_root,
+        package_dir=package_dir,
+        base_dir=base_dir,
+        renderer=renderer,
+    )
+    try:
+        # No `manifest=`: the BARE shape of audit_policy_test.go L54-58.
+        case = factory(func_name=AUDIT_POLICY_FUNC_NAME)
+        policy_file = case.kube_home / AUDIT_POLICY_FILE_NAME
+
+        # The port of L62-67. The render context carries the single field the Go
+        # struct literal sets, `kubeAPIServerEnv{KubeHome: c.kubeHome}`; rendering
+        # base.template as its own target dereferences no field at all, so this is
+        # the whole environment the oracle supplies. The output path travels as a
+        # POSITIONAL ARGUMENT and is never interpolated into the script text.
+        result = case.invoke_func(
+            {"KubeHome": os.fspath(case.kube_home)},
+            [bash.CONFIGURE_HELPER_SCRIPT],
+            AUDIT_POLICY_BASE_TEMPLATE_TARGET,
+            (BASE_TEMPLATE_RELATIVE_PATH,),
+            path_args=(policy_file,),
+        )
+        text = require_generated_policy_text(
+            policy_file, returncode=result.returncode, combined_output=result.stdout
+        )
+        yield GeneratedShellPolicy(
+            text=text, path=policy_file, combined_output=result.stdout
+        )
+    finally:
+        # The analogue of `defer c.tearDown()`: unconditional, so a failing test
+        # still gives its tree back instead of accumulating one per xdist worker.
+        factory.tear_down_all()

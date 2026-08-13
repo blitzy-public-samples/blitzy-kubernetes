@@ -63,26 +63,46 @@ proven by running it, not taken on trust.
    nameref call shape still works, positioned so that breaking it turns the suite
    red instead of vacuously green.
 
-2. THE ERROR AND THE WARNING GO TO **STDOUT**, NOT STDERR.
+2. THE TWO FATAL ERRORS GO TO **STDERR**; THE WARNING GOES TO **STDOUT**. THE
+   SPLIT IS THE ASSERTION.
 
-   AAP §0.10.2 describes the refusal as "stderr containing ...". The shipped code
-   emits it with a plain ``echo`` and no ``>&2`` -- line 43 for the WARNING, line
-   45 for the refusal ERROR, line 49 for the partial-credential ERROR -- so all
-   three arrive on STDOUT. Under the enterprise bar this suite is held to
-   (AAP §0.11.1: where documentation and code disagree, THE CODE WINS) the code
-   is authoritative, and it was confirmed by execution: stderr is EMPTY for all
-   four scenarios. So every text assertion here matches against
-   :attr:`tests.helpers.bash.BashResult.output`, which is stdout AND stderr
-   concatenated. Matching stderr alone would make all three message assertions
-   vacuously false while the exit-code assertions carried on passing.
+   AAP §0.10.2, §0.4.2.1 and §0.5.2.1 each independently specify the refusal as
+   arriving on **stderr**. The shipped script does exactly that:
+   ``configure-kubeapiserver.sh`` line 65 (the refusal ERROR) and line 70 (the
+   partial-credential ERROR) both end in ``>&2``, while line 60 (the WARNING)
+   deliberately does not. That split also matches this directory's own
+   convention -- ``configure-helper.sh`` sends all fifteen of its diagnostics to
+   stderr, including the analogous pre-``exit`` "Bailing out." paths.
 
-   Do NOT "correct" this to ``result.stderr`` to agree with the prose, and do not
-   add ``>&2`` to the shipped script to agree with it either -- the second would
-   be a behaviour change to a hardened artifact, made to satisfy a comment.
+   Measured, by invoking the shipped function with the streams captured
+   SEPARATELY:
+
+     all-absent + ALLOW_INSECURE=false   rc=1  stderr=refusal  stdout=EMPTY
+     partial    + ALLOW_INSECURE=false   rc=1  stderr=ERROR    stdout=EMPTY
+     all-absent + ALLOW_INSECURE=true    rc=0  stdout=WARNING  stderr=EMPTY
+
+   So every fatal-path text assertion below matches ``result.stderr`` and every
+   warning assertion matches ``result.stdout``, and each scenario additionally
+   asserts the message is ABSENT from the other stream. Matching the concatenated
+   :attr:`tests.helpers.bash.BashResult.output` would pass whichever stream
+   carried the text and would therefore assert nothing about the channel at all --
+   which is the specific weakening this module previously carried.
+
+   Why the WARNING stays on stdout: nothing asks for it to move. AAP §0.4.2.1
+   specifies only "http plus a WARNING, no exit 1" and names no stream, it is not
+   a failure, and it is the branch the in-tree Go unit tests actually exercise
+   (see the compatibility-shim section below). Asserting the SPLIT rather than
+   "somewhere in the output" is what makes that a locked decision instead of an
+   accident.
+
+   Do NOT collapse these back onto ``result.output``. A refusal that regressed to
+   stdout would be indistinguishable from a correct one, and on the fatal paths it
+   would land in the very stream a caller reads the assembled parameter string
+   from -- so an abort could be mistaken for a flag.
 
 3. ``${ETCD_APISERVER_ALLOW_INSECURE:-true}`` USES ``:-``, SO EMPTY == UNSET.
 
-   Line 41 tests the opt-out with ``:-``, which substitutes the default when the
+   Line 58 tests the opt-out with ``:-``, which substitutes the default when the
    variable is unset **or empty**. Rendering ``AllowInsecureEtcd`` as ``""``
    therefore selects ``true`` -- the INSECURE branch, the exact opposite of what a
    fail-closed test needs, and it would do so while looking like the strictest
@@ -104,7 +124,7 @@ sets no ``ETCD_APISERVER_ALLOW_INSECURE`` at all -- all sixteen of its lines wer
 checked -- so that test reaches the function-local ``:-true``
 backward-compatibility shim which tech-spec §2.1.8 documents as existing SOLELY
 for direct-invocation contexts that never load the GCE profiles. The script's own
-comment at lines 27-40 names ``apiserver_etcd_test.go`` as one of those contexts.
+comment at lines 36-40 names ``apiserver_etcd_test.go`` as one of those contexts.
 This module renders tests/fixtures/templates/kube_env.j2 with the literal
 ``false``, which is what both shipped profiles set
 (cluster/gce/config-default.sh line 446 and config-test.sh line 492), so it
@@ -178,7 +198,7 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO
 # currently-manual V8 runtime scenarios, including the partial-credential exit 1
 # branch") / AAP §0.5.2.1 (assertion focus: returncode == 1 for BOTH the
 # all-absent and the partial branches, plus a stderr substring match on the
-# refusal -- corrected to combined output per the code-wins ruling above) /
+# refusal, matched against result.stderr specifically) /
 # AAP §0.7.1.4 (V8's four manual scenarios are one of the two genuine automation
 # gains) / AAP §0.10.2 (the etcd fail-closed and profile-default boundary rows) /
 # AAP §0.10.4 (the compatibility-shim paradox) / tech-spec §2.1.8 (the
@@ -246,7 +266,7 @@ pytestmark = pytest.mark.shell
 #   * `params=""` declares the variable the nameref binds to. Without it the
 #     function still runs and still exits 0 while observing nothing.
 #   * `configure-etcd-params params` passes the NAME, with no `$`. The shipped
-#     script calls it exactly this way at line 90.
+#     script calls it exactly this way at line 111.
 #   * `echo "$params"` is how the accumulated flags become observable at all. It
 #     never runs on the two fail-closed paths, because `exit 1` precedes it --
 #     which is itself part of what those two scenarios assert.
@@ -291,27 +311,46 @@ CA_FILE_FLAG: Final[str] = "--etcd-cafile=CACertPath"
 CERT_FILE_FLAG: Final[str] = "--etcd-certfile=APIServerCertPath"
 KEY_FILE_FLAG: Final[str] = "--etcd-keyfile=APIServerKeyPath"
 
-# Line 45, matched as a STABLE SUBSTRING rather than as the whole sentence: the
+# Line 65, matched as a STABLE SUBSTRING rather than as the whole sentence: the
 # message is 300-odd characters of operator guidance and a whole-string match
 # would break on any rewording that left the refusal intact. This is the phrase
-# AAP §0.10.2 names, and it is present in the code verbatim.
+# AAP §0.10.2 names, on the stream AAP §0.10.2 names, and it is present in the
+# code verbatim.
 REFUSAL_FRAGMENT: Final[str] = "refusing to fall back to plaintext etcd"
 
-# Line 49, the partial-credential branch. Two short fragments rather than one
+# Line 70, the partial-credential branch. Two short fragments rather than one
 # long one, because "Some of" is what distinguishes this message from the
 # all-absent "ALL etcd mTLS credentials" ERROR and "cannot be enabled" is what
 # distinguishes it from the WARNING's "is not enabled". Asserting both makes it
 # impossible for the wrong branch to satisfy this scenario.
 PARTIAL_FRAGMENTS: Final[tuple[str, ...]] = ("Some of", "cannot be enabled")
 
-# Line 43. The local/dev opt-out must remain loud: a silent plaintext fallback
-# would be indistinguishable from a working mTLS configuration in a log.
-INSECURE_WARNING_FRAGMENT: Final[str] = "WARNING:"
+# The opt-out WARNING, matched by TWO fragments rather than by the bare severity
+# token. The local/dev opt-out must remain loud, because a silent plaintext fallback
+# is indistinguishable from a working mTLS configuration in a log -- but `WARNING:`
+# alone does not say WHICH warning appeared, so any unrelated warning the script
+# might ever emit would satisfy the scenario even if the plaintext-etcd warning had
+# disappeared entirely. The second fragment is the transport sentence itself.
+#
+# The phrasing is what distinguishes it from the partial-credential ERROR, and the
+# difference is one word: the WARNING says mTLS "is not enabled" while that ERROR
+# says it "cannot be enabled". Matching the full clause therefore also keeps the two
+# branches from satisfying each other's expectations.
+INSECURE_WARNING_FRAGMENTS: Final[tuple[str, ...]] = (
+    "WARNING:",
+    "mTLS between etcd server and kube-apiserver is not enabled",
+)
+
+# Lines 65 and 70 both open with this. Used only as a NEGATIVE control on the two
+# exit-0 scenarios -- neither of them may print an error of any kind, and naming
+# the prefix rather than either full message catches BOTH errors with one entry,
+# so a branch cannot borrow the other branch's ERROR and still pass.
+ERROR_PREFIX: Final[str] = "ERROR:"
 
 # The negative half of the fail-closed assertion. Deliberately the FULL
 # `--etcd-servers=http://` prefix and not a bare `http://`: with ETCD_SERVERS
 # empty the script also appends
-# `--etcd-servers-overrides=/events#http://127.0.0.1:4002` (lines 53-54), which
+# `--etcd-servers-overrides=/events#http://127.0.0.1:4002` (lines 75 and 77), which
 # contains `http://` legitimately. A looser fragment would fail the
 # all-credentials-present scenario for a reason unrelated to the transport under
 # test.
@@ -344,12 +383,12 @@ ALL_CREDENTIALS_PRESENT: Final[KubeAPIServerETCDEnv] = KubeAPIServerETCDEnv(
 # The zero value, which is what "the deployment has no etcd certificates" means
 # to the script. ETCD_SERVERS is left empty too, so the endpoint asserted is the
 # script's OWN default for whichever branch it takes -- https on line 22, http on
-# line 42 -- rather than something this table chose.
+# line 59 -- rather than something this table chose.
 NO_CREDENTIALS: Final[KubeAPIServerETCDEnv] = KubeAPIServerETCDEnv()
 
 # THE SUBTLE BRANCH. Two of the six credentials present and four absent, so
 # neither the all-present test on line 21 nor the all-absent test on line 26
-# succeeds and the script falls through to its `else` on line 48. The CA pair is
+# succeeds and the script falls through to its `else` on line 68. The CA pair is
 # chosen because it is the most plausible real-world half-configuration -- a
 # cluster that provisioned its CA and then failed to issue the server and client
 # pairs -- and the three *_PATH values are supplied so that the ONLY reason this
@@ -377,11 +416,18 @@ class FailClosedScenario:
     ``pytest-randomly`` precisely so that ordering cannot be relied upon.
 
     ASSERTION STYLE follows the Go tier's, so that the two read alike even though
-    this module has no Go ancestor: :attr:`want` and :attr:`dont_want` hold
-    SUBSTRINGS of the invocation's combined output rather than parsed flags. That
-    is what makes "this flag is absent entirely" expressible -- a
+    this module has no Go ancestor: :attr:`want_stdout`, :attr:`want_stderr` and
+    :attr:`dont_want` hold SUBSTRINGS of the invocation's output rather than parsed
+    flags. That is what makes "this flag is absent entirely" expressible -- a
     :attr:`dont_want` entry can be a bare flag prefix with no value, which an
     equality check against a parsed flag list could not express.
+
+    POSITIVES ARE PER-STREAM, NEGATIVES ARE NOT. The two ``want_*`` tuples name the
+    stream because which stream carries a diagnostic is itself a requirement here
+    (measured fact 2), and because the stream with NO expectation is separately
+    asserted to be entirely silent -- so a diagnostic cannot quietly appear where
+    none belongs. :attr:`dont_want` is matched against both streams at once, since
+    for a forbidden string "nowhere" is the stronger claim.
     """
 
     #: The pytest parametrize id, and therefore the addressable node id: this is
@@ -420,12 +466,23 @@ class FailClosedScenario:
     #: closed.
     expected_returncode: int
 
-    #: Substrings that MUST appear in the combined output.
-    want: tuple[str, ...] = ()
+    #: Substrings that MUST appear on **stdout** -- the accumulated parameter
+    #: string that ``echo "$params"`` writes, and the WARNING. Each is additionally
+    #: asserted ABSENT from stderr, so the channel is part of the expectation
+    #: rather than incidental to it.
+    want_stdout: tuple[str, ...] = ()
 
-    #: Substrings that must NOT appear. Never empty in this table: every scenario
-    #: carries at least one negative, because a positive-only assertion can pass
-    #: while a neighbouring branch is broken.
+    #: Substrings that MUST appear on **stderr** -- the two fatal diagnostics,
+    #: which AAP §0.10.2, §0.4.2.1 and §0.5.2.1 each place there. Each is
+    #: additionally asserted ABSENT from stdout: a refusal that regressed to stdout
+    #: would land in the very stream a caller reads the parameter string from.
+    want_stderr: tuple[str, ...] = ()
+
+    #: Substrings that must NOT appear on EITHER stream. Never empty in this table:
+    #: every scenario carries at least one negative, because a positive-only
+    #: assertion can pass while a neighbouring branch is broken. Matched against the
+    #: concatenation on purpose -- for a NEGATIVE, "absent from everywhere" is
+    #: strictly stronger than "absent from the stream I expected it on".
     dont_want: tuple[str, ...] = ()
 
     #: Whether ``echo "$params"`` is reached, and therefore whether the accumulated
@@ -454,19 +511,27 @@ FAIL_CLOSED_SCENARIOS: Final[tuple[FailClosedScenario, ...]] = (
         # reachable only when the opt-out is permissive.
         allow_insecure=ALLOW_INSECURE_FALSE,
         expected_returncode=0,
-        want=(
+        # On stdout, because they arrive through `echo "$params"`. `want_stderr` is
+        # left empty, which additionally requires stderr to be SILENT: the mTLS
+        # branch emits no diagnostic at all, and an empty tuple is how that is said.
+        want_stdout=(
             MTLS_ETCD_SERVERS_FLAG,
             CA_FILE_FLAG,
             CERT_FILE_FLAG,
             KEY_FILE_FLAG,
         ),
-        # Neither the plaintext endpoint nor either diagnostic may appear: with
-        # all six credentials present the script must take its first branch and
-        # say nothing.
+        # Nothing on stderr: with all six credentials present the script takes its
+        # first branch and says nothing at all. Asserted as the absence of every
+        # diagnostic below rather than as an emptiness check, so the message a
+        # regression WOULD print is named. `ERROR_PREFIX` widens the last of those
+        # to BOTH error messages, so this branch cannot borrow the
+        # partial-credential ERROR either.
+        want_stderr=(),
         dont_want=(
             PLAINTEXT_ETCD_SERVERS_PREFIX,
             REFUSAL_FRAGMENT,
-            INSECURE_WARNING_FRAGMENT,
+            *INSECURE_WARNING_FRAGMENTS,
+            ERROR_PREFIX,
         ),
         params_echoed=True,
     ),
@@ -483,13 +548,25 @@ FAIL_CLOSED_SCENARIOS: Final[tuple[FailClosedScenario, ...]] = (
         # expectations if they had been written loosely.
         allow_insecure=ALLOW_INSECURE_FALSE,
         expected_returncode=1,
-        want=(REFUSAL_FRAGMENT,),
+        # On STDERR specifically -- the boundary AAP §0.10.2, §0.4.2.1 and §0.5.2.1
+        # each name. `want_stdout` empty additionally requires stdout to be silent,
+        # which is measured and is the sharper statement: `exit 1` precedes
+        # `echo "$params"`, so a hardened refusal writes NOTHING a caller could
+        # mistake for an assembled flag string.
+        want_stderr=(REFUSAL_FRAGMENT,),
         # The negative half, and it is what gives the scenario teeth: an
         # implementation that printed the refusal and THEN configured plaintext
         # etcd anyway would satisfy the positive assertion alone.
+        #
+        # The WARNING is forbidden too, and that entry is doing real work: the
+        # refusal and the permissive warning live in the two arms of ONE `if` at
+        # lines 58-67, so a branch that emitted both and still exited 1 would pass
+        # every other assertion here while having stopped distinguishing the
+        # permissive path from the strict one.
         dont_want=(
             PLAINTEXT_ETCD_SERVERS_PREFIX,
             MTLS_ETCD_SERVERS_FLAG,
+            *INSECURE_WARNING_FRAGMENTS,
         ),
         params_echoed=False,
     ),
@@ -508,7 +585,8 @@ FAIL_CLOSED_SCENARIOS: Final[tuple[FailClosedScenario, ...]] = (
         # most likely to be silently downgraded, and this is its only automated
         # guard.
         expected_returncode=1,
-        want=PARTIAL_FRAGMENTS,
+        # STDERR again, and stdout silent for the same reason as the branch above.
+        want_stderr=PARTIAL_FRAGMENTS,
         dont_want=(
             PLAINTEXT_ETCD_SERVERS_PREFIX,
             MTLS_ETCD_SERVERS_FLAG,
@@ -516,6 +594,11 @@ FAIL_CLOSED_SCENARIOS: Final[tuple[FailClosedScenario, ...]] = (
             # mistook a partial set for an empty one, which is the same
             # misclassification in the other direction.
             REFUSAL_FRAGMENT,
+            # Nor may the permissive warning. A partial credential set has no
+            # opt-out: `ETCD_APISERVER_ALLOW_INSECURE` is consulted only in the
+            # all-absent arm, so a warning here would mean the branch that must
+            # never downgrade had acquired an escape hatch.
+            *INSECURE_WARNING_FRAGMENTS,
         ),
         params_echoed=False,
     ),
@@ -527,7 +610,7 @@ FAIL_CLOSED_SCENARIOS: Final[tuple[FailClosedScenario, ...]] = (
         ),
         # Also F-008-RQ-002: the requirement owns the opt-out variable, and the
         # escape hatch is documented rather than incidental (the script's own
-        # comment at lines 27-40, and the ERROR text at line 45 which tells the
+        # comment at lines 27-57, and the ERROR text at line 65 which tells the
         # operator to set it). Proving it still works is what keeps the
         # fail-closed change from having broken local development, and it is the
         # only coverage the permissive path has.
@@ -535,16 +618,24 @@ FAIL_CLOSED_SCENARIOS: Final[tuple[FailClosedScenario, ...]] = (
         env=NO_CREDENTIALS,
         allow_insecure=ALLOW_INSECURE_TRUE,
         expected_returncode=0,
-        want=(
+        # BOTH on stdout: the flag through `echo "$params"`, and the WARNING because
+        # line 60 deliberately keeps no `>&2`. `want_stderr` empty therefore asserts
+        # the OTHER half of the channel split -- the permissive path must not write
+        # to the error stream, or a fail-open opt-out would look like a fail-closed
+        # refusal to anything watching stderr.
+        want_stdout=(
             PLAINTEXT_ETCD_SERVERS_FLAG,
-            INSECURE_WARNING_FRAGMENT,
+            *INSECURE_WARNING_FRAGMENTS,
         ),
         # The refusal must be absent: if it appeared alongside exit 0 the two
         # branches would have been conflated, and the fail-closed scenario above
-        # would no longer distinguish anything.
+        # would no longer distinguish anything. `ERROR_PREFIX` widens that to both
+        # error messages, so the partial-credential ERROR cannot appear here
+        # either.
         dont_want=(
             REFUSAL_FRAGMENT,
             MTLS_ETCD_SERVERS_FLAG,
+            ERROR_PREFIX,
         ),
         params_echoed=True,
     ),
@@ -589,16 +680,23 @@ def _render_fail_closed_env(
 def _echoed_params(result: BashResult) -> str:
     """Return the final line of stdout, which is what ``echo "$params"`` wrote.
 
-    The echo is the LAST thing :data:`NAMEREF_INVOCATION` runs, so on the two
-    paths that reach it the parameter string is the final line of stdout -- after
-    the WARNING on the permissive path, and alone on the mTLS path.
+    The echo is the LAST thing :data:`NAMEREF_INVOCATION` runs, so the parameter
+    string is always the FINAL line of stdout -- and the final line is what this
+    returns rather than the whole buffer, because stdout is not the parameter
+    string's alone. The two fatal ERRORs go to stderr, but the opt-out WARNING
+    deliberately stays on stdout (script line 60), and it is written BEFORE the
+    flags are accumulated, so on the permissive path stdout is the WARNING followed
+    by the parameter string. Reading the whole buffer would splice a diagnostic
+    into the value under test; reading the final line is exact on every path that
+    reaches the echo, and stays exact if the invocation ever gains a line before
+    it.
 
     ONLY MEANINGFUL WHEN THE ECHO WAS REACHED, which is why the sole caller guards
     it with :attr:`FailClosedScenario.params_echoed`. On the two fail-closed paths
-    ``exit 1`` precedes the echo, so the final line is the ERROR message instead
-    and this function would report that -- a distinction the guard keeps, rather
-    than this function pretending to detect it and returning something the shell
-    never wrote.
+    ``exit 1`` precedes the echo AND the ERROR goes to stderr, so stdout is entirely
+    empty and this function would return ``""`` -- indistinguishable from a broken
+    nameref call. The guard keeps that distinction, rather than this function
+    pretending to detect it and returning something the shell never wrote.
 
     An empty result on a path that SHOULD have reached the echo is the signature
     of a broken nameref call: ``echo ""`` emits a blank line, which is exactly
@@ -618,10 +716,10 @@ def _report(
     A security failure is often read by someone who did not write the test, so
     each message names the requirement and what the scenario proves before it
     shows any value, and reproduces the invocation verbatim so it can be rerun by
-    hand. Both streams are shown separately AND labelled, because which stream
-    carries a diagnostic is the shipped script's choice: here it is stdout for all
-    three messages, and printing them apart is what keeps that visible to the next
-    reader instead of hiding it behind a merge.
+    hand. Both streams are shown separately AND labelled because which stream
+    carries a diagnostic is itself asserted here: the two fatal ERRORs on stderr,
+    the WARNING on stdout. Printing them apart is what lets a reader see a
+    channel regression at a glance instead of hunting for it inside a merge.
     """
     return "\n".join(
         (
@@ -667,9 +765,9 @@ def test_etcd_fail_closed(
     env_script = _render_fail_closed_env(render_kube_env, scenario)
 
     # `check=False` because a non-zero exit is the behaviour under test rather
-    # than a harness failure, and `merge_streams=False` because attributing each
-    # diagnostic to a stream is what proved the code-wins ruling in the module
-    # docstring. `cwd` is left to default to the `gci_cwd` the fixture binds,
+    # than a harness failure, and `merge_streams=False` because the assertions below
+    # are PER STREAM: merging would make every channel assertion vacuous, since a
+    # message on the wrong stream would still be found in the concatenation. `cwd` is left to default to the `gci_cwd` the fixture binds,
     # which is what lets `configure-kubeapiserver.sh` be named relatively -- and
     # both paths travel in `argv`, never interpolated into the script text.
     result = bash_invoke.run_bash(
@@ -700,24 +798,67 @@ def test_etcd_fail_closed(
         f"configure-etcd-params, got {result.returncode} -- {exit_hint}.\n{report}"
     )
 
-    # THE OUTPUT, matched against stdout AND stderr concatenated. The shipped
-    # script emits every diagnostic with a plain `echo`, so all three land on
-    # stdout; see measured fact 2 for why this is deliberately not `result.stderr`
-    # despite AAP §0.10.2's wording.
-    output = result.output
-    for expected in scenario.want:
-        assert expected in output, (
-            f"{scenario.requirement}: expected {expected!r} in the combined output of "
-            f"configure-etcd-params and it is absent. Match against the COMBINED output: the "
-            f"script writes its ERROR and WARNING with a plain echo, so they arrive on stdout.\n"
-            f"{report}"
+    # THE OUTPUT, PER STREAM. AAP §0.10.2, §0.4.2.1 and §0.5.2.1 each specify the
+    # refusal as arriving on stderr, so the stream is part of the requirement and
+    # is asserted as such: matching the concatenated `result.output` would pass
+    # whichever stream carried the text and would prove nothing about the channel.
+    #
+    # Each expectation is asserted twice -- present on its own stream, ABSENT from
+    # the other. The second half is what turns "the text exists" into "the text is
+    # on the correct channel", and it is the assertion that fails if a `>&2` is
+    # dropped from cluster/gce/gci/configure-kubeapiserver.sh line 65 or 70.
+    for stream_name, expectations in (
+        ("stdout", scenario.want_stdout),
+        ("stderr", scenario.want_stderr),
+    ):
+        this_stream = result.stdout if stream_name == "stdout" else result.stderr
+        other_name = "stderr" if stream_name == "stdout" else "stdout"
+        other_stream = result.stderr if stream_name == "stdout" else result.stdout
+        for expected in expectations:
+            assert expected in this_stream, (
+                f"{scenario.requirement}: expected {expected!r} on {stream_name} from "
+                f"configure-etcd-params and it is absent there. The two fatal diagnostics are "
+                f"written with `>&2` (script lines 65 and 70) and the WARNING deliberately is "
+                f"not (line 60), so a message that moved streams means that split changed.\n"
+                f"{report}"
+            )
+            assert expected not in other_stream, (
+                f"{scenario.requirement}: {expected!r} appeared on {other_name}, which is the "
+                f"WRONG stream. A fatal refusal on stdout lands in the stream a caller reads the "
+                f"assembled parameter string from, so an abort could be read as a flag; a WARNING "
+                f"on stderr makes the fail-open opt-out look like a fail-closed refusal.\n"
+                f"{report}"
+            )
+
+    # THE SILENT STREAM. Whichever stream this scenario expects nothing on must be
+    # entirely EMPTY, not merely free of the strings named above -- measured for all
+    # four scenarios. This is what makes an expectation tuple's EMPTINESS load
+    # bearing: it says "this branch says nothing here", so a new diagnostic
+    # appearing on the wrong channel fails immediately instead of going unnoticed
+    # until someone re-reads the script.
+    for stream_name, expectations in (
+        ("stdout", scenario.want_stdout),
+        ("stderr", scenario.want_stderr),
+    ):
+        if expectations:
+            continue
+        silent = result.stdout if stream_name == "stdout" else result.stderr
+        assert not silent.strip(), (
+            f"{scenario.requirement}: {stream_name} must be SILENT for this scenario and it "
+            f"carried {silent!r}. Either a diagnostic moved streams, or this branch gained one "
+            f"it did not have when the channel split was measured -- both change the observable "
+            f"contract of a hardened artifact and neither is a test-only concern.\n{report}"
         )
 
     # THE NEGATIVE HALVES. Without these a scenario could pass while the branch
     # beside it was broken -- most importantly, a refusal that printed and then
     # configured plaintext etcd anyway would satisfy every positive assertion.
+    # Matched against the CONCATENATION on purpose, unlike the positives above: for
+    # a forbidden string, "absent from both streams" is strictly stronger than
+    # "absent from the one stream I expected it on".
+    both_streams = result.output
     for forbidden in scenario.dont_want:
-        assert forbidden not in output, (
+        assert forbidden not in both_streams, (
             f"{scenario.requirement}: {forbidden!r} must NOT appear in the output of this "
             f"scenario, and it does. On a fail-closed path a plaintext etcd endpoint means the "
             f"transport was downgraded; on the opt-out path a refusal means the two branches have "

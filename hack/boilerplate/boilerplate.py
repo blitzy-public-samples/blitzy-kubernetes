@@ -43,7 +43,37 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-verbose_out = sys.stderr if args.verbose else open("/dev/null", "w")
+
+class _DiscardingWriter:
+    """A write-only sink that discards everything written to it.
+
+    This replaces an ``open(os.devnull, "w")`` that was never closed. The old
+    form leaked a file descriptor for the lifetime of the process, and because
+    the handle was bound to a MODULE GLOBAL evaluated at import time, every
+    re-import or ``importlib.reload`` opened another one and emitted
+    ``ResourceWarning: unclosed file '/dev/null'``. ``boilerplate_test.py``
+    reloads this module by design, so the warning was reachable from the
+    repository's own test rather than only in theory.
+
+    An in-memory sink is preferable to closing a real handle in a ``finally`` or
+    an ``atexit`` hook: there is no descriptor to account for, nothing for a
+    caller to clean up, and no ordering hazard if a write happens late during
+    interpreter shutdown. It only ever needs to satisfy ``print(..., file=...)``,
+    which calls ``write`` for the value and again for ``end``.
+    """
+
+    def write(self, text):
+        """Discard ``text`` and report the character count a real stream would."""
+        return len(text)
+
+    def flush(self):
+        """Accept a flush and do nothing; there is no buffer to drain."""
+
+
+# sys.stderr when the caller asked for verbose diagnostics, otherwise a sink.
+# The two branches are interchangeable at every call site because both are only
+# ever used as the `file=` argument of print().
+verbose_out = sys.stderr if args.verbose else _DiscardingWriter()
 
 
 def get_refs():

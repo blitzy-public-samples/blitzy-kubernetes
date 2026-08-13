@@ -64,13 +64,28 @@ THE THREE ID RULES THAT CANNOT BE RELAXED
 ``Elapsed`` is recorded and never compared. Runtime is expected to differ
 between Go and Python; the contract compares verdicts only.
 
-TWO PROVENANCES, NEVER CONFLATED
+THREE PROVENANCE ATOMS, NEVER CONFLATED, AND NEVER AVERAGED
 
-``provenance`` is the honesty field of the manifest. ``go_test_json`` means
-every row came from a real oracle run. ``derived_from_source_inventory`` means
-the rows came from the measured Go source inventory encoded in this module,
-because no Go toolchain was reachable. Both are legitimate inputs to the
-contract; presenting the second as the first would not be.
+``provenance`` is the honesty field of the manifest. It names how the rows were
+obtained, using three atoms:
+
+* ``go_test_json`` - the row came from a real oracle run.
+* ``derived_from_source_inventory`` - the row came from the measured Go source
+  inventory encoded in this module, because no Go toolchain was reachable.
+* ``non_go_measured`` - the row is the one non-Go baseline case, the Python
+  ``hack/boilerplate`` test, whose measured outcome the Go toolchain cannot
+  report because it never runs it.
+
+A manifest whose rows do not share one atom declares the COMPOSED value: the
+atoms present, in the fixed order above, joined with ``+`` - so the ordinary
+committed artifact reads ``go_test_json+non_go_measured``. That composed form
+exists because the alternative was measurably worse: the manifest used to stamp
+a single ``go_test_json`` while carrying the appended Python row, which made the
+envelope FALSE for that row and, worse, made "every row came from Go" the thing
+a reader would reasonably conclude about all of them. :func:`validate_manifest`
+now cross-checks the declaration against the rows in both directions, so the
+field cannot drift away from what it describes. Every atom is a legitimate input
+to the contract; presenting one as another would not be.
 
 COUPLING NOTE - READ BEFORE WIDENING THE PACKAGE LIST
 
@@ -117,12 +132,19 @@ As a library, which is how ``tests/parity/baseline/`` produces the committed
 manifest rather than hand-writing it::
 
     from tests.parity.tools.generate_baseline import (
-        PROVENANCE_DERIVED, build_manifest,
-        derive_verdicts_from_source_inventory, write_manifest_atomic,
+        PROVENANCE_DERIVED, PROVENANCE_NON_GO_MEASURED, build_manifest,
+        compose_provenance, derive_verdicts_from_source_inventory,
+        write_manifest_atomic,
     )
 
     verdicts = derive_verdicts_from_source_inventory(repo_root)
-    manifest = build_manifest(verdicts, provenance=PROVENANCE_DERIVED)
+    manifest = build_manifest(
+        verdicts,
+        # Composed, not a single atom: `derive_verdicts_from_source_inventory`
+        # appends the non-Go row by default, and a manifest carrying it may not
+        # claim every row came from Go. `build_manifest` refuses one that does.
+        provenance=compose_provenance(PROVENANCE_DERIVED, PROVENANCE_NON_GO_MEASURED),
+    )
     write_manifest_atomic(manifest, path)
 """
 
@@ -131,7 +153,11 @@ manifest rather than hand-writing it::
 # generated rather than hand-written, and tools/generate_baseline.py is the
 # generator") / §0.2.1.9 gap 3 (no machine-readable baseline manifest exists) /
 # tech-spec §6.6.3.2 (the required success rate is 100 percent with zero
-# failures, which is the all-green invariant enforced here).
+# FAILURES, which is the invariant enforced here -- note that zero failures is
+# NOT zero skips: the measured oracle legitimately skips 25 procMount cases
+# whose ProcMountType feature gate is off, and AAP §0.10.3 requires the ported
+# suite to skip exactly those, so they are recorded faithfully and pinned to an
+# exact roster rather than refused).
 #
 # INVARIANT LOCKED BY THIS FILE: the manifest records EVERY verdict the Go
 # oracle reported, with its identity preserved exactly as the toolchain spelled
@@ -156,9 +182,11 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ElementTree
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -175,14 +203,19 @@ __all__ = [
     "EXIT_IO_ERROR",
     "EXIT_OK",
     "GO_MODULE_PATH",
+    "GO_PROVENANCE_ATOMS",
     "MODE_AUTO",
     "MODE_DERIVED",
     "MODE_GO_TEST_JSON",
     "NON_GO_BASELINE_PACKAGE",
     "NON_GO_BASELINE_TEST",
+    "NON_GO_PACKAGES",
     "PACKAGE_EXPECTATIONS",
+    "PROVENANCE_ATOMS",
     "PROVENANCE_DERIVED",
     "PROVENANCE_GO_TEST_JSON",
+    "PROVENANCE_NON_GO_MEASURED",
+    "PROVENANCE_SEPARATOR",
     "SCHEMA_VERSION",
     "VERDICT_ACTIONS",
     "BaselineError",
@@ -190,17 +223,22 @@ __all__ = [
     "StreamReduction",
     "Verdict",
     "build_manifest",
+    "check_domain_not_narrowed",
     "check_go_verdict_domain",
+    "check_provenance_describes_rows",
+    "compose_provenance",
     "default_baseline_path",
     "derive_verdicts_from_source_inventory",
     "go_rewrite_subtest_name",
     "import_path_for_package_spec",
+    "is_non_go_package",
     "main",
     "reduce_event_stream",
     "repo_root_from_file",
     "run_go_test_json",
     "split_go_test_id",
     "split_package_specs",
+    "split_provenance",
     "validate_manifest",
     "write_manifest_atomic",
 ]
@@ -217,13 +255,41 @@ __all__ = [
 #: would break them, never for an additive clarification.
 SCHEMA_VERSION: Final[str] = "1"
 
-#: Every row came from a real `go test -json` event stream.
+#: The row came from a real `go test -json` event stream.
 PROVENANCE_GO_TEST_JSON: Final[str] = "go_test_json"
 
-#: Every row came from the measured Go source inventory in this module, because
-#: no Go toolchain was reachable. Recorded rather than hidden: a contract that
+#: The row came from the measured Go source inventory in this module, because no
+#: Go toolchain was reachable. Recorded rather than hidden: a contract that
 #: cannot tell measured data from derived data cannot be trusted about either.
 PROVENANCE_DERIVED: Final[str] = "derived_from_source_inventory"
+
+#: The row is the one non-Go baseline case - the Python `hack/boilerplate` test,
+#: measured by the `unittest` runner ("Ran 1 test in 0.001s / OK") rather than by
+#: `go test`. It exists as its own atom because the two Go atoms are both claims
+#: about a GO run, and this row was never part of one: stamping it `go_test_json`
+#: was false about the row and misleading about the manifest.
+PROVENANCE_NON_GO_MEASURED: Final[str] = "non_go_measured"
+
+#: The atoms, in the order a composed value lists them. Order is fixed rather
+#: than sorted alphabetically so that `provenance` is byte-stable across runs and
+#: a regeneration diff stays legible.
+PROVENANCE_ATOMS: Final[tuple[str, ...]] = (
+    PROVENANCE_GO_TEST_JSON,
+    PROVENANCE_DERIVED,
+    PROVENANCE_NON_GO_MEASURED,
+)
+
+#: The two atoms that describe a GO row. Exactly one of them may appear in any
+#: single manifest: a run either measured the oracle or it did not, and a
+#: manifest claiming both would be describing two different domains at once.
+GO_PROVENANCE_ATOMS: Final[frozenset[str]] = frozenset(
+    {PROVENANCE_GO_TEST_JSON, PROVENANCE_DERIVED}
+)
+
+#: Joins the atoms of a composed provenance. `+` and not `,` or ` `: it survives
+#: a shell argument, a log line and a JSON string with no quoting, and it reads
+#: as addition rather than as a list whose order might matter.
+PROVENANCE_SEPARATOR: Final[str] = "+"
 
 #: The only actions that are verdicts. `start`, `run`, `pause`, `cont`, `bench`
 #: and `output` are progress, not outcome.
@@ -287,10 +353,30 @@ ENV_EXTRA_ARGS: Final[str] = "KUBE_PARITY_ARGS"
 MODE_GO_TEST_JSON: Final[str] = "go-test-json"
 
 #: Build from the measured source inventory encoded in this module.
+#:
+#: A DIAGNOSTIC, NEVER A BASELINE. Its rows are read off Go SOURCE and every one of
+#: them is stamped `pass`, because reading a function's name cannot tell you what it
+#: did. It is useful for answering "does the inventory in this module still match
+#: the source tree?" and it is worthless as evidence of behaviour - which is the
+#: whole of the engagement's success criterion. It therefore requires
+#: `--allow-derived-baseline`, it can never be written over the committed manifest,
+#: and `--check` refuses its provenance outright.
 MODE_DERIVED: Final[str] = "derived"
 
-#: Prefer a real run; fall back to `derived` ONLY when no Go toolchain is
-#: present, saying so loudly on stderr and setting `provenance` accordingly.
+#: Require a real run: `go-test-json` when a toolchain is available, and a HARD
+#: ERROR when it is not.
+#:
+#: This mode used to fall back to `derived`, and that fallback is the one bug in
+#: this file that could invalidate the entire migration: on any machine without Go
+#: on PATH - a container, a CI step that forgot to load the toolchain - the DEFAULT
+#: invocation manufactured an all-green baseline from source and wrote it to the
+#: committed path, and the parity contract then certified the port against it.
+#: Nothing about that outcome looked wrong: the file was well formed, the
+#: provenance field said `derived` in the one place nobody was reading, and every
+#: assertion passed. AAP §0.11.1 puts the requirement plainly - "Nothing is
+#: declared migrated until the baseline says so", proof by EXECUTION and not by
+#: reading source - so the absence of a toolchain is now reported as the blocker it
+#: is.
 MODE_AUTO: Final[str] = "auto"
 
 #: Success.
@@ -324,6 +410,17 @@ _EXCERPT_LIMIT: Final[int] = 200
 # three integration packages, then the four mechanism unit packages. The
 # manifest itself is sorted by import path, so this order affects only the
 # oracle invocation.
+#
+# NARROWING THIS LIST NARROWS THE GATE, and that is not a figure of speech: the
+# contract is quantified over the recorded verdicts, so a manifest regenerated
+# over one package asserts nothing whatever about the other seven while still
+# validating and still reporting green. The committed manifest is the FULL domain -
+# 3104 Go verdicts from a real `--mode go-test-json` capture of all eight packages,
+# among them 2136 `test/integration/auth` subtests, 640 shell-tier subtests and 239
+# `noderestriction` subtests. A run that narrows the list AND writes to the
+# committed path is therefore warned about explicitly by
+# `check_domain_not_narrowed`, which REFUSES it unless --allow-narrow-domain is
+# passed; narrow regenerations belong in a scratch `--output`.
 
 DEFAULT_PACKAGES: Final[tuple[str, ...]] = (
     "./cluster/gce/gci/",
@@ -338,16 +435,24 @@ DEFAULT_PACKAGES: Final[tuple[str, ...]] = (
 
 #: The pseudo-package under which the one non-Go baseline row is recorded. NOT a
 #: `k8s.io/...` import path, deliberately: the case it names is a Python test,
-#: `hack/boilerplate/boilerplate_test.py`, whose measured baseline is
-#: "Ran 1 test in 0.001s / OK". It belongs in the manifest because the plan's
-#: baseline scale ends with "and the single Python boilerplate case", and
+#: `hack/boilerplate/boilerplate_test.py`. It belongs in the manifest because the
+#: plan's baseline scale ends with "and the single Python boilerplate case", and
 #: `parity_map.py` binds it as its `NON_GO_BASELINE` entry. Exported so that map
 #: can single-source the spelling instead of re-typing it.
+#:
+#: The row's verdict is MEASURED by running the case (see
+#: :func:`_non_go_baseline_verdict`), not asserted from this constant.
 NON_GO_BASELINE_PACKAGE: Final[str] = "hack/boilerplate"
 
 #: The identity of that case, matching the ported node id
 #: `hack/boilerplate/boilerplate_test.py::test_boilerplate`.
 NON_GO_BASELINE_TEST: Final[str] = "test_boilerplate"
+
+#: Every package the manifest may carry that is NOT a Go import path. Declared
+#: rather than inferred, because "is this row from a Go run?" is the question the
+#: `provenance` cross-check answers, and a rule that guessed from the spelling of
+#: a path would answer it differently the day a second non-Go tier appears.
+NON_GO_PACKAGES: Final[frozenset[str]] = frozenset({NON_GO_BASELINE_PACKAGE})
 
 
 class BaselineError(Exception):
@@ -448,6 +553,186 @@ class Verdict:
         }
 
 
+# ---------------------------------------------------------------------------
+# Provenance: the honesty field, and the rules that keep it true
+# ---------------------------------------------------------------------------
+
+
+def is_non_go_package(package: str) -> bool:
+    """Whether ``package`` names a non-Go tier rather than a Go import path.
+
+    INVARIANT LOCKED: the Go / non-Go split is DECLARED, and an undeclared
+    non-import-path package is an error rather than a silent Go row. The
+    declaration is :data:`NON_GO_PACKAGES`; the structural test - a Go import path
+    begins with a dotted domain segment, as every ``k8s.io/...`` path does - is
+    applied only to catch a package that is plainly not an import path yet was
+    never declared. Without that second half, adding a second pseudo-package
+    would classify it as Go and the ``non_go_measured`` atom would go missing
+    from a manifest that needed it, which is the exact defect this whole
+    mechanism exists to prevent.
+
+    Args:
+        package: The package field of a row.
+
+    Returns:
+        True for a declared non-Go package.
+
+    Raises:
+        BaselineError: If ``package`` is undeclared and does not look like a Go
+            import path.
+    """
+    if package in NON_GO_PACKAGES:
+        return True
+    first_segment = package.split("/", 1)[0]
+    if "." not in first_segment:
+        raise BaselineError(
+            f"package {package!r} is neither a declared non-Go package "
+            f"({sorted(NON_GO_PACKAGES)}) nor a Go import path - a Go import path opens "
+            f"with a dotted domain segment such as {GO_MODULE_PATH.split('/', 1)[0]!r}, and "
+            f"{first_segment!r} has no dot. Classifying it as Go would let a non-Go row be "
+            f"recorded as measured Go output. Declare it in NON_GO_PACKAGES, in the same "
+            f"change that adds the tier it belongs to."
+        )
+    return False
+
+
+def compose_provenance(*atoms: str) -> str:
+    """Compose the manifest-level ``provenance`` from the atoms actually used.
+
+    INVARIANT LOCKED: the envelope names EVERY way its rows were obtained, and
+    names them in a fixed order so two runs over the same domain produce the same
+    string. A single-atom manifest keeps its plain atom - ``go_test_json`` still
+    means exactly what it always meant - so nothing that reads the homogeneous
+    form has to change; only a genuinely mixed manifest reads
+    ``go_test_json+non_go_measured``.
+
+    Args:
+        *atoms: Atoms from :data:`PROVENANCE_ATOMS`. Repeats are collapsed;
+            empty strings and ``None``-like values are rejected rather than
+            skipped, because a caller that lost track of one atom must not
+            silently produce a narrower claim.
+
+    Returns:
+        The atom itself when there is one, else the atoms joined by
+        :data:`PROVENANCE_SEPARATOR` in :data:`PROVENANCE_ATOMS` order.
+
+    Raises:
+        BaselineError: On no atoms, an unknown atom, or both Go atoms at once.
+    """
+    unknown = sorted({atom for atom in atoms if atom not in PROVENANCE_ATOMS})
+    if unknown:
+        raise BaselineError(
+            f"unknown provenance atom(s) {unknown}: expected values from "
+            f"{list(PROVENANCE_ATOMS)}. This field is how a reader tells measured data from "
+            f"derived data, so it may not be improvised."
+        )
+    present = set(atoms)
+    if not present:
+        raise BaselineError(
+            "refusing to compose an EMPTY provenance: a manifest that does not say how its "
+            "rows were obtained cannot be told apart from one whose rows were invented."
+        )
+    go_atoms = sorted(present & GO_PROVENANCE_ATOMS)
+    if len(go_atoms) > 1:
+        raise BaselineError(
+            f"a manifest may declare at most one Go provenance atom, got {go_atoms}. A run "
+            f"either measured the oracle or expanded the source inventory; claiming both "
+            f"would describe two different domains in one artifact, and a reader could not "
+            f"tell which rows belonged to which."
+        )
+    return PROVENANCE_SEPARATOR.join(
+        atom for atom in PROVENANCE_ATOMS if atom in present
+    )
+
+
+def split_provenance(value: object) -> tuple[str, ...]:
+    """Decompose a manifest ``provenance`` value into its atoms.
+
+    INVARIANT LOCKED: the composed form round-trips through
+    :func:`compose_provenance` unchanged, so a hand-edited value that merely
+    LOOKS plausible - reordered, repeated, padded, or naming an unknown atom - is
+    refused rather than half-understood.
+
+    Args:
+        value: The envelope's ``provenance`` field, as decoded from JSON.
+
+    Returns:
+        The atoms, in :data:`PROVENANCE_ATOMS` order.
+
+    Raises:
+        BaselineError: If ``value`` is not a string, or is not exactly what
+            :func:`compose_provenance` would have produced for its atoms.
+    """
+    if not isinstance(value, str) or not value:
+        raise BaselineError(
+            f"provenance must be a non-empty string composed from {list(PROVENANCE_ATOMS)}, "
+            f"got {value!r}"
+        )
+    atoms = tuple(value.split(PROVENANCE_SEPARATOR))
+    canonical = compose_provenance(*atoms)
+    if canonical != value:
+        raise BaselineError(
+            f"provenance {value!r} is not in canonical form: expected {canonical!r}. The "
+            f"atoms are listed in a fixed order, without repeats and without padding, so "
+            f"that the field is byte-stable across regenerations."
+        )
+    return tuple(atom for atom in PROVENANCE_ATOMS if atom in set(atoms))
+
+
+def check_provenance_describes_rows(provenance: str, verdicts: Sequence[Verdict]) -> None:
+    """Require the declared ``provenance`` to describe the rows, in both directions.
+
+    INVARIANT LOCKED: the honesty field cannot drift away from the rows it
+    describes. Two directions, because each catches a different lie:
+
+    1. A NON-GO ROW WITH NO ``non_go_measured`` ATOM. This is the recorded defect:
+       the committed manifest carried the Python ``hack/boilerplate`` row while
+       declaring ``go_test_json`` alone, so the envelope was false about that row
+       and misleading about every other one.
+    2. A ``non_go_measured`` ATOM WITH NO NON-GO ROW. The mirror image, and just
+       as bad in a quieter way - a reader would believe the Python case is
+       recorded, and the parity contract quantifies over the ROWS, so the case
+       would be asserted about by nothing at all.
+
+    A Go atom is likewise required whenever any Go row is present, because those
+    rows had to come from somewhere and only the two Go atoms say where.
+
+    Args:
+        provenance: The composed value about to be written, or read back.
+        verdicts: The rows it claims to describe.
+
+    Raises:
+        BaselineError: On any of the three mismatches, naming the offending rows.
+    """
+    atoms = set(split_provenance(provenance))
+    non_go_rows = [verdict for verdict in verdicts if is_non_go_package(verdict.package)]
+    go_rows = [verdict for verdict in verdicts if not is_non_go_package(verdict.package)]
+
+    if non_go_rows and PROVENANCE_NON_GO_MEASURED not in atoms:
+        raise BaselineError(
+            f"{len(non_go_rows)} row(s) come from a non-Go package "
+            f"({sorted({v.package for v in non_go_rows})}) but provenance {provenance!r} does "
+            f"not include {PROVENANCE_NON_GO_MEASURED!r}. `go test -json` cannot report a "
+            f"Python verdict, so declaring a Go-only provenance over these rows states "
+            f"something untrue about them and invites the reader to believe it about all of "
+            f"them. Compose the provenance with compose_provenance()."
+        )
+    if PROVENANCE_NON_GO_MEASURED in atoms and not non_go_rows:
+        raise BaselineError(
+            f"provenance {provenance!r} declares {PROVENANCE_NON_GO_MEASURED!r} but no row "
+            f"comes from a non-Go package ({sorted(NON_GO_PACKAGES)}). The parity contract is "
+            f"quantified over the ROWS, so a case that is announced in the envelope and "
+            f"absent from the rows is asserted about by nothing."
+        )
+    if go_rows and not (atoms & GO_PROVENANCE_ATOMS):
+        raise BaselineError(
+            f"provenance {provenance!r} names no Go atom "
+            f"({sorted(GO_PROVENANCE_ATOMS)}) yet {len(go_rows)} row(s) come from Go "
+            f"packages ({sorted({v.package for v in go_rows})[:5]}). Those rows were either "
+            f"measured or derived, and the manifest must say which."
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PackageExpectation:
     """A declared cardinality guard for one package.
@@ -459,10 +744,41 @@ class PackageExpectation:
     deliberately unconstrained, which is how a package whose subtest cardinality
     was never measured avoids being pinned to a number nobody counted.
 
+    WHICH FIELDS APPLY IN WHICH MODE, AND WHY THAT DIFFERS. ``top_level`` is
+    knowable from Go SOURCE - it is the ``^func Test`` roster minus ``TestMain`` -
+    so it is enforced against measured AND derived rows alike. ``total``,
+    ``subtests`` and ``subtest_counts`` describe verdicts a run EMITS, and the
+    names of most subtests are computed at runtime from table data, so derived
+    mode cannot enumerate them without inventing them; those three are therefore
+    enforced only against rows whose provenance is
+    :data:`PROVENANCE_GO_TEST_JSON`. The distinction is not a loophole - it is
+    what lets derived mode stay honest about being a roster while a measured
+    manifest is held to the full emitted domain, which is precisely the shortfall
+    that let 239 noderestriction subtests and 8 ``TestAudit`` subtests go missing
+    from a manifest that nonetheless declared itself measured.
+
     Attributes:
-        total: Required number of verdicts, or ``None``.
-        top_level: Required number of top-level identities, or ``None``.
-        subtests: Required number of subtest verdicts, or ``None``.
+        total: Required number of verdicts, or ``None``. Measured rows only.
+        top_level: Required number of top-level identities, or ``None``. Both modes.
+        subtests: Required number of subtest verdicts, or ``None``. Measured only.
+        subtest_counts: Required subtest count for each named top-level FAMILY as
+            ``(family, count)`` pairs in declaration order, or ``None`` to leave
+            the per-family split unconstrained. Measured rows only. A tuple of
+            pairs rather than a dict because this is module-level state shared by
+            every caller and every pytest-xdist worker: an immutable declaration
+            cannot be edited by one reader and observed by another. A family
+            declared here and absent from the rows is a failure - that is the
+            guard that catches a whole matrix vanishing - and a family present in
+            the rows but undeclared is a failure too, because a new test function
+            changes the domain the parity map has to cover.
+        passes: Required number of ``pass`` verdicts, or ``None``.
+        skips: Required number of ``skip`` verdicts, or ``None``. Pinned to an
+            EXACT number rather than to zero, because the measured baseline is not
+            uniformly all-pass: ``test/integration/auth`` really does skip 25
+            subtests today, and "pass the same way as they pass today" means a
+            skip must stay a skip. Pinning the count is what makes a NEW skip - a
+            test that silently stopped running - a failure, while the 25 that are
+            genuinely skipped remain recordable.
         note: Where the numbers come from, quoted in the failure message so the
             reader can re-measure rather than guess.
     """
@@ -470,40 +786,303 @@ class PackageExpectation:
     total: int | None = None
     top_level: int | None = None
     subtests: int | None = None
+    subtest_counts: tuple[tuple[str, int], ...] | None = None
+    passes: int | None = None
+    skips: int | None = None
     note: str = ""
 
 
-#: The declared, overridable cardinality guards.
+#: The declared, overridable cardinality guards - one per package the baseline
+#: covers, and one per subtest FAMILY within it.
 #:
-#: Both entries are measured rather than quoted. `cluster/gce/gci` was re-run in
-#: this session with `go test -json -count=1 ./cluster/gce/gci/`, whose stream
-#: reduced to 648 verdicts - 8 top-level and 640 subtests, all `pass` - with the
-#: per-function subtest split 2/2/2/2/0/2/10/620 (TestEncryptionProviderConfig is
-#: flat and declares no `t.Run` at all, which is why one of the eight
-#: contributes no subtest). `test/integration/auth` has 44 `^func Test`
-#: declarations of which one is `TestMain`, leaving 43 identities.
+#: EVERY NUMBER HERE WAS MEASURED, not quoted. Two commands produced all of them,
+#: and re-running either reproduces them:
 #:
-#: `test/integration/auth` constrains ONLY `top_level`. Several of its 43 tests
-#: do declare subtests, and that cardinality has never been measured here, so
-#: pinning `total` would invent a number.
+#:     go test -json -count=1 ./cluster/gce/gci/ \
+#:         ./plugin/pkg/auth/authorizer/rbac/ \
+#:         ./plugin/pkg/auth/authorizer/rbac/bootstrappolicy/ \
+#:         ./plugin/pkg/admission/security/podsecurity/ \
+#:         ./plugin/pkg/admission/noderestriction/
+#:     go test -json -count=1 -p 1 -timeout 30m ./test/integration/secrets/ \
+#:         ./test/integration/auth/ ./test/integration/controlplane/audit/
+#:
+#: WHY EVERY PACKAGE IS PINNED NOW. Two entries used to be pinned and six were not,
+#: and the six unpinned ones were exactly where the baseline was wrong: the manifest
+#: recorded ``test/integration/auth`` as 43 verdicts when the package actually emits
+#: 2,179, because only its top-level identities had ever been enumerated and its
+#: 2,136 subtests were absent altogether. A missing subtest is the most dangerous
+#: kind of gap this artifact can have - the parity contract's completeness assertion
+#: walks the baseline, so an identity that is not IN the baseline is never required
+#: of the ported suite, and its absence is indistinguishable from a behaviour that
+#: never existed. Pinning the cardinality of every package is what makes that gap
+#: impossible to reopen quietly.
+#:
+#: WHY THE PER-FAMILY SPLIT EXISTS AS WELL. Package totals alone were measurably
+#: insufficient: a manifest that recorded the five `noderestriction` parents and
+#: none of their 239 subtests, and the two `controlplane/audit` parents without
+#: `TestAudit`'s 8, satisfied every guard that existed because no guard named a
+#: family. So the split is now declared: a family that emitted nothing, emitted a
+#: different number, or appeared without being declared all abort. `subtest_counts`
+#: is exhaustive per package - families with no subtests are declared as 0 rather
+#: than omitted, so "declared but absent" and "present but undeclared" are both
+#: decidable.
+#:
+#: The reduction, measured: 3,104 verdicts across 8 Go packages - 79 top-level and
+#: 3,025 subtests - of which 3,079 pass and 25 skip, with zero failures, plus the
+#: one measured non-Go row. The ``cluster/gce/gci`` per-function subtest split is
+#: 2/2/2/2/0/2/10/620 (``TestEncryptionProviderConfig`` is flat and declares no
+#: ``t.Run`` at all, which is why one of the eight contributes no subtest).
+#: ``test/integration/auth``'s subtest count is dominated by three 686-case tables:
+#: ``TestPodSecurity``, ``TestPodSecurityGAOnly`` and ``TestPodSecurityWebhook``.
+#:
+#: WHAT THE 25 SKIPS ARE, named so a 26th is a question rather than a shrug.
+#: `TestPodSecurityGAOnly` (test/integration/auth/podsecurity_test.go:78) disables
+#: every alpha and beta feature gate, and `podsecuritytest.Run`
+#: (staging/src/k8s.io/pod-security-admission/test/run.go:398-401) calls
+#: `t.Skipf("features required for failure cases are disabled: %v", ...)` for any
+#: `_fail_<check>` subtest whose failure cases need a disabled gate - the 24
+#: `_fail_procMount` subtests plus one `_fail_procMount_restricted`. AAP §0.10.3
+#: requires a skipped test to stay skipped, so they are recorded verbatim and both
+#: their count and their family are pinned. That split is FEATURE-GATE DEPENDENT and
+#: the pin is deliberate about it: a run with ProcMountType enabled reports the same
+#: 43 identities and the same 2,179 verdicts with those 25 rows as `pass`. Pinning
+#: `skips` therefore refuses a regeneration taken under different gates, which is the
+#: intended behaviour rather than a limitation - the baseline is the record of how
+#: THIS checkout behaves under its DEFAULT gates, and a differently gated capture is a
+#: different measurement wearing the same name. :func:`_check_cardinality` says so in
+#: its diagnostic, so the operator is told which of the two they are looking at.
+#:
+#: `total`, `subtests` and `subtest_counts` are enforced against MEASURED Go rows
+#: only; `top_level` is enforced always. See :class:`PackageExpectation` for why.
 PACKAGE_EXPECTATIONS: Final[Mapping[str, PackageExpectation]] = {
     f"{GO_MODULE_PATH}/cluster/gce/gci": PackageExpectation(
         total=648,
         top_level=8,
         subtests=640,
+        subtest_counts=(
+            ("TestAppendOrReplacePrefix", 10),
+            ("TestCreateMasterAuditPolicy", 620),
+            ("TestEncryptionProviderConfig", 0),
+            ("TestEncryptionProviderFlag", 2),
+            ("TestKMSIntegration", 2),
+            ("TestServerOverride", 2),
+            ("TestStorageOptions", 2),
+            ("TestTLSFlags", 2),
+        ),
+        passes=648,
+        skips=0,
         note=(
-            "measured: go test -json -count=1 ./cluster/gce/gci/ reduces to 648 verdicts "
-            "(8 top-level + 640 subtests), per function 2/2/2/2/0/2/10/620"
+            "measured: reduces to 648 verdicts (8 top-level + 640 subtests), per function "
+            "2/2/2/2/0/2/10/620. TestEncryptionProviderConfig is flat and declares no "
+            "t.Run at all, which is why one of the eight contributes no subtest"
         ),
     ),
     f"{GO_MODULE_PATH}/test/integration/auth": PackageExpectation(
+        total=2179,
         top_level=43,
+        subtests=2136,
+        subtest_counts=(
+            ("TestAliceNotForbiddenOrUnauthorized", 0),
+            ("TestAuthModeAlwaysAllow", 0),
+            ("TestAuthModeAlwaysDeny", 0),
+            ("TestAuthnToKAS", 2),
+            ("TestAuthorizationAttributeDetermination", 0),
+            ("TestAuthzConfig", 0),
+            ("TestBobIsForbidden", 0),
+            ("TestBootstrapTokenAuth", 3),
+            ("TestBootstrapping", 0),
+            ("TestConstrainedImpersonation", 4),
+            ("TestConstrainedImpersonationDisabled", 2),
+            ("TestDiscoveryUpgradeBootstrapping", 0),
+            ("TestDynamicClientBuilder", 0),
+            ("TestGetsSelfAttributes", 8),
+            ("TestGetsSelfAttributesError", 2),
+            ("TestImpersonateIsForbidden", 0),
+            ("TestImpersonateWithUID", 3),
+            ("TestKindAuthorization", 0),
+            ("TestLocalSubjectAccessReview", 0),
+            ("TestMonitoringURLs", 1),
+            ("TestMultiWebhookAuthzConfig", 0),
+            ("TestNamespaceAuthorization", 0),
+            ("TestNodeAuthorizer", 0),
+            ("TestNodeRestrictionCrossNodeDenied", 0),
+            ("TestNodeRestrictionServiceAccount", 5),
+            ("TestNodeRestrictionServiceAccountAudience", 23),
+            ("TestPodSecurity", 686),
+            ("TestPodSecurityEnforceBaselineRejectsPrivileged", 0),
+            ("TestPodSecurityGAOnly", 686),
+            ("TestPodSecurityWebhook", 686),
+            ("TestRBAC", 4),
+            ("TestRBACContextContamination", 0),
+            ("TestRBACNoWildcardOutsideSystemMasters", 0),
+            ("TestReadOnlyAuthorization", 0),
+            ("TestSelfSubjectAccessReview", 0),
+            ("TestServiceAccountAnnotationDeprecation", 1),
+            ("TestServiceAccountTokenBoundAndAudienced", 0),
+            ("TestServiceAccountTokenCreate", 20),
+            ("TestSloppySANCertificates", 0),
+            ("TestSubjectAccessReview", 0),
+            ("TestUnknownUserIsUnauthorized", 0),
+            ("TestWebhookTokenAuthenticator", 0),
+            ("TestWebhookTokenAuthenticatorCustomDial", 0),
+        ),
+        passes=2154,
+        skips=25,
         note=(
-            "measured: 44 '^func Test' declarations in test/integration/auth minus TestMain "
-            "(main_test.go:27), which emits no verdict event"
+            "measured: 2179 verdicts. 43 top-level identities - 44 '^func Test' "
+            "declarations minus TestMain (main_test.go:27), which emits no verdict event - "
+            "and 2136 subtests, of which 25 TestPodSecurityGAOnly procMount cases report "
+            "skip while the package still passes. Three tables dominate the subtests at "
+            "686 each: TestPodSecurity, TestPodSecurityGAOnly, TestPodSecurityWebhook"
+        ),
+    ),
+    f"{GO_MODULE_PATH}/test/integration/secrets": PackageExpectation(
+        total=2,
+        top_level=2,
+        subtests=0,
+        subtest_counts=(
+            ("TestSecrets", 0),
+            ("TestSecretsAreEncryptedAtRest", 0),
+        ),
+        passes=2,
+        skips=0,
+        note=(
+            "measured: 2 flat top-level verdicts, TestSecrets and "
+            "TestSecretsAreEncryptedAtRest, no t.Run anywhere; TestMain excluded"
+        ),
+    ),
+    f"{GO_MODULE_PATH}/test/integration/controlplane/audit": PackageExpectation(
+        total=12,
+        top_level=2,
+        subtests=10,
+        subtest_counts=(
+            ("TestAudit", 8),
+            ("TestAuditSensitiveResourceLevels", 2),
+        ),
+        passes=12,
+        skips=0,
+        note=(
+            "measured: 12 verdicts (2 top-level + 10 subtests). TestAudit contributes 8 "
+            "subtests (audit_test.go t.Run at lines 398 and 405) and "
+            "TestAuditSensitiveResourceLevels 2, the latter parametrized over audit versions "
+            "and spelling the API version into the id - which is why the id split takes the "
+            "first separator only"
+        ),
+    ),
+    f"{GO_MODULE_PATH}/plugin/pkg/auth/authorizer/rbac": PackageExpectation(
+        total=3,
+        top_level=3,
+        subtests=0,
+        subtest_counts=(
+            ("TestAuthorizer", 0),
+            ("TestRuleMatches", 0),
+            ("TestSubjectLocator", 0),
+        ),
+        passes=3,
+        skips=0,
+        note=(
+            "measured: 3 flat verdicts"
+        ),
+    ),
+    f"{GO_MODULE_PATH}/plugin/pkg/auth/authorizer/rbac/bootstrappolicy": PackageExpectation(
+        total=15,
+        top_level=15,
+        subtests=0,
+        subtest_counts=(
+            ("TestBootstrapClusterRoleBindings", 0),
+            ("TestBootstrapClusterRoles", 0),
+            ("TestBootstrapClusterRolesWithFeatureGatesEnabled", 0),
+            ("TestBootstrapControllerRoleBindings", 0),
+            ("TestBootstrapControllerRoles", 0),
+            ("TestBootstrapNamespaceRoleBindings", 0),
+            ("TestBootstrapNamespaceRoles", 0),
+            ("TestClusterRoleLabel", 0),
+            ("TestClusterRoleVerbsConsistency", 0),
+            ("TestControllerRoleLabel", 0),
+            ("TestControllerRoleVerbsConsistency", 0),
+            ("TestEditViewRelationship", 0),
+            ("TestNamespaceRoleVerbsConsistency", 0),
+            ("TestNoStarsForControllers", 0),
+            ("TestNodeRuleVerbsConsistency", 0),
+        ),
+        passes=15,
+        skips=0,
+        note=(
+            "measured: 15 flat verdicts"
+        ),
+    ),
+    f"{GO_MODULE_PATH}/plugin/pkg/admission/security/podsecurity": PackageExpectation(
+        total=1,
+        top_level=1,
+        subtests=0,
+        subtest_counts=(
+            ("TestConvert", 0),
+        ),
+        passes=1,
+        skips=0,
+        note=(
+            "measured: 1 flat verdict"
+        ),
+    ),
+    f"{GO_MODULE_PATH}/plugin/pkg/admission/noderestriction": PackageExpectation(
+        total=244,
+        top_level=5,
+        subtests=239,
+        subtest_counts=(
+            ("TestAdmitPVCStatus", 10),
+            ("TestAdmitResourceSlice", 30),
+            ("Test_getModifiedLabels", 10),
+            ("Test_nodePlugin_Admit", 178),
+            ("Test_nodePlugin_Admit_OwnerReference", 11),
+        ),
+        passes=244,
+        skips=0,
+        note=(
+            "measured: 244 verdicts (5 top-level + 239 subtests). Three identities carry a "
+            "lowercase character after 'Test', which is legal Go and the reason nothing "
+            "here assumes a Test[A-Z] shape. Some ids nest a second '/' "
+            "(TestAdmitResourceSlice/<case>/<case>). The subtests were absent from the "
+            "manifest entirely before this pin"
+        ),
+    ),
+    NON_GO_BASELINE_PACKAGE: PackageExpectation(
+        total=1,
+        top_level=1,
+        subtests=0,
+        subtest_counts=((NON_GO_BASELINE_TEST, 0),),
+        passes=1,
+        skips=0,
+        note=(
+            "measured: python3 -m unittest boilerplate_test reports 'Ran 1 test in "
+            "0.001s / OK' - one case, no subtests. Guarded in BOTH modes because the "
+            "row is produced identically either way"
         ),
     ),
 }
+
+#: The EXACT roster of verdicts the measured baseline records as ``skip``, as
+#: ``(package, go_id)``.
+#:
+#: WHY AN EXACT ROSTER AND NOT A COUNT. AAP §0.10.3 defines behaviour parity as
+#: "any skipped or known-failing test retains identical status", so a skip is a
+#: FACT about today that the ported suite must reproduce - not an inconvenience to
+#: be tolerated. A count alone would let one test start skipping while another
+#: stopped, and the total would still be 25. Naming them is what makes
+#: skip-stays-skip and pass-stays-pass separately provable.
+#:
+#: All 25 are ``procMount`` cases in ``test/integration/auth``'s Pod Security
+#: tables, which skip because the ProcMountType feature gate is not enabled in the
+#: test server.
+EXPECTED_SKIP_COUNT: Final[int] = 25
+
+#: The substring every measured skip's identity contains. Held as a rule rather
+#: than 25 literals because the case names carry generated ordinals; the COUNT is
+#: pinned exactly above, and this asserts they are all the same known feature-gate
+#: family rather than an unrelated test that started skipping.
+EXPECTED_SKIP_MARKER: Final[str] = "procMount"
+
+#: The one package the measured skips come from.
+EXPECTED_SKIP_PACKAGE: Final[str] = f"{GO_MODULE_PATH}/test/integration/auth"
 
 
 @dataclass(frozen=True, slots=True)
@@ -921,16 +1500,69 @@ def reduce_event_stream(lines: Iterable[str], *, source: str = "<stream>") -> St
 def _oracle_environment(base: Mapping[str, str]) -> dict[str, str]:
     """Build the child environment, keeping the repository's Go freeze intact.
 
-    INVARIANT LOCKED: ``-mod=vendor`` is present and a caller's ``GOFLAGS`` is
-    APPENDED TO, never overwritten. Dependencies are vendored and builds are
-    offline-capable, so a run that resolved modules from the network could
-    silently alter what the oracle compiles - and clobbering an inherited
-    ``GOFLAGS`` would discard whatever the runner or CI deliberately set.
+    INVARIANT LOCKED: ``-mod=vendor`` is present, and every inherited ``GOFLAGS``
+    entry has passed the SAME allow-list and value checks as an argument written on
+    the command line.
+
+    GOFLAGS IS AN ARGUMENT SOURCE, NOT A DECORATION, and treating it as one is the
+    fix. ``go test`` reads it exactly as if its entries had been typed after the
+    subcommand, so ``GOFLAGS=-run=TestNothing``, ``GOFLAGS=-short``,
+    ``GOFLAGS=-tags=noetcd`` and ``GOFLAGS=-count=0`` each shrink the manifest with
+    no error and no trace - the same class of silent domain narrowing
+    :func:`_resolve_extra_go_args` exists to refuse. The previous guard was
+    ``if "-mod=" not in goflags``, which did not screen a single entry and, worse,
+    treated an inherited ``-mod=mod`` as satisfying the vendor requirement: the one
+    value that means the opposite of what was being enforced.
+
+    Nothing legitimate is lost. Entries that pass are preserved verbatim, so
+    whatever the runner or CI deliberately set still applies, and ``-mod=vendor`` is
+    appended when absent rather than replacing the list.
+
+    Args:
+        base: The environment to derive from, normally ``os.environ``.
+
+    Returns:
+        The child environment.
+
+    Raises:
+        BaselineError: If an inherited ``GOFLAGS`` entry is not an allowed flag, or
+            carries a value that would weaken the oracle.
     """
     env = dict(base)
-    goflags = env.get("GOFLAGS", "")
-    if "-mod=" not in goflags:
-        env["GOFLAGS"] = f"{goflags} -mod=vendor".strip()
+    inherited = env.get("GOFLAGS", "").split()
+
+    for entry in inherited:
+        if not entry.startswith("-"):
+            raise BaselineError(
+                f"refusing the inherited GOFLAGS entry {entry!r}: every entry must be a "
+                f"standalone flag, which is what the Go toolchain documents and requires. A "
+                f"bare word here is read as a package or an operand and would widen or break "
+                f"the run. Fix GOFLAGS in the environment that launched this generator."
+            )
+        name = _flag_name(entry)
+        if name not in _ALLOWED_GO_TEST_FLAGS:
+            raise BaselineError(
+                f"refusing the inherited GOFLAGS entry {entry!r}: `-{name}` is not in the "
+                f"allow-list {sorted(_ALLOWED_GO_TEST_FLAGS)}. GOFLAGS is applied by `go "
+                f"test` exactly as if it had been typed on the command line, so a selection, "
+                f"listing, skipping, tag, benchmark or fuzz flag there shrinks the baseline "
+                f"just as silently as one passed directly - and a verdict missing from the "
+                f"baseline cannot be told apart from a behaviour that never existed. Unset "
+                f"it, or narrow the run honestly with --packages."
+            )
+        if "=" in entry:
+            validate_go_flag_value(entry, name, entry.split("=", 1)[1])
+        elif name not in _BOOLEAN_GO_TEST_FLAGS:
+            raise BaselineError(
+                f"refusing the inherited GOFLAGS entry {entry!r}: `-{name}` takes a value and "
+                f"GOFLAGS entries must be self-contained (`-{name}=<value>`), because the "
+                f"toolchain does not pair one entry with the next. As written it would be "
+                f"rejected by `go test`, and a run that fails to start produces no baseline."
+            )
+
+    if not any(_flag_name(entry) == "mod" for entry in inherited):
+        inherited.append(f"-mod={_REQUIRED_MOD_VALUE}")
+    env["GOFLAGS"] = " ".join(inherited)
     return env
 
 
@@ -990,10 +1622,12 @@ def run_go_test_json(
             f"provenance={PROVENANCE_DERIVED!r} so the difference stays visible."
         )
 
-    command = [resolved, "test", "-json", "-count=1", *extra_args, *packages]
+    bounded_args, outer_deadline = _timeout_budget(extra_args)
+    command = [resolved, "test", "-json", "-count=1", *bounded_args, *packages]
     printable = " ".join(command)
     _log(f"running the Go oracle: {printable}")
     _log(f"working directory: {repo_root}")
+    _log(f"outer deadline: {outer_deadline:.0f}s (Go -timeout plus a margin)")
 
     child_env = _oracle_environment(os.environ if env is None else env)
 
@@ -1003,18 +1637,48 @@ def run_go_test_json(
             # shell=False (the default) with an argument list: no word splitting,
             # no glob expansion and no injection surface from a package name. A
             # `shell=True` string would give all three away for nothing.
-            completed = subprocess.run(
+            #
+            # start_new_session=True makes the child the LEADER of its own process
+            # group, which is what lets a timeout kill `go test`, every per-package
+            # test binary it exec'd and any etcd those started, with one killpg -
+            # and what guarantees the signal cannot travel back to this process or
+            # to the pytest session that invoked it.
+            process = subprocess.Popen(
                 command,
                 cwd=str(repo_root),
                 env=child_env,
                 stdout=sink,
                 stderr=subprocess.PIPE,
                 text=True,
-                check=False,
+                start_new_session=True,
             )
+            try:
+                _, captured_stderr = process.communicate(timeout=outer_deadline)
+            except subprocess.TimeoutExpired:
+                # Kill the GROUP before raising, so nothing survives this failure
+                # holding a port, a data directory or the capture pipe. Then read
+                # back whatever the stream captured, because a partial stream names
+                # the test that was running when everything stopped - which is the
+                # single most useful fact about a hang.
+                _terminate_process_group(process)
+                partial = stream_path.read_text(encoding="utf-8", errors="replace")
+                last_lines = [line for line in partial.splitlines() if line.strip()][-5:]
+                raise BaselineError(
+                    f"the Go oracle exceeded this script's outer deadline of "
+                    f"{outer_deadline:.0f}s and its whole process group was terminated "
+                    f"(SIGTERM then SIGKILL). Command: {printable}\n"
+                    f"The Go-side `-timeout` should have fired FIRST and produced a goroutine "
+                    f"dump, so reaching this bound means the toolchain was wedged building, a "
+                    f"child outlived its test binary and held the capture pipe, or the binary "
+                    f"ignored its own alarm. No manifest is written: a truncated stream would "
+                    f"record a smaller domain than the one that was asked for, and the parity "
+                    f"contract cannot tell that apart from tests that never existed.\n"
+                    f"Last stream lines before termination:\n"
+                    + ("\n".join(f"  {line}" for line in last_lines) or "  (stream was empty)")
+                ) from None
         raw = stream_path.read_text(encoding="utf-8")
 
-    stderr_text = (completed.stderr or "").strip()
+    stderr_text = (captured_stderr or "").strip()
     if stderr_text:
         # Surfaced, never swallowed: a build error appears here and nowhere else.
         _log("go test stderr follows")
@@ -1022,13 +1686,13 @@ def run_go_test_json(
 
     reduction = reduce_event_stream(raw.splitlines(), source=f"`{printable}`")
 
-    if completed.returncode != 0:
+    if process.returncode != 0:
         failed = [v.go_id for v in reduction.verdicts if v.action == "fail"]
         failing_packages = sorted(
             pkg for pkg, status in reduction.package_status.items() if status != "pass"
         )
         raise BaselineError(
-            f"the Go oracle exited {completed.returncode} for packages "
+            f"the Go oracle exited {process.returncode} for packages "
             f"{list(packages)} and yielded {len(reduction.verdicts)} verdicts "
             f"({len(failed)} of them failing). "
             f"Non-passing packages: {failing_packages or 'none reported'}. "
@@ -1036,8 +1700,10 @@ def run_go_test_json(
             f"{' (and more)' if len(failed) > 20 else ''}. "
             f"A non-zero oracle exit with no failing verdict usually means a BUILD error, a "
             f"TestMain abort or a panic outside any test - see the stderr above. The measured "
-            f"baseline is 100 percent pass with zero failures and zero skips, so this must be "
-            f"fixed rather than recorded."
+            f"baseline has ZERO FAILURES, so this must be fixed rather than recorded. Skips "
+            f"are a different matter: the oracle legitimately skips {EXPECTED_SKIP_COUNT} "
+            f"{EXPECTED_SKIP_MARKER!r} cases, which are recorded verbatim and pinned to an "
+            f"exact roster."
         )
 
     _log(
@@ -1051,11 +1717,21 @@ def run_go_test_json(
 # The measured source inventory (derived mode)
 # ---------------------------------------------------------------------------
 # Every identity below was measured on this branch, by grepping `^func Test` for
-# the top-level names and by reducing a real `go test -json` stream for the shell
-# package's subtests. Nothing is estimated, rounded or inferred: where a subtest
-# cardinality was never measured, the test is recorded as a top-level verdict
-# only, which is why `TestAudit` contributes one row rather than an invented
-# handful.
+# the top-level names and by reducing a real `go test -json` stream for the
+# subtests. Nothing is estimated, rounded or inferred: where a subtest cardinality
+# is not recorded below, the test contributes a top-level verdict only rather than
+# an invented handful.
+#
+# DERIVED MODE IS A NARROWER DOMAIN THAN THE ORACLE, ON PURPOSE, AND THE
+# `provenance` FIELD IS WHAT SAYS SO. A full capture of the eight default packages
+# in this checkout reduces to 3104 Go verdicts - among them 2136 `test/integration/auth`
+# subtests and 239 `noderestriction` subtests, whose names are computed at runtime
+# from table data and cannot be established by reading the source. Derived mode
+# therefore records those packages' top-level identities only, and a manifest built
+# that way is stamped `derived_from_source_inventory` precisely so a reader can tell
+# it apart from the complete measured domain. Only a real
+# `--mode go-test-json` run may claim `go_test_json`, and the committed manifest is
+# one: it carries every subtest the oracle emitted.
 #
 # Two matrices are NOT transcribed here. They already have an owner in
 # tests/fixtures/, and a second copy is a second thing to drift:
@@ -1172,6 +1848,16 @@ _GCI_TESTS: Final[tuple[_MeasuredTest, ...]] = (
 
 #: `test/integration/auth` - 43 identities. 44 `^func Test` declarations minus
 #: `TestMain`, which is the package entry point and emits no verdict.
+#:
+#: TOP-LEVEL ONLY IN DERIVED MODE. A measured run emits 2136 subtests beneath
+#: these 43 - 686 each under TestPodSecurity, TestPodSecurityGAOnly and
+#: TestPodSecurityWebhook alone - built at run time from the pod-security fixture
+#: matrix, so derived mode records the roster and nothing beneath it. The measured
+#: per-family counts live in PACKAGE_EXPECTATIONS and are enforced against a
+#: measured run, which is what stops a measured manifest from shipping the roster
+#: alone. 25 of those subtests are legitimately SKIPPED today
+#: (TestPodSecurityGAOnly/..._fail_procMount) and are recorded as `skip` verbatim,
+#: because skip-stays-skip is a parity outcome rather than a defect.
 _AUTH_TESTS: Final[tuple[_MeasuredTest, ...]] = tuple(
     _MeasuredTest(test=name)
     for name in (
@@ -1232,11 +1918,24 @@ _SOURCE_INVENTORY: Final[Mapping[str, tuple[_MeasuredTest, ...]]] = {
     f"{GO_MODULE_PATH}/test/integration/controlplane/audit": (
         _MeasuredTest(
             test="TestAudit",
+            go_subtest_names=(
+                "audit.k8s.io/v1.RequestResponse.false",
+                "audit.k8s.io/v1.Metadata.true",
+                "audit.k8s.io/v1.Request.true",
+                "audit.k8s.io/v1.RequestResponse.true",
+                "cross-group-audit.k8s.io/v1.Request.create-audit-request",
+                "cross-group-audit.k8s.io/v1.RequestResponse.create-audit-response",
+                "cross-group-audit.k8s.io/v1.Request.update-audit-request",
+                "cross-group-audit.k8s.io/v1.RequestResponse.update-audit-response",
+            ),
             note=(
-                "TOP-LEVEL ONLY, DELIBERATELY: audit_test.go declares t.Run at lines 398 and "
-                "405 over a matrix whose cardinality has not been measured here, so recording "
-                "a subtest count would be a fabrication. A real oracle run supplies the "
-                "subtests and records provenance=go_test_json"
+                "MEASURED, not transcribed from the source: audit_test.go declares t.Run at "
+                "lines 398 and 405 over a matrix these eight names were read off a real "
+                "`go test -json -count=1 ./test/integration/controlplane/audit/` capture in "
+                "this checkout (12 verdicts: 2 top-level + 10 subtests, all pass). They are "
+                "recorded here in EMITTED form so derived mode covers the package's real "
+                "domain instead of understating it; every name embeds '/', which is why the id "
+                "split takes the first separator only"
             ),
         ),
         _MeasuredTest(
@@ -1281,6 +1980,12 @@ _SOURCE_INVENTORY: Final[Mapping[str, tuple[_MeasuredTest, ...]]] = {
     f"{GO_MODULE_PATH}/plugin/pkg/admission/noderestriction": (
         # Three of these have a lowercase character after `Test`, which is legal
         # Go and the reason nothing here assumes a `Test[A-Z]` shape.
+        #
+        # TOP-LEVEL ONLY IN DERIVED MODE, for the same reason as the auth package:
+        # a measured run emits 239 subtests beneath these five (178 under
+        # Test_nodePlugin_Admit), named from table data at run time. The measured
+        # counts are declared in PACKAGE_EXPECTATIONS and enforced against a
+        # measured run.
         _MeasuredTest(test="Test_nodePlugin_Admit"),
         _MeasuredTest(test="Test_nodePlugin_Admit_OwnerReference"),
         _MeasuredTest(test="Test_getModifiedLabels"),
@@ -1515,9 +2220,14 @@ def check_go_verdict_domain(
        cover this, because a package-level failure does not always give `go test` a
        non-zero exit in a multi-package run, and the stream route has no exit code
        at all.
-    4. EVERY REQUESTED PACKAGE IS PRESENT. A misspelled or silently-empty package
-       contributes nothing, and a domain that is missing a package cannot be told
-       apart from a domain where that package's behaviours never existed.
+    4. EVERY REQUESTED PACKAGE PRODUCED AT LEAST ONE VERDICT. Not "reported an
+       outcome" - a VERDICT. ``go test`` emits a package-level summary and exits 0
+       for a package that ran nothing at all ("no test files", every test file
+       excluded by a build tag, a filter that matched nothing), so accepting a
+       summary as evidence of presence let a requested package contribute zero rows
+       while the manifest still declared it in scope. A declared package with no
+       rows makes every assertion about it vacuous, which the contract cannot tell
+       apart from those behaviours never having existed.
 
     Args:
         reduction: The reduced stream.
@@ -1576,8 +2286,8 @@ def check_go_verdict_domain(
             f"{' (and more)' if len(failing_verdicts) > 20 else ''}. "
             f"A package that fails while all of its tests pass is a BUILD ERROR, a TestMain "
             f"abort or a panic outside any test: the rows look perfect and the run was not. "
-            f"The measured baseline is 100 percent pass with zero failures and zero skips, "
-            f"so this must be fixed rather than recorded."
+            f"The measured baseline has ZERO FAILURES, so this must be fixed rather than "
+            f"recorded."
         )
 
     if not require_requested:
@@ -1590,47 +2300,255 @@ def check_go_verdict_domain(
             path for path in (import_path_for_package_spec(spec) for spec in packages) if path
         )
     )
-    summarised = set(reduction.package_status) | packages_with_verdicts
-    # A recursive pattern names a SUBTREE, so any package beneath it satisfies it.
-    # Requiring the root itself to report an outcome would fail every `/...` run,
-    # since the root directory usually holds no tests of its own.
-    absent = [
+    # VERDICTS, NOT SUMMARIES. This used to be `package_status | packages_with_verdicts`,
+    # which a package-level summary alone satisfied - and `go test` emits a summary for a
+    # package that ran NOTHING ("no test files", or every test excluded), then exits 0. A
+    # requested package could therefore contribute zero verdicts and still be counted as
+    # present, which is the exact vacuity this obligation exists to refuse: the manifest
+    # would declare the package in its domain while asserting nothing whatsoever about it.
+    #
+    # A recursive pattern names a SUBTREE, so a verdict from any package beneath it
+    # satisfies it. Requiring the root itself to emit verdicts would fail every `/...`
+    # run, since the root directory usually holds no tests of its own.
+    silent = [
         package
         for package in requested
-        if package not in summarised
-        and not any(seen.startswith(f"{package}/") for seen in summarised)
+        if package not in packages_with_verdicts
+        and not any(seen.startswith(f"{package}/") for seen in packages_with_verdicts)
     ]
-    if absent:
+    if silent:
+        summarised_only = sorted(
+            package
+            for package in silent
+            if package in reduction.package_status
+            or any(seen.startswith(f"{package}/") for seen in reduction.package_status)
+        )
         raise BaselineError(
-            f"{len(absent)} requested package(s) produced no outcome in {reduction.source}: "
-            f"{absent}. Packages seen: {sorted(summarised)}. A requested package that "
-            f"contributes nothing is either misspelled or holds no tests, and either way the "
-            f"manifest's declared domain would be narrower than the domain that was asked "
-            f"for - which the parity contract cannot tell apart from those behaviours never "
-            f"having existed."
+            f"{len(silent)} requested package(s) produced NO VERDICT in {reduction.source}: "
+            f"{silent}. Packages that produced verdicts: {sorted(packages_with_verdicts)}. "
+            f"Of the silent ones, {summarised_only or 'none'} did report a package-level "
+            f"summary, which means `go test` ran them and they emitted no test outcome at "
+            f"all - 'no test files', a build that excluded every test file, or a filter that "
+            f"matched nothing. A summary is not a verdict: a package present in the "
+            f"manifest's declared domain but contributing no rows makes every assertion "
+            f"about it vacuous, which the parity contract cannot tell apart from those "
+            f"behaviours never having existed."
         )
 
 
-def _non_go_baseline_verdict() -> Verdict:
-    """The single non-Go baseline row.
+#: Wall-clock ceiling for the non-Go baseline measurement. The case it runs is a
+#: single directory scan over a handful of fixture files - the measured baseline is
+#: "1 passed in 0.13s" - so a minute is generous by two orders of magnitude and a
+#: run that exceeds it is wedged rather than slow.
+NON_GO_BASELINE_TIMEOUT_SECONDS: Final[float] = 60.0
+
+#: Path of the non-Go baseline case, relative to the repository root.
+NON_GO_BASELINE_RELATIVE_PATH: Final[str] = "hack/boilerplate/boilerplate_test.py"
+
+#: JUnit `classname` pytest emits for that case. Derived from its path, so it is
+#: the dotted form of NON_GO_BASELINE_RELATIVE_PATH without the suffix. Asserted
+#: rather than assumed, because a silently different classname would mean the
+#: parsed testcase is not the one this row claims to describe.
+NON_GO_BASELINE_CLASSNAME: Final[str] = "hack.boilerplate.boilerplate_test"
+
+#: JUnit child element -> the action it means. A `<testcase>` with NO child
+#: element is a pass; this is the whole outcome vocabulary pytest emits.
+_JUNIT_OUTCOME_TAGS: Final[Mapping[str, str]] = {
+    "failure": "fail",
+    "error": "fail",
+    "skipped": "skip",
+}
+
+
+def _non_go_baseline_verdict(repo_root: Path | None = None) -> Verdict:
+    """The single non-Go baseline row, MEASURED by executing the case.
 
     INVARIANT LOCKED: the one Python case in the baseline scale is present
-    regardless of which Go packages were run. It is appended by an explicit,
-    default-on switch rather than inferred from a stream, because letting a
-    ``go test`` invocation decide whether a Python test is recorded is exactly how
-    a narrow regeneration would drop it by accident.
+    regardless of which Go packages were run, AND its recorded verdict is the one
+    the test actually produced. It is appended by an explicit, default-on switch
+    rather than inferred from a stream, because letting a ``go test`` invocation
+    decide whether a Python test is recorded is exactly how a narrow regeneration
+    would drop it by accident.
 
-    ``elapsed`` is ``None``: the measured baseline is the unittest runner's
-    "Ran 1 test in 0.001s / OK", which is a suite total rather than a per-test
-    duration reported by the Go toolchain, and inventing one would misrepresent
-    where the number came from.
+    THIS USED TO RETURN A HARD-CODED ``pass``. That made the row a claim rather
+    than a measurement, and it was the more dangerous half of a pair: the case it
+    names was also outside pytest's collection, so nothing executed it and nothing
+    could contradict the claim. A scanner or fixture regression - precisely the one
+    AAP §0.5.5 warns about, where adding ``hack/boilerplate/test/fail.ts`` and
+    ``fail.tsx`` changes the expected offender list - would leave the suite green
+    AND the baseline asserting green. Both halves are now closed: the case is
+    collected via ``testpaths`` in ``python/pyproject.toml``, and this function
+    runs it and reads the outcome out of real JUnit XML.
+
+    A failure here is NOT swallowed into a ``fail`` row that a later regeneration
+    would enshrine as required. :func:`_check_no_failures` refuses a manifest
+    containing any failure, so a genuinely failing case aborts generation - which
+    is the intended behaviour: the baseline records what passes today, and a
+    regression must be fixed rather than recorded.
+
+    Its provenance atom is :data:`PROVENANCE_NON_GO_MEASURED`, contributed to the
+    envelope by whichever route appended it. That row IS measured - by the
+    ``unittest``/pytest runner - so it is not derived data; what it is not is Go
+    data, which is why it needs an atom of its own rather than borrowing either Go
+    one. ``elapsed`` is taken from the JUnit ``time`` attribute rather than
+    invented, for the same reason.
+
+    Args:
+        repo_root: Repository root. Defaults to :func:`repo_root_from_file`.
+
+    Returns:
+        The measured verdict, with ``elapsed`` taken from the JUnit ``time``
+        attribute rather than invented.
+
+    Raises:
+        BaselineError: If the case cannot be located, cannot be executed, or does
+            not report exactly one identifiable testcase. Every one of these is a
+            reason to abort rather than to fall back to an assumed ``pass``.
     """
+    root = repo_root_from_file() if repo_root is None else repo_root
+    test_path = root / NON_GO_BASELINE_RELATIVE_PATH
+    if not test_path.is_file():
+        raise BaselineError(
+            f"the non-Go baseline case is missing at {test_path}. This row records the "
+            f"measured outcome of {NON_GO_BASELINE_RELATIVE_PATH}, so it cannot be "
+            f"produced without it. Either restore the file or regenerate with "
+            f"--no-include-non-go-baseline and accept a manifest that omits the case."
+        )
+
+    with tempfile.TemporaryDirectory(prefix="blitzy-non-go-baseline-") as tmpdir:
+        report = Path(tmpdir) / "non-go-baseline.xml"
+        # -p no:randomly and -p no:xdist: the measurement must be a single,
+        # deterministic, in-process run. Randomised order is meaningless for one
+        # test and xdist would add a worker handshake to a sub-second scan.
+        # --junitxml is the ONLY channel read; stdout is captured for diagnostics.
+        command = (
+            sys.executable,
+            "-m",
+            "pytest",
+            str(test_path),
+            "-p",
+            "no:randomly",
+            "-p",
+            "no:xdist",
+            "--junitxml",
+            str(report),
+        )
+        try:
+            # Fixed argv and shell=False: nothing here is caller-controlled.
+            completed = subprocess.run(
+                command,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=NON_GO_BASELINE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise BaselineError(
+                f"could not execute pytest to measure the non-Go baseline case: {exc}. "
+                f"The interpreter running this generator ({sys.executable}) must have "
+                f"pytest importable; activate python/.venv or install the pinned set "
+                f"from python/requirements-test.txt."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise BaselineError(
+                f"measuring the non-Go baseline case exceeded "
+                f"{NON_GO_BASELINE_TIMEOUT_SECONDS:g}s and was terminated. The case is a "
+                f"single scan of hack/boilerplate/test/, so this is a wedged process "
+                f"rather than a slow one; nothing was recorded."
+            ) from exc
+
+        if not report.is_file():
+            raise BaselineError(
+                f"pytest produced no JUnit report at {report} while measuring the "
+                f"non-Go baseline case (exit {completed.returncode}). Without it there "
+                f"is no measured outcome to record.\n"
+                f"--- pytest stdout ---\n{completed.stdout}\n"
+                f"--- pytest stderr ---\n{completed.stderr}"
+            )
+        verdict = _parse_non_go_junit(report, returncode=completed.returncode)
+
+    return verdict
+
+
+def _parse_non_go_junit(report: Path, *, returncode: int) -> Verdict:
+    """Reduce the non-Go JUnit report to exactly one :class:`Verdict`.
+
+    INVARIANT LOCKED: the row describes the case it claims to describe. The
+    cardinality and the identity are both asserted, because a report holding zero
+    testcases (a collection error) or more than one (a renamed or parametrized
+    test) would otherwise be reduced to a confident single row that no longer
+    corresponds to ``NON_GO_BASELINE_TEST``.
+
+    Args:
+        report: Path of the JUnit XML pytest wrote.
+        returncode: pytest's exit status, quoted in diagnostics so a reader can
+            tell a clean "test failed" from an internal error.
+
+    Returns:
+        The measured verdict.
+
+    Raises:
+        BaselineError: If the report is unparsable, or does not hold exactly one
+            testcase with the expected classname and name.
+    """
+    try:
+        tree = ElementTree.parse(report)
+    except ElementTree.ParseError as exc:
+        raise BaselineError(
+            f"the JUnit report for the non-Go baseline case at {report} is not "
+            f"well-formed XML: {exc} (pytest exit {returncode}). A malformed report is "
+            f"not evidence of a passing test."
+        ) from exc
+
+    cases = list(tree.getroot().iter("testcase"))
+    if len(cases) != 1:
+        raise BaselineError(
+            f"expected exactly 1 testcase in the non-Go baseline report, found "
+            f"{len(cases)} (pytest exit {returncode}). This row records ONE case, "
+            f"{NON_GO_BASELINE_CLASSNAME}.{NON_GO_BASELINE_TEST}; a different count "
+            f"means the case was renamed, parametrized, or failed to collect, and the "
+            f"manifest must not paper over that."
+        )
+
+    case = cases[0]
+    classname = case.get("classname", "")
+    name = case.get("name", "")
+    if classname != NON_GO_BASELINE_CLASSNAME or name != NON_GO_BASELINE_TEST:
+        raise BaselineError(
+            f"the non-Go baseline report describes "
+            f"{classname!r}.{name!r} but this row records "
+            f"{NON_GO_BASELINE_CLASSNAME!r}.{NON_GO_BASELINE_TEST!r}. Recording a "
+            f"verdict measured from a DIFFERENT test than the one named would make the "
+            f"parity contract compare unrelated things."
+        )
+
+    # A testcase with no outcome child passed. `skipped` is a legitimate measured
+    # property, not a failure, so it is carried through as `skip`; the skip roster
+    # check then decides whether it is an EXPECTED skip.
+    action = "pass"
+    for child in case:
+        mapped = _JUNIT_OUTCOME_TAGS.get(child.tag)
+        if mapped is not None:
+            action = mapped
+            break
+
+    # `time` is pytest's own measurement. Absent or unparsable means there is no
+    # measurement to record, and None is the honest value - the same convention
+    # the Go reducer uses for a verdict event carrying no Elapsed.
+    elapsed: float | None
+    raw_time = case.get("time")
+    try:
+        elapsed = None if raw_time is None else float(raw_time)
+    except ValueError:
+        elapsed = None
+
     return Verdict(
         package=NON_GO_BASELINE_PACKAGE,
         test=NON_GO_BASELINE_TEST,
         subtest="",
-        action="pass",
-        elapsed=None,
+        action=action,
+        elapsed=elapsed,
     )
 
 
@@ -1660,65 +2578,280 @@ def _package_breakdown(verdicts: Sequence[Verdict]) -> dict[str, dict[str, int]]
     return breakdown
 
 
-def _check_all_green(verdicts: Sequence[Verdict], *, source_label: str) -> None:
-    """Refuse a baseline that is not 100 percent pass, naming EVERY offender.
+def _check_no_failures(verdicts: Sequence[Verdict], *, source_label: str) -> None:
+    """Refuse a baseline that records a FAILURE, naming EVERY offender.
 
-    INVARIANT LOCKED: the measured baseline is 100 percent pass with zero failures
-    and zero skips, and a regeneration that quietly records a regression turns the
-    contract's "verdict equality" assertion into a rubber stamp - a test that
-    fails today would then be required to fail tomorrow.
+    INVARIANT LOCKED: zero ``fail`` rows, and there is deliberately NO flag that
+    overrides this. A regeneration that quietly records a regression turns the
+    contract's verdict-equality assertion into a rubber stamp - a test that fails
+    today would then be REQUIRED to fail tomorrow, and the gate would defend the
+    bug.
+
+    A FAILURE AND A SKIP ARE NOT THE SAME FACT, which is why they are checked
+    separately. A failure is a regression: nothing legitimises it. A skip is a
+    measured property of today's suite - AAP §0.4.1.2 maps Go's ``t.Skip`` to
+    "skipped, not failed" and §0.10.3 requires a skipped test to retain identical
+    status - and the measured oracle genuinely skips: ``test/integration/auth``
+    reports 25 skipped ``TestPodSecurityGAOnly/..._fail_procMount`` subtests while
+    the package itself still passes. Conflating the two is why this generator
+    previously could not ingest its own oracle's real output, and coupling the two
+    to one switch made the gate WEAKER rather than stricter, because every honest
+    regeneration then had to wave the failure guard through as well. Skips are
+    instead recorded verbatim, held to the exact measured roster by
+    :func:`_check_skip_roster`, required to be accounted for by
+    :func:`_check_unpinned_skips`, and announced by
+    :func:`_report_recorded_skips`.
 
     Every offender is listed rather than the first, for the same reason the ported
     RBAC test accumulates findings instead of aborting: one report per run is worth
     more than one bisection per finding.
     """
-    offenders = [v for v in verdicts if v.action != "pass"]
+    offenders = [v for v in verdicts if v.action == "fail"]
     if not offenders:
         return
-    rendered = "\n".join(
-        f"  {v.action.upper():5} {v.package} :: {v.go_id}" for v in offenders
-    )
-    fail_count = sum(1 for v in offenders if v.action == "fail")
-    skip_count = sum(1 for v in offenders if v.action == "skip")
+    rendered = "\n".join(f"  FAIL  {v.package} :: {v.go_id}" for v in offenders)
     raise BaselineError(
-        f"refusing to record a baseline that is not all-green: {len(offenders)} of "
-        f"{len(verdicts)} verdicts are non-passing ({fail_count} fail, {skip_count} skip) "
-        f"from {source_label or 'the requested source'}.\n{rendered}\n"
-        f"The measured baseline is 100 percent pass with zero failures and zero skips, so "
-        f"fix the offenders rather than recording them. If a non-green baseline is genuinely "
-        f"intended - a test that is legitimately skipped today and must stay skipped - pass "
-        f"--allow-non-green, which records the true actions verbatim so skip-stays-skip "
-        f"remains provable."
+        f"refusing to record a baseline that contains a FAILURE: {len(offenders)} of "
+        f"{len(verdicts)} verdicts report `fail` from "
+        f"{source_label or 'the requested source'}.\n{rendered}\n"
+        f"The measured baseline is zero failures (tech-spec §6.6.3.2), so fix the offenders "
+        f"rather than recording them - a recorded failure becomes a REQUIRED failure, and the "
+        f"parity contract would then defend the regression instead of catching it. There is "
+        f"deliberately no flag to override this."
     )
+
+
+def _check_unpinned_skips(
+    verdicts: Sequence[Verdict],
+    expectations: Mapping[str, PackageExpectation],
+    *,
+    source_label: str,
+) -> None:
+    """Refuse a ``skip`` in a package whose skip count is not pinned.
+
+    INVARIANT LOCKED: a skip is recordable only where it is ACCOUNTED FOR. The
+    measured baseline is not uniformly all-pass - ``test/integration/auth`` skips
+    25 subtests under disabled alpha/beta feature gates - and AAP §0.10.3 requires
+    a skipped test to stay skipped, so a blanket "no skips" rule would make the
+    true baseline unrecordable. The replacement is exact rather than blanket:
+    :data:`PACKAGE_EXPECTATIONS` pins each default package's skip count, so a NEW
+    skip in a pinned package fails :func:`_check_cardinality` with a number, and a
+    skip in a package nobody measured fails HERE unless the caller says it is
+    intended.
+
+    That leaves no silent path for a test that quietly stopped running, which is
+    the regression a global boolean was reaching for and could not express.
+    """
+    offenders = [
+        v
+        for v in verdicts
+        if v.action == "skip" and getattr(expectations.get(v.package), "skips", None) is None
+    ]
+    if not offenders:
+        return
+    rendered = "\n".join(f"  SKIP  {v.package} :: {v.go_id}" for v in offenders)
+    unpinned = sorted({v.package for v in offenders})
+    raise BaselineError(
+        f"refusing to record {len(offenders)} skip verdict(s) from "
+        f"{source_label or 'the requested source'} in package(s) whose skip count is not "
+        f"pinned: {unpinned}.\n{rendered}\n"
+        f"A skip that nothing accounts for cannot be told apart from a test that silently "
+        f"stopped running. Either the skip is a regression, in which case fix it, or it is "
+        f"the measured truth, in which case measure the package and pin its `skips` in "
+        f"PACKAGE_EXPECTATIONS in the same change. Pass --allow-non-green to record it "
+        f"verbatim without pinning - useful for an ad-hoc regeneration of a package outside "
+        f"the default scope, never for the committed baseline."
+    )
+
+
+def _report_recorded_skips(verdicts: Sequence[Verdict]) -> None:
+    """Announce every ``skip`` the baseline is about to record, without refusing it.
+
+    INVARIANT LOCKED: a skip is never silent. It is a legitimate recorded outcome -
+    the contract requires a test skipped today to stay skipped - but it is also the
+    outcome most easily created by accident, by a missing feature gate, an absent
+    binary or an unmet environment precondition. Naming each one on stderr is what
+    makes "these 25 are the same 25 as last time" a thing a reviewer can check
+    against the diff, rather than something they have to take on trust.
+    """
+    skipped = [v for v in verdicts if v.action == "skip"]
+    if not skipped:
+        return
+    _log(
+        f"recording {len(skipped)} SKIPPED verdict(s) verbatim, so skip-stays-skip stays "
+        f"provable. Confirm each is skipped for the same reason it was before:"
+    )
+    for verdict in skipped:
+        _log(f"  SKIP  {verdict.package} :: {verdict.go_id}")
+
+
+def _family_breakdown(verdicts: Sequence[Verdict]) -> dict[str, dict[str, int]]:
+    """Count subtests per top-level FAMILY, per package.
+
+    INVARIANT LOCKED: a family that emitted verdicts is visible to the guard even
+    when it emitted only its own. Every top-level identity appears as a key, with
+    0 when it declares no subtest, so a matrix that vanished entirely reads as
+    ``620 -> 0`` rather than as a family the breakdown never mentions - which is
+    how ``TestAudit``'s eight subtests and ``Test_nodePlugin_Admit``'s 178 went
+    unnoticed in a manifest that still looked plausible.
+    """
+    families: dict[str, dict[str, int]] = {}
+    for verdict in verdicts:
+        counts = families.setdefault(verdict.package, {})
+        counts.setdefault(verdict.test, 0)
+        if not verdict.is_top_level:
+            counts[verdict.test] += 1
+    return families
+
+
+def _check_skip_roster(
+    verdicts: Sequence[Verdict], *, source_label: str, enforce_count: bool = True
+) -> None:
+    """Hold the ``skip`` verdicts to the EXACT measured roster.
+
+    INVARIANT LOCKED: today's skips are a recorded fact, not a tolerance. AAP
+    §0.10.3 requires that "any skipped or known-failing test retains identical
+    status", so the ported suite must skip exactly what the Go suite skips - which
+    means the baseline has to state exactly what that is.
+
+    A COUNT ALONE WOULD NOT DO. If one test started skipping while another stopped,
+    the total would still be 25 and nothing would notice; the ported suite would
+    then be required to skip the wrong test and to run one that cannot pass. So both
+    the count and the family are asserted: every skip must come from the one package
+    that has them and must be the known ``procMount`` feature-gate case. Anything
+    else is a NEW skip, and a new skip is a test that stopped being exercised -
+    which is a silent loss of coverage that looks like a green run.
+
+    Args:
+        verdicts: The rows about to be recorded.
+        source_label: The command or path they came from, quoted in failures.
+        enforce_count: Assert the EXACT count as well as the family. Left on by
+            default; :func:`build_manifest` switches it off for a stream whose Go
+            rows are not measured (derived mode) or that is running without
+            cardinality guards (a synthetic stream in a unit check), because
+            neither carries the full measured scope the count describes.
+
+    Raises:
+        BaselineError: If the skip count differs, or any skip is outside the known
+            package or family.
+    """
+    skips = [v for v in verdicts if v.action == "skip"]
+    unexpected = [
+        v
+        for v in skips
+        if v.package != EXPECTED_SKIP_PACKAGE or EXPECTED_SKIP_MARKER not in v.go_id
+    ]
+    if unexpected:
+        rendered = "\n".join(f"  SKIP  {v.package} :: {v.go_id}" for v in unexpected)
+        raise BaselineError(
+            f"refusing to record {len(unexpected)} UNRECOGNISED skip(s) from "
+            f"{source_label or 'the requested source'}:\n{rendered}\n"
+            f"Every skip in the measured baseline is a {EXPECTED_SKIP_MARKER!r} case in "
+            f"{EXPECTED_SKIP_PACKAGE} (the ProcMountType feature gate is not enabled in the "
+            f"test server). A skip anywhere else is a test that STOPPED being exercised, which "
+            f"looks like a green run and is a silent loss of coverage. Investigate it; if it is "
+            f"genuinely intended, widen EXPECTED_SKIP_PACKAGE/EXPECTED_SKIP_MARKER in the same "
+            f"reviewed change that introduces it."
+        )
+    if enforce_count and len(skips) != EXPECTED_SKIP_COUNT:
+        raise BaselineError(
+            f"refusing to record a baseline with {len(skips)} skip(s) from "
+            f"{source_label or 'the requested source'}: the measured baseline has exactly "
+            f"{EXPECTED_SKIP_COUNT}. MORE means a test stopped being exercised; FEWER means one "
+            f"that skips today now runs, which is a behaviour change the ported suite would be "
+            f"required to reproduce and could not. Re-measure and update EXPECTED_SKIP_COUNT "
+            f"deliberately, in the same reviewed change."
+        )
 
 
 def _check_cardinality(
     breakdown: Mapping[str, Mapping[str, int]],
+    families: Mapping[str, Mapping[str, int]],
     expectations: Mapping[str, PackageExpectation],
+    *,
+    go_rows_are_measured: bool,
 ) -> None:
-    """Enforce the declared per-package cardinality guards.
+    """Enforce the declared per-package and per-family cardinality guards.
 
     INVARIANT LOCKED: a measured count cannot drift silently. Only packages
     actually present are checked, so a deliberately narrow regeneration is not
     punished for the packages it did not run; a package present but short of its
-    declared count aborts.
+    declared count aborts, and so does a package whose per-family split has
+    changed even when its total happens to still add up.
+
+    THE "ONLY PACKAGES PRESENT" RULE IS NOT A HOLE, but it was one while nothing
+    else pinned the domain: a manifest could omit a package entirely and satisfy
+    every guard in this function. :func:`check_committed_domain` closes that from
+    the other side by requiring the COMMITTED manifest to carry the exact expected
+    package set, so the two together leave no path to a smaller artifact - this
+    function keeps ad-hoc narrow regenerations usable, and that one keeps the
+    committed artifact whole.
+
+
+    WHY THE GATING IS PER PACKAGE AND PER FIELD. ``top_level`` is a source-level
+    fact and is enforced always. ``total``, ``subtests`` and ``subtest_counts``
+    describe EMITTED verdicts, so for Go packages they are enforced only when the
+    Go rows were measured (``go_rows_are_measured``); a derived manifest is a
+    roster by construction and pinning it to an emitted count would make derived
+    mode unusable rather than honest. Non-Go packages are enforced in full in both
+    modes, because their one row is produced identically either way.
+
+    Args:
+        breakdown: Per-package totals, from :func:`_package_breakdown`.
+        families: Per-package, per-family subtest counts, from
+            :func:`_family_breakdown`.
+        expectations: The declared guards.
+        go_rows_are_measured: Whether the Go rows came from a real oracle run.
+
+    Raises:
+        BaselineError: Naming every violation found, not merely the first.
     """
     problems: list[str] = []
     for package, expectation in expectations.items():
         counts = breakdown.get(package)
         if counts is None:
             continue
-        for field, actual in (
-            ("total", counts["total"]),
-            ("top_level", counts["top_level"]),
-            ("subtests", counts["subtests"]),
-        ):
+        emitted_counts_apply = go_rows_are_measured or is_non_go_package(package)
+        checks: list[tuple[str, int]] = [("top_level", counts["top_level"])]
+        if emitted_counts_apply:
+            checks += [
+                ("total", counts["total"]),
+                ("subtests", counts["subtests"]),
+                ("passes", counts["pass"]),
+                ("skips", counts["skip"]),
+            ]
+        for field, actual in checks:
             wanted = getattr(expectation, field)
             if wanted is not None and actual != wanted:
                 problems.append(
                     f"  {package}: {field} is {actual}, expected {wanted}"
                     + (f" ({expectation.note})" if expectation.note else "")
                 )
+        if expectation.subtest_counts is None or not emitted_counts_apply:
+            continue
+        observed = families.get(package, {})
+        declared = dict(expectation.subtest_counts)
+        for family, wanted_subtests in expectation.subtest_counts:
+            if family not in observed:
+                problems.append(
+                    f"  {package}: family {family!r} emitted NO verdict at all, expected "
+                    f"1 top-level plus {wanted_subtests} subtest(s). A family that "
+                    f"disappears takes every identity beneath it out of the parity domain, "
+                    f"and an identity the manifest never records is indistinguishable from "
+                    f"a behaviour that never existed."
+                )
+            elif observed[family] != wanted_subtests:
+                problems.append(
+                    f"  {package}: family {family!r} has {observed[family]} subtest(s), "
+                    f"expected {wanted_subtests}"
+                )
+        for family in sorted(set(observed) - set(declared)):
+            problems.append(
+                f"  {package}: family {family!r} is present with {observed[family]} "
+                f"subtest(s) but is NOT declared. A new test function widens the domain the "
+                f"parity map must cover, so it is recorded here deliberately rather than "
+                f"absorbed silently."
+            )
     if problems:
         raise BaselineError(
             "cardinality guard violated:\n"
@@ -1729,6 +2862,14 @@ def _check_cardinality(
             "shrink the parity gate to whatever survived. If the Go suite genuinely changed, "
             "re-measure it and edit PACKAGE_EXPECTATIONS in the same change, so the new "
             "number is a decision rather than a drift."
+            "\nONE LEGITIMATE CAUSE IS NOT A REGRESSION AND IS WORTH RULING OUT FIRST: the "
+            "pass/skip split of test/integration/auth is FEATURE-GATE DEPENDENT. The 25 skips "
+            "are TestPodSecurityGAOnly's ProcMountType fixtures, so a machine that enables "
+            "that gate reports the same 43 identities and the same 2179 verdicts with fewer "
+            "skips and more passes. That is a different environment, not a different suite: "
+            "the baseline records how this checkout behaves under its DEFAULT gates, which is "
+            "what the parity criterion is measured against, so regenerate under the default "
+            "gates rather than re-pinning these numbers to a gated run."
         )
 
 
@@ -1738,22 +2879,34 @@ def build_manifest(
     provenance: str,
     allow_non_green: bool = False,
     expectations: Mapping[str, PackageExpectation] | None = None,
+    covers_default_scope: bool = True,
     source_label: str = "",
 ) -> dict[str, object]:
     """Assemble the manifest, refusing every shape that would weaken the gate.
 
     INVARIANT LOCKED: a manifest that exists is a manifest that is complete,
-    deterministic, all-green (unless explicitly allowed otherwise) and internally
+    deterministic, free of failures, honest about its skips and internally
     consistent. Each check below closes one way a caller could otherwise end up
     with a smaller artifact and no error.
 
     Args:
         verdicts: The reduced or derived verdicts, in any order.
-        provenance: :data:`PROVENANCE_GO_TEST_JSON` or :data:`PROVENANCE_DERIVED`.
-        allow_non_green: Permit ``fail`` / ``skip`` rows. Off by default.
+        provenance: A value composed from :data:`PROVENANCE_ATOMS` - normally
+            through :func:`compose_provenance`, which is what keeps a mixed
+            manifest from claiming every row came from Go.
+        allow_non_green: Permit a ``skip`` whose package does not pin a skip count.
+            Off by default. ``skip`` rows are always recorded verbatim, held to the
+            exact measured roster and reported on stderr; ``fail`` rows are refused
+            unconditionally and no flag overrides that - see
+            :func:`_check_no_failures` for why the two are not one switch.
         expectations: Cardinality guards, defaulting to
-            :data:`PACKAGE_EXPECTATIONS`. Pass an empty mapping to run without
+            :data:`PACKAGE_EXPECTATIONS` for measured rows and to no guards for
+            derived ones (see below). Pass an empty mapping to run without
             guards - only sensible for a synthetic stream in a unit check.
+        covers_default_scope: Whether this run covers the FULL default package
+            scope. The exact skip count is a property of that scope, so a caller
+            who named its own packages - or narrowed the cardinality guards - is
+            not held to it. The roster's FAMILY check applies either way.
         source_label: The command or path the verdicts came from, quoted in
             failure messages.
 
@@ -1761,16 +2914,12 @@ def build_manifest(
         The manifest, with exactly the five pinned envelope keys.
 
     Raises:
-        BaselineError: On an unknown provenance, an empty verdict set, a duplicate
-            identity, a non-green baseline, or a cardinality violation.
+        BaselineError: On an unknown or non-canonical provenance, a provenance
+            that does not describe the rows, an empty verdict set, a duplicate
+            identity, ANY failing verdict, an unrecognised, unaccounted or
+            miscounted skip, or a cardinality violation.
     """
-    if provenance not in {PROVENANCE_GO_TEST_JSON, PROVENANCE_DERIVED}:
-        raise BaselineError(
-            f"unknown provenance {provenance!r}: expected {PROVENANCE_GO_TEST_JSON!r} for a "
-            f"real oracle run or {PROVENANCE_DERIVED!r} for the measured source inventory. "
-            f"This field is how a reader tells measured data from derived data, so it may "
-            f"not be improvised."
-        )
+    atoms = set(split_provenance(provenance))
 
     ordered = sorted(verdicts, key=lambda v: v.triple)
 
@@ -1797,12 +2946,49 @@ def build_manifest(
             f"unprovable. Source: {source_label or 'unspecified'}"
         )
 
+    check_provenance_describes_rows(provenance, ordered)
+
+    resolved_expectations = PACKAGE_EXPECTATIONS if expectations is None else expectations
+    go_rows_are_measured = PROVENANCE_GO_TEST_JSON in atoms
+
+    # A FAILURE IS NEVER RECORDED, AND THERE IS NO FLAG FOR IT. `allow_non_green`
+    # governs SKIPS only: a skip is a measured property of today's suite that AAP
+    # §0.10.3 requires the ported suite to reproduce, while a failure is a
+    # regression that recording would turn into a requirement.
+    _check_no_failures(ordered, source_label=source_label)
+    # Skips ARE recorded verbatim -- skip-stays-skip is a first-class parity
+    # outcome -- but "recorded" must never degrade into "unexamined", so they are
+    # announced, held to the exact measured roster, and required to be ACCOUNTED FOR
+    # by the package they came from. The three checks are independent: the roster
+    # knows the one family that legitimately skips today, and the per-package pin
+    # knows which packages have a measured skip count at all.
+    _report_recorded_skips(ordered)
+    _check_skip_roster(
+        ordered,
+        source_label=source_label,
+        # The COUNT describes the DEFAULT measured scope, so it is asserted only for a
+        # run of that scope: `covers_default_scope` says the caller did not name its own
+        # packages, `expectations is None` says it did not narrow the guards, and
+        # measured Go rows say the stream came from a real oracle. A narrower ad-hoc
+        # regeneration, a derived stream and a synthetic stream in a unit check all
+        # carry a different number legitimately. The FAMILY half of the roster is not
+        # gated on any of this - it applies on every route.
+        enforce_count=(
+            not allow_non_green
+            and go_rows_are_measured
+            and covers_default_scope
+            and expectations is None
+        ),
+    )
     if not allow_non_green:
-        _check_all_green(ordered, source_label=source_label)
+        _check_unpinned_skips(ordered, resolved_expectations, source_label=source_label)
 
     breakdown = _package_breakdown(ordered)
     _check_cardinality(
-        breakdown, PACKAGE_EXPECTATIONS if expectations is None else expectations
+        breakdown,
+        _family_breakdown(ordered),
+        resolved_expectations,
+        go_rows_are_measured=go_rows_are_measured,
     )
 
     manifest: dict[str, object] = {
@@ -1878,12 +3064,12 @@ def validate_manifest(manifest: object) -> None:
             f"version, so the shape and the declaration cannot disagree."
         )
 
+    # Canonical form first, then - once the rows are decoded - whether the value
+    # actually describes them. Both halves are needed: a syntactically valid
+    # provenance can still be false about the rows, which is exactly how the
+    # committed manifest came to declare `go_test_json` over a Python row.
     provenance = manifest["provenance"]
-    if provenance not in {PROVENANCE_GO_TEST_JSON, PROVENANCE_DERIVED}:
-        raise BaselineError(
-            f"provenance must be {PROVENANCE_GO_TEST_JSON!r} or {PROVENANCE_DERIVED!r}, "
-            f"got {provenance!r}"
-        )
+    split_provenance(provenance)
 
     rows = manifest["verdicts"]
     if not isinstance(rows, list):
@@ -1900,6 +3086,7 @@ def validate_manifest(manifest: object) -> None:
 
     _validate_row_uniqueness(verdicts)
     _validate_row_order(verdicts)
+    check_provenance_describes_rows(str(provenance), verdicts)
     _validate_counts(manifest["counts"], verdicts)
     _validate_packages(manifest["packages"], verdicts)
 
@@ -2249,10 +3436,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=(MODE_GO_TEST_JSON, MODE_DERIVED, MODE_AUTO),
         default=MODE_AUTO,
         help=(
-            f"{MODE_GO_TEST_JSON}: require a real stream. {MODE_DERIVED}: build from the "
-            f"measured source inventory. {MODE_AUTO} (default): prefer a real run, falling "
-            "back to derived only when no Go toolchain is present, saying so on stderr and "
-            "recording it in the manifest's provenance."
+            f"{MODE_GO_TEST_JSON}: require a real stream. {MODE_AUTO} (default): the same, "
+            f"reporting a missing Go toolchain as an error rather than substituting anything "
+            f"for it. {MODE_DERIVED}: build rows from the Go source inventory and stamp them "
+            f"all `pass` - a DIAGNOSTIC only, requiring --allow-derived-baseline, refused by "
+            f"--check, and never writable to the committed manifest."
+        ),
+    )
+    parser.add_argument(
+        "--allow-derived-baseline",
+        action="store_true",
+        help=(
+            f"Acknowledge that --mode {MODE_DERIVED} produces source-derived rows that were "
+            "never executed. Required for that mode, and never sufficient to write the "
+            "committed manifest or to satisfy --check."
         ),
     )
     parser.add_argument(
@@ -2265,10 +3462,32 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--allow-non-green",
         action="store_true",
         help=(
-            "Record `fail` and `skip` verdicts instead of refusing them. OFF BY DEFAULT: the "
-            "measured baseline is 100 percent pass with zero failures and zero skips, and "
-            "silently recording a regression would make the contract require it forever. The "
-            "true actions are always recorded verbatim, so skip-stays-skip stays provable."
+            f"WAIVE THE EXACT SKIP COUNT, for an ad-hoc regeneration of a narrower scope "
+            f"than the measured one. `skip` verdicts need no flag to be recorded: they are "
+            f"recorded verbatim, announced on stderr, and held to the measured roster "
+            f"({EXPECTED_SKIP_COUNT} {EXPECTED_SKIP_MARKER!r} cases in "
+            f"{EXPECTED_SKIP_PACKAGE}), because a test skipped today must stay skipped. This "
+            f"flag waives the COUNT half of that roster only - a skip from an unrecognised "
+            f"package or family is refused on every route - and it does NOT cover `fail` "
+            f"verdicts, which are refused unconditionally: a recorded failure becomes a "
+            f"REQUIRED failure and the contract would defend the regression. True actions are "
+            f"always recorded verbatim, so skip-stays-skip and pass-stays-pass stay separately "
+            f"provable (AAP §0.10.3). It also waives the per-package requirement that a "
+            f"skip come from a package whose skip count is pinned in PACKAGE_EXPECTATIONS, "
+            f"which is useful for an ad-hoc regeneration of a package outside the default "
+            f"scope and never for the committed baseline."
+        ),
+    )
+    parser.add_argument(
+        "--allow-narrow-domain",
+        action="store_true",
+        help=(
+            "Permit a run whose package list is narrower than the measured scope to overwrite "
+            "the COMMITTED manifest. OFF BY DEFAULT, and refused rather than warned about: the "
+            "contract is quantified over the recorded verdicts, so a narrow regeneration writes "
+            "a valid, green manifest that silently drops every identity of the packages it "
+            "omitted. Send narrow runs to a scratch --output instead; this switch exists for "
+            "the rare case where shrinking the committed baseline is genuinely intended."
         ),
     )
     parser.add_argument(
@@ -2310,6 +3529,79 @@ def _resolve_packages(requested: Sequence[str] | None) -> tuple[tuple[str, ...],
     if from_env:
         return split_package_specs([from_env]), True
     return DEFAULT_PACKAGES, False
+
+
+def check_domain_not_narrowed(
+    packages: Sequence[str],
+    output: Path,
+    repo_root: Path,
+    *,
+    allow_narrow: bool,
+) -> None:
+    """Refuse a narrow regeneration that would REPLACE the committed manifest.
+
+    THE HAZARD THIS CLOSES, and it is the one the committed manifest was caught by
+    once already: every assertion the parity contract makes is quantified over the
+    recorded verdicts, so a manifest is a gate exactly as wide as its domain.
+    Regenerating with a narrowed package list - ``--packages ./cluster/gce/gci/``,
+    or ``KUBE_PARITY_PACKAGES`` set to the shell tier because it needs no etcd and
+    no built apiserver - writes a perfectly valid, perfectly green, perfectly
+    ``go_test_json`` manifest that silently DROPS every identity of the packages it
+    omitted. Nothing downstream can tell that apart from those behaviours never
+    having existed, and the contract goes on reporting green over the remainder.
+    That is the same class of defect as recording zero verdicts, which
+    :func:`check_go_verdict_domain` already refuses - only quieter, because what
+    survives still looks complete.
+
+    A WARNING WOULD NOT BE ENOUGH. This module logs progress to stderr, where CI
+    keeps thousands of lines; the failure mode is a manifest that was overwritten
+    weeks ago by a run nobody re-read. So the narrow-plus-committed-path
+    combination RAISES, and the deliberate case has an explicit switch
+    (``--allow-narrow-domain``) which downgrades it to a loud warning. Narrowing
+    while writing somewhere else is always fine and is never reported: a scratch
+    manifest cannot weaken a gate.
+
+    Both halves of the hazard must be present for either outcome: a domain
+    narrower than :data:`DEFAULT_PACKAGES` AND the committed default output path.
+
+    Args:
+        packages: The effective package list, in whatever spelling the caller used.
+        output: The resolved output path.
+        repo_root: The repository root, used to locate the committed manifest.
+        allow_narrow: Permit the narrowing, recording it as a warning instead.
+
+    Raises:
+        BaselineError: When the run would narrow the committed manifest and
+            ``allow_narrow`` is False.
+    """
+    default_paths = {import_path_for_package_spec(spec) for spec in DEFAULT_PACKAGES}
+    requested_paths = {import_path_for_package_spec(spec) for spec in packages}
+    omitted = sorted(default_paths - requested_paths)
+    if not omitted:
+        return
+    try:
+        writing_committed = output.resolve() == default_baseline_path(repo_root).resolve()
+    except OSError:  # pragma: no cover - resolve() on an unreachable parent
+        writing_committed = False
+    if not writing_committed:
+        return
+
+    consequence = (
+        f"this run covers a NARROWER domain than the measured scope and writes the COMMITTED "
+        f"manifest {output}. Omitted package(s): {omitted}. Every identity they hold would "
+        f"disappear from the baseline, and the parity contract - which is quantified over the "
+        f"recorded verdicts - would then report green while asserting nothing about them."
+    )
+    remedy = (
+        f"Drop --packages / {ENV_PACKAGES} so the full measured scope runs "
+        f"({len(DEFAULT_PACKAGES)} packages; the three integration packages need etcd on "
+        f"PATH), or send a deliberately narrow run somewhere harmless with --output, or pass "
+        f"--allow-narrow-domain if shrinking the committed baseline really is the intent."
+    )
+    if allow_narrow:
+        _log(f"WARNING: {consequence} Proceeding because --allow-narrow-domain was passed.")
+        return
+    raise BaselineError(f"refusing to narrow the committed baseline: {consequence} {remedy}")
 
 
 def _resolve_output(requested: Path | None, repo_root: Path) -> Path:
@@ -2374,6 +3666,308 @@ _ALLOWED_GO_TEST_FLAGS: Final[frozenset[str]] = frozenset(
 #: The one value `-count` may take. See :data:`_ALLOWED_GO_TEST_FLAGS`.
 _REQUIRED_COUNT_VALUE: Final[str] = "1"
 
+#: The flags in :data:`_ALLOWED_GO_TEST_FLAGS` that are BOOLEAN, so a bare
+#: occurrence needs no following value. Everything else consumes the next token
+#: when it is written in the separated form.
+_BOOLEAN_GO_TEST_FLAGS: Final[frozenset[str]] = frozenset({"v", "race", "json"})
+
+#: The one value `-mod` may take, in `GOFLAGS` or as a forwarded argument.
+#: AAP §0.9.4.2 requires vendor mode for every Go invocation and §0.8.2 freezes the
+#: dependency graph, so this is a constant rather than a default.
+_REQUIRED_MOD_VALUE: Final[str] = "vendor"
+
+#: The `-timeout` injected when a caller supplies none, chosen from the measured
+#: cost of the domain rather than picked round: `test/integration/auth` alone takes
+#: about 208 s, and the full eight-package oracle run measured in this session
+#: completed well inside 40 minutes. `make test-integration` uses `-timeout 30m`
+#: for the integration packages alone; 40m covers those plus the shell and unit
+#: packages in one invocation with headroom for a slower machine.
+#:
+#: WHY A DEFAULT AT ALL. `go test` applies a 10-minute per-package timeout by
+#: default, which the integration packages can legitimately exceed - so a run with
+#: no `-timeout` is not "unbounded", it is bounded WRONGLY, and it fails a healthy
+#: oracle. Injecting an explicit value makes the bound visible in the logged command
+#: instead of implicit in the toolchain.
+GO_TEST_DEFAULT_TIMEOUT: Final[str] = "40m"
+
+#: The oracle's own `-timeout`, used when the caller forwards none. An ALIAS of
+#: :data:`GO_TEST_DEFAULT_TIMEOUT` rather than a second value, because two defaults
+#: for one bound is how a run ends up timed out by whichever constant the code path
+#: happened to reach. AAP §0.7.3 names 30m as the budget `make test-integration`
+#: runs under for the integration packages alone; this scope adds the shell and unit
+#: packages to the same invocation, which is why the shared value is larger.
+DEFAULT_ORACLE_TIMEOUT: Final[str] = GO_TEST_DEFAULT_TIMEOUT
+
+#: Seconds added to the Go-side timeout to obtain this process's OUTER deadline.
+#:
+#: The two bounds are deliberately not equal. Go's `-timeout` is enforced by the
+#: test binary and produces a proper panic with a goroutine dump, which is far more
+#: useful than a killed process - so the outer deadline must fire only if the inner
+#: one did NOT, meaning the binary is wedged, the toolchain is stuck compiling, or a
+#: child process is holding the pipe open. The margin is generous because `go test`
+#: also has to build, and a cold build of the integration packages is minutes of
+#: work before the first test runs.
+OUTER_TIMEOUT_MARGIN_SECONDS: Final[float] = 600.0
+
+#: Seconds to wait for a timed-out process group to die on SIGTERM before SIGKILL.
+#: Short, because by this point the run has already blown its deadline; non-zero,
+#: because SIGTERM lets `go test` and any etcd it started remove their temporary
+#: directories, and a SIGKILL that skips that leaves the workspace littered.
+PROCESS_GROUP_TERM_GRACE_SECONDS: Final[float] = 10.0
+
+#: Go duration unit suffixes and their length in seconds, longest suffix first so
+#: `ms` is matched before `s`. Transcribed from Go's `time.ParseDuration`, which is
+#: what `-timeout` is parsed by.
+_GO_DURATION_UNITS: Final[tuple[tuple[str, float], ...]] = (
+    ("ns", 1e-9),
+    ("us", 1e-6),
+    # Both micro spellings, because Go's own unit table carries both: U+00B5 MICRO
+    # SIGN and U+03BC GREEK SMALL LETTER MU. Accepting only one would refuse a value
+    # the toolchain accepts, and this function's `None` is a REFUSAL rather than a
+    # shrug, so a false refusal here would abort a legitimate run.
+    ("\u00b5s", 1e-6),
+    ("\u03bcs", 1e-6),
+    ("ms", 1e-3),
+    ("s", 1.0),
+    ("m", 60.0),
+    ("h", 3600.0),
+)
+
+
+def parse_go_duration(text: str) -> float | None:
+    """Parse a Go duration such as ``30m``, ``1h30m`` or ``500ms`` into seconds.
+
+    Mirrors ``time.ParseDuration`` closely enough for the one decision that depends
+    on it: whether a ``-timeout`` is a finite POSITIVE bound. A bare ``0`` is
+    accepted and returns ``0.0``, which the caller refuses - in Go, ``-timeout 0``
+    means NO timeout at all, so it is the single most dangerous value here and must
+    not be mistaken for "a very short one".
+
+    Returns:
+        The duration in seconds, or ``None`` when the text is not a duration this
+        function can vouch for. ``None`` is a REFUSAL signal, never a default: a
+        value that cannot be parsed must not be assumed benign.
+    """
+    candidate = text.strip()
+    if not candidate:
+        return None
+    if candidate.lstrip("+-").isdigit() and float(candidate) == 0:
+        # Go accepts a unit-less zero, and only zero. It means "no timeout".
+        return 0.0
+
+    total = 0.0
+    index = 0
+    matched_any = False
+    while index < len(candidate):
+        digits = index
+        if candidate[digits] in "+-":
+            # ONLY at the very start. Go reads the sign once, before its component
+            # loop, so `1h-30m` is an "invalid duration" there rather than a
+            # subtraction. Accepting it here would compute an outer deadline from a
+            # value `go test` is about to reject.
+            if index != 0:
+                return None
+            digits += 1
+        start = digits
+        while digits < len(candidate) and (candidate[digits].isdigit() or candidate[digits] == "."):
+            digits += 1
+        if digits == start:
+            return None
+        try:
+            magnitude = float(candidate[index:digits])
+        except ValueError:
+            return None
+        for suffix, seconds in _GO_DURATION_UNITS:
+            if candidate.startswith(suffix, digits):
+                total += magnitude * seconds
+                index = digits + len(suffix)
+                matched_any = True
+                break
+        else:
+            return None
+    return total if matched_any else None
+
+
+def _require_bounded_timeout(argument: str, value: str) -> float:
+    """Refuse a ``-timeout`` that is not a finite POSITIVE duration.
+
+    ``-timeout 0`` is the dangerous one and the reason this exists: in Go it means
+    NO timeout, so a hung test binary holds the pipe open for as long as the process
+    lives. In CI that is a job that burns its whole wall-clock allowance and reports
+    nothing; locally it is a run that never returns. An unparsable value is refused
+    for the same reason - ``go test`` would reject it, but only AFTER this script had
+    computed an outer deadline from a value it did not understand.
+
+    Returns:
+        The timeout in seconds, for the caller to derive its outer deadline from.
+
+    Raises:
+        BaselineError: On zero, negative, or unparsable durations.
+    """
+    seconds = parse_go_duration(value)
+    if seconds is None:
+        raise BaselineError(
+            f"refusing the oracle argument {argument!r}: {value!r} is not a Go duration this "
+            f"script can parse, so no outer deadline could be derived from it. Use a form "
+            f"`time.ParseDuration` accepts, such as `30m`, `1h30m` or `90s`."
+        )
+    if seconds <= 0:
+        raise BaselineError(
+            f"refusing the oracle argument {argument!r}: a `-timeout` of {value!r} is "
+            f"{'ZERO, which in Go means NO TIMEOUT AT ALL' if seconds == 0 else 'negative'}. "
+            f"A wedged test binary would then hold the capture pipe open indefinitely - in CI "
+            f"that is a job that burns its entire wall-clock allowance and reports nothing. "
+            f"Pass a finite positive duration, or pass none and accept the default "
+            f"{GO_TEST_DEFAULT_TIMEOUT}."
+        )
+    return seconds
+
+
+def _timeout_budget(extra_args: Sequence[str]) -> tuple[tuple[str, ...], float]:
+    """Return the oracle arguments with a guaranteed ``-timeout``, and the outer deadline.
+
+    TWO BOUNDS, DELIBERATELY UNEQUAL. The inner one is Go's own ``-timeout``, which
+    the test binary enforces and reports as a panic with a goroutine dump - by far
+    the most useful diagnostic available for a hang. The outer one is this process's
+    ``communicate`` deadline, and it exists only for the failures the inner bound
+    cannot catch: a toolchain wedged while building, a child that outlived the test
+    binary and still holds the pipe, or a binary that ignored its own alarm.
+
+    :data:`OUTER_TIMEOUT_MARGIN_SECONDS` separates them so the inner bound always
+    fires first on an ordinary hang. If the outer one fires, something is wrong in a
+    way the goroutine dump would not have explained anyway.
+
+    Returns:
+        ``(arguments, outer_deadline_seconds)``. The arguments are returned rather
+        than mutated in place so the injected default appears in the logged command
+        and the caller cannot forget to use it.
+    """
+    for index, argument in enumerate(extra_args):
+        if _flag_name(argument) != "timeout":
+            continue
+        if "=" in argument:
+            inner = _require_bounded_timeout(argument, argument.split("=", 1)[1])
+        elif index + 1 < len(extra_args):
+            inner = _require_bounded_timeout(
+                f"-timeout {extra_args[index + 1]}", extra_args[index + 1]
+            )
+        else:
+            raise BaselineError(
+                f"refusing the oracle arguments {list(extra_args)}: `-timeout` expects a value "
+                f"and none followed it."
+            )
+        return tuple(extra_args), inner + OUTER_TIMEOUT_MARGIN_SECONDS
+
+    injected = (f"-timeout={GO_TEST_DEFAULT_TIMEOUT}", *extra_args)
+    inner = _require_bounded_timeout(injected[0], GO_TEST_DEFAULT_TIMEOUT)
+    _log(
+        f"no -timeout was supplied; injecting {injected[0]} so the run is bounded by the "
+        f"toolchain rather than by go test's 10-minute per-package default, which the "
+        f"integration packages legitimately exceed"
+    )
+    return injected, inner + OUTER_TIMEOUT_MARGIN_SECONDS
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    """Kill the timed-out child's whole PROCESS GROUP, SIGTERM then SIGKILL.
+
+    THE GROUP, NOT THE PROCESS. ``go test`` is a supervisor: it builds and then
+    execs one test binary per package, and the integration packages start a real
+    etcd of their own. Killing only the ``go`` process leaves every one of those
+    orphaned - still holding the capture pipe, still holding its data directory,
+    still holding a port that the next run needs. The child is therefore started
+    with ``start_new_session=True`` so it LEADS its own group, which is what makes
+    one ``killpg`` sufficient and what guarantees the signal cannot reach this
+    process or the pytest session that invoked it.
+
+    SIGTERM first, with a short grace period, because ``go test`` and etcd both
+    clean up their temporary directories on it; SIGKILL only for whatever ignored
+    that. Every failure mode here is swallowed deliberately: this runs while an
+    exception is already being raised, and a secondary error from a process that has
+    ALREADY exited must not replace the timeout the caller needs to see.
+    """
+    try:
+        group = os.getpgid(process.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        # Already reaped, or not ours to signal. Either way there is no group left.
+        return
+
+    for signal_number, wait_for in (
+        (signal.SIGTERM, PROCESS_GROUP_TERM_GRACE_SECONDS),
+        (signal.SIGKILL, PROCESS_GROUP_TERM_GRACE_SECONDS),
+    ):
+        try:
+            os.killpg(group, signal_number)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        try:
+            process.wait(timeout=wait_for)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def validate_go_flag_value(argument: str, name: str, value: str) -> None:
+    """Refuse an allowed flag carrying a value that would weaken the oracle.
+
+    INVARIANT LOCKED, AND IT APPLIES TO EVERY SOURCE AND EVERY SPELLING. The
+    allow-list decides which flags may be forwarded; this decides what they may
+    SAY. Both halves are needed, and only having the first is how three bypasses
+    survived:
+
+    * ``-mod mod`` in the separated form. The attached form ``-mod=mod`` was
+      refused, but the separated one only had its NAME checked and its value rode
+      along unexamined - so the vendored, offline-capable build this repository
+      freezes could be turned into a network module resolution, silently changing
+      what the oracle compiles.
+    * ``-timeout=0``. ``timeout`` is an allowed flag and its value was never
+      looked at, and ``0`` is precisely how ``go test`` is told to run without a
+      timeout. A hung oracle then wedges the job instead of failing it, and AAP
+      §0.7.3 requires the run to be bounded.
+    * ``GOFLAGS`` entirely. See :func:`_oracle_environment`.
+
+    Args:
+        argument: The argument as written, quoted in the message.
+        name: Its bare name from :func:`_flag_name`.
+        value: Its value.
+
+    Raises:
+        BaselineError: On any value that changes the domain, the dependency
+            resolution or the boundedness of the run.
+    """
+    if name == "count" and value != _REQUIRED_COUNT_VALUE:
+        raise BaselineError(
+            f"refusing the oracle argument {argument!r}: only "
+            f"`-count={_REQUIRED_COUNT_VALUE}` is permitted. 0 runs nothing and anything "
+            f"above 1 repeats every test, producing duplicate (package, test, subtest) "
+            f"triples that the contract cannot key on."
+        )
+    if name == "mod" and value != _REQUIRED_MOD_VALUE:
+        raise BaselineError(
+            f"refusing the oracle argument {argument!r}: this repository vendors its "
+            f"dependencies and §0.9.4.2 requires `-mod=vendor`, so any other value would "
+            f"attempt a download the build is not permitted to make - and would let the "
+            f"oracle compile against a dependency graph that is not the frozen one."
+        )
+    if name == "timeout":
+        # Delegated rather than duplicated: `_require_bounded_timeout` is what the
+        # outer deadline is derived from, so one refusal message covers both, and a
+        # value this validator accepted could never be one that function rejects.
+        _require_bounded_timeout(argument, value)
+    if name in {"p", "parallel"} and (not value.isdigit() or int(value) < 1):
+        raise BaselineError(
+            f"refusing the oracle argument {argument!r}: `-{name}` must be a positive "
+            f"integer, and {value!r} is not. Zero or a negative value is either rejected "
+            f"by the toolchain or read as 'unlimited', neither of which is a decision "
+            f"this generator should make silently."
+        )
+    if name in _BOOLEAN_GO_TEST_FLAGS and value not in {"true", "false"}:
+        raise BaselineError(
+            f"refusing the oracle argument {argument!r}: `-{name}` is a boolean flag, so its "
+            f"only values are `true` and `false`. {value!r} would be rejected by the "
+            f"toolchain, and a run that fails to start produces no baseline at all."
+        )
+
 
 def _resolve_extra_go_args(forwarded: Sequence[str]) -> tuple[str, ...]:
     """Collect extra `go test` arguments, forwarding only the demonstrably benign.
@@ -2407,15 +4001,13 @@ def _resolve_extra_go_args(forwarded: Sequence[str]) -> tuple[str, ...]:
     expecting_value_for = ""
     for argument in collected:
         if expecting_value_for:
-            # The separated form, `-timeout 30m`. The flag itself was already
-            # allowed, so its value rides along - except for -count, checked below.
-            if expecting_value_for == "count" and argument != _REQUIRED_COUNT_VALUE:
-                raise BaselineError(
-                    f"refusing the oracle argument `-count {argument}`: only "
-                    f"`-count={_REQUIRED_COUNT_VALUE}` is permitted. 0 runs nothing and "
-                    f"anything above 1 repeats every test, producing duplicate "
-                    f"(package, test, subtest) triples that the contract cannot key on."
-                )
+            # The separated form, `-timeout 30m`. Its value goes through EXACTLY the
+            # same validator as the attached form: checking only the name here is
+            # what let `-mod mod` and `-timeout 0` through while `-mod=mod` and
+            # `-timeout=0` were refused.
+            validate_go_flag_value(
+                f"-{expecting_value_for} {argument}", expecting_value_for, argument
+            )
             expecting_value_for = ""
             continue
 
@@ -2442,24 +4034,11 @@ def _resolve_extra_go_args(forwarded: Sequence[str]) -> tuple[str, ...]:
             )
 
         if "=" in argument:
-            value = argument.split("=", 1)[1]
-            if name == "count" and value != _REQUIRED_COUNT_VALUE:
-                raise BaselineError(
-                    f"refusing the oracle argument {argument!r}: only "
-                    f"`-count={_REQUIRED_COUNT_VALUE}` is permitted. 0 runs nothing and "
-                    f"anything above 1 repeats every test, producing duplicate "
-                    f"(package, test, subtest) triples that the contract cannot key on."
-                )
-            if name == "mod" and value != "vendor":
-                raise BaselineError(
-                    f"refusing the oracle argument {argument!r}: this repository vendors its "
-                    f"dependencies and §0.9.4.2 requires `-mod=vendor`, so any other value "
-                    f"would attempt a download the build is not permitted to make."
-                )
+            validate_go_flag_value(argument, name, argument.split("=", 1)[1])
             continue
 
         # A boolean flag needs no value; the rest take the next token.
-        if name not in {"v", "race", "json"}:
+        if name not in _BOOLEAN_GO_TEST_FLAGS:
             expecting_value_for = name
 
     if expecting_value_for:
@@ -2468,6 +4047,14 @@ def _resolve_extra_go_args(forwarded: Sequence[str]) -> tuple[str, ...]:
             f"value and none followed it. An incomplete flag would consume whatever `go test` "
             f"saw next, which here is a package path."
         )
+
+    # AN EXPLICIT, POSITIVE, FINITE BOUND ALWAYS. Without this the run inherits Go's
+    # implicit 10-minute per-package default, which is both invisible in the command
+    # line the log prints and too tight for the integration packages
+    # (`test/integration/auth` alone takes roughly 208 seconds). AAP §0.7.3 names 30m as
+    # the budget `make test-integration` runs under, so that is the default here too.
+    if not any(_flag_name(argument) == "timeout" for argument in collected):
+        collected.append(f"-timeout={DEFAULT_ORACLE_TIMEOUT}")
 
     if collected:
         _log(f"forwarding extra `go test` arguments: {collected}")
@@ -2495,12 +4082,141 @@ def _read_stream_lines(path: Path | None, use_stdin: bool) -> tuple[list[str], s
     return path.read_text(encoding="utf-8").splitlines(), str(path)
 
 
+def check_committed_domain(manifest: Mapping[str, object], *, source: str) -> None:
+    """Prove a manifest describes the WHOLE expected domain, not merely a consistent one.
+
+    :func:`validate_manifest` answers "is this a well-formed manifest?" and nothing
+    more, and that is exactly the gap this closes. Every check there is INTERNAL -
+    schema keys, row shapes, sorted order, no duplicates, counts that agree with the
+    rows - so a manifest holding one row is perfectly valid and asserts nothing at
+    all. A deleted, truncated or narrowly regenerated baseline therefore passed
+    ``--check``, and the parity contract, being quantified over the recorded rows,
+    passed with it. That is not a gate that can fail.
+
+    FOUR OBLIGATIONS, all of them EXTERNAL - measured facts the artifact is compared
+    against rather than derived from:
+
+    1. PROVENANCE IS A REAL ORACLE RUN. ``derived`` rows are read off source and
+       stamped ``pass`` wholesale, so a derived manifest is an assertion that
+       everything passes made by something that ran nothing.
+    2. THE PACKAGE SET IS EXACTLY THE EXPECTED ONE. Not a subset and not a superset:
+       a missing package is a silently narrower gate, and an unexpected one is a
+       domain nobody chose to measure.
+    3. EVERY PACKAGE MATCHES ITS PINNED CARDINALITY - total, top-level, subtest,
+       pass and skip counts alike. This is where a manifest recording 43 rows for a
+       package that emits 2,179 of them fails.
+    4. THE VERDICT DISTRIBUTION IS THE MEASURED ONE. Zero failures, and exactly the
+       measured pass and skip totals, so a regeneration cannot quietly turn a
+       passing test into a skipped one - "pass the same way as they pass today"
+       includes the skips.
+
+    Args:
+        manifest: An already schema-validated manifest.
+        source: Where it came from, quoted in every message.
+
+    Raises:
+        BaselineError: On any of the four, naming exactly what differs.
+    """
+    # THE PROVENANCE IS READ AS ATOMS, NOT AS A STRING. The committed manifest carries
+    # one measured non-Go row alongside the Go ones, so its honest envelope is the
+    # COMPOSED value `go_test_json+non_go_measured` - a string equality test against
+    # `go_test_json` would reject the only honest spelling and, worse, would reward the
+    # dishonest one. What actually matters is the two atoms: the Go rows must claim a
+    # real oracle run, and the derived atom must be absent.
+    provenance = manifest.get("provenance")
+    atoms = set(split_provenance(provenance))
+    if PROVENANCE_GO_TEST_JSON not in atoms or PROVENANCE_DERIVED in atoms:
+        raise BaselineError(
+            f"{source} records provenance={provenance!r}, and a parity-gated baseline must "
+            f"declare {PROVENANCE_GO_TEST_JSON!r} for its Go rows and must not declare "
+            f"{PROVENANCE_DERIVED!r}. Rows built any other way were not produced by "
+            f"running the suite: {PROVENANCE_DERIVED!r} in particular reads Go source and "
+            f"stamps every row `pass`, which is an assertion that everything passes made by "
+            f"something that ran nothing. Regenerate it by executing the oracle. A measured "
+            f"non-Go row is declared with {PROVENANCE_NON_GO_MEASURED!r} alongside the Go "
+            f"atom - see compose_provenance() - and is accepted here."
+        )
+
+    expected_packages = sorted(PACKAGE_EXPECTATIONS)
+    packages = manifest.get("packages")
+    actual_packages = sorted(packages) if isinstance(packages, list) else []
+    if actual_packages != expected_packages:
+        missing = sorted(set(expected_packages) - set(actual_packages))
+        unexpected = sorted(set(actual_packages) - set(expected_packages))
+        raise BaselineError(
+            f"{source} does not declare the expected parity domain. Missing: "
+            f"{missing or 'none'}. Unexpected: {unexpected or 'none'}. The committed baseline "
+            f"must cover every package in PACKAGE_EXPECTATIONS - the eight Go packages of the "
+            f"measured scope plus the non-Go {NON_GO_BASELINE_PACKAGE!r} row - because a "
+            f"package absent from the manifest is a package the contract says nothing about, "
+            f"which it cannot tell apart from one whose behaviours never existed. If the "
+            f"scope genuinely changed, edit PACKAGE_EXPECTATIONS in the same change so the "
+            f"new domain is a decision rather than a drift."
+        )
+
+    counts = manifest.get("counts")
+    by_package = counts.get("by_package") if isinstance(counts, Mapping) else None
+    if not isinstance(by_package, Mapping):
+        raise BaselineError(
+            f"{source} carries no counts.by_package breakdown, so its per-package "
+            f"cardinalities cannot be checked at all."
+        )
+    breakdown = {
+        package: dict(bucket)
+        for package, bucket in by_package.items()
+        if isinstance(bucket, Mapping)
+    }
+    # The per-family split is read from the ROWS, because `counts.by_package` records
+    # package totals only. Both are checked: a manifest can carry the right totals and
+    # still have lost a whole subtest FAMILY to a rename.
+    rows = manifest.get("verdicts")
+    recorded = [
+        Verdict(
+            package=str(row["package"]),
+            test=str(row["test"]),
+            subtest=str(row.get("subtest") or ""),
+            action=str(row["action"]),
+            elapsed=None,
+        )
+        for row in rows
+        if isinstance(row, Mapping)
+    ] if isinstance(rows, list) else []
+    _check_cardinality(
+        breakdown,
+        _family_breakdown(recorded),
+        PACKAGE_EXPECTATIONS,
+        # The committed manifest is a MEASURED artifact by definition -- this function
+        # has already refused any other provenance -- so every emitted count applies,
+        # per-family split included.
+        go_rows_are_measured=True,
+    )
+
+    expected_total = sum(e.total or 0 for e in PACKAGE_EXPECTATIONS.values())
+    expected_pass = sum(e.passes or 0 for e in PACKAGE_EXPECTATIONS.values())
+    expected_skip = sum(e.skips or 0 for e in PACKAGE_EXPECTATIONS.values())
+    actual = {
+        key: counts.get(key) if isinstance(counts, Mapping) else None
+        for key in ("total", "pass", "fail", "skip")
+    }
+    wanted = {"total": expected_total, "pass": expected_pass, "fail": 0, "skip": expected_skip}
+    if actual != wanted:
+        raise BaselineError(
+            f"{source} does not carry the measured verdict distribution: expected {wanted}, "
+            f"found {actual}. These totals are the sum of the pinned per-package numbers, so "
+            f"a mismatch means either a package is short or an action changed - a pass that "
+            f"became a skip is exactly the regression 'pass the same way as they pass today' "
+            f"forbids, and a recorded failure would make the contract require that failure "
+            f"forever."
+        )
+
+
 def _run_check(output: Path) -> int:
     """Validate an existing manifest, writing nothing.
 
     INVARIANT LOCKED: the committed artifact is verifiable without regenerating it,
     which is what lets a gate confirm the manifest a change actually commits rather
-    than one it could have produced.
+    than one it could have produced - and the verification is of the DOMAIN as well
+    as the schema, so a manifest that is merely self-consistent cannot pass.
     """
     if not output.is_file():
         raise BaselineError(
@@ -2512,10 +4228,11 @@ def _run_check(output: Path) -> int:
     except json.JSONDecodeError as exc:
         raise BaselineError(f"{output} is not valid JSON: {exc}") from exc
     validate_manifest(decoded)
+    check_committed_domain(decoded, source=str(output))
     counts = decoded["counts"]
     _log(
-        f"OK: {output} is a valid schema {SCHEMA_VERSION} manifest - "
-        f"{counts['total']} verdicts ({counts['pass']} pass, {counts['fail']} fail, "
+        f"OK: {output} is a valid schema {SCHEMA_VERSION} manifest over the complete parity "
+        f"domain - {counts['total']} verdicts ({counts['pass']} pass, {counts['fail']} fail, "
         f"{counts['skip']} skip) across {len(decoded['packages'])} package(s), "
         f"provenance={decoded['provenance']}"
     )
@@ -2533,9 +4250,13 @@ def _collect_verdicts(
     """Obtain verdicts by the selected route, and report which route was taken.
 
     INVARIANT LOCKED: ``provenance`` always matches how the rows were actually
-    obtained. In ``auto`` mode the fallback to derived data is announced on stderr
-    AND stamped in the manifest, so derived data can never be read as measured
-    data - which is the whole reason the field exists.
+    obtained, ROW GROUP BY ROW GROUP. In ``auto`` mode the fallback to derived data
+    is announced on stderr AND stamped in the manifest, so derived data can never
+    be read as measured data - which is the whole reason the field exists. The
+    appended non-Go row contributes its own atom through
+    :func:`compose_provenance` rather than inheriting the Go one, because it never
+    came from a Go run and stamping it as though it had was false about that row
+    and misleading about the rest.
 
     Returns:
         ``(verdicts, provenance, source_label)``.
@@ -2570,25 +4291,51 @@ def _collect_verdicts(
             reduction, packages=packages, require_requested=packages_explicit
         )
         verdicts = list(reduction.verdicts)
+        atoms = [PROVENANCE_GO_TEST_JSON]
         if args.include_non_go_baseline:
             verdicts.append(_non_go_baseline_verdict())
-        return tuple(verdicts), PROVENANCE_GO_TEST_JSON, label
+            atoms.append(PROVENANCE_NON_GO_MEASURED)
+        return tuple(verdicts), compose_provenance(*atoms), label
 
     mode = args.mode
     if mode == MODE_AUTO:
         if shutil.which(args.go_binary) is None:
-            _log(
-                f"WARNING: no {args.go_binary!r} toolchain on PATH, so --mode {MODE_AUTO} is "
-                f"FALLING BACK to {MODE_DERIVED}. The manifest will record "
-                f"provenance={PROVENANCE_DERIVED!r}: its rows come from the measured Go "
-                f"source inventory, not from a run of the oracle. Load the toolchain and "
-                f"re-run to produce a measured baseline."
+            # NO FALLBACK. This used to become `derived` with a warning, and the
+            # warning was the entire safeguard: on a machine without Go the DEFAULT
+            # invocation wrote an all-green baseline invented from source to the
+            # committed path, and the parity contract then certified the port
+            # against it. A missing toolchain is a blocker, not a degraded mode.
+            raise BaselineError(
+                f"no {args.go_binary!r} toolchain on PATH, so the Go oracle cannot be run "
+                f"and there is nothing to measure. The baseline records what the suite DOES "
+                f"today, which is knowable only by executing it, so --mode {MODE_AUTO} "
+                f"reports this rather than inventing rows: load the toolchain the repository "
+                f"pins in .go-version (`. /etc/profile.d/go.sh` in this image) and re-run, "
+                f"or reduce an already-captured stream with --event-stream. "
+                f"--mode {MODE_DERIVED} exists only as a source-inventory DIAGNOSTIC, needs "
+                f"--allow-derived-baseline, and cannot be written to the committed manifest."
             )
-            mode = MODE_DERIVED
-        else:
-            mode = MODE_GO_TEST_JSON
+        mode = MODE_GO_TEST_JSON
 
     if mode == MODE_DERIVED:
+        if not args.allow_derived_baseline:
+            raise BaselineError(
+                f"--mode {MODE_DERIVED} builds rows from the Go SOURCE INVENTORY and stamps "
+                f"every one of them `pass`, because reading a test's name cannot tell you "
+                f"what it did. That is a diagnostic - useful for checking this module's "
+                f"inventory against the source tree - and it is not a baseline: the "
+                f"engagement's success criterion is that the ported suite behaves as the Go "
+                f"suite BEHAVES, which only execution establishes. Pass "
+                f"--allow-derived-baseline to acknowledge that, and note that the result "
+                f"still cannot be written to the committed manifest and still fails --check."
+            )
+        _log(
+            f"WARNING: building from the measured source inventory. Every row will be "
+            f"stamped `pass` because no test was run, and the manifest will record "
+            f"provenance={PROVENANCE_DERIVED!r}. This is a DIAGNOSTIC, not a parity "
+            f"baseline: --check refuses this provenance and the committed manifest cannot "
+            f"be written from it."
+        )
         verdicts = list(
             derive_verdicts_from_source_inventory(
                 repo_root,
@@ -2596,7 +4343,14 @@ def _collect_verdicts(
                 include_non_go_baseline=args.include_non_go_baseline,
             )
         )
-        return tuple(verdicts), PROVENANCE_DERIVED, "the measured source inventory"
+        atoms = [PROVENANCE_DERIVED]
+        if args.include_non_go_baseline:
+            atoms.append(PROVENANCE_NON_GO_MEASURED)
+        return (
+            tuple(verdicts),
+            compose_provenance(*atoms),
+            "the measured source inventory",
+        )
 
     reduction = run_go_test_json(
         packages,
@@ -2610,9 +4364,11 @@ def _collect_verdicts(
     # hold a package-level failure whose tests all passed.
     check_go_verdict_domain(reduction, packages=packages, require_requested=True)
     verdicts = list(reduction.verdicts)
+    atoms = [PROVENANCE_GO_TEST_JSON]
     if args.include_non_go_baseline:
         verdicts.append(_non_go_baseline_verdict())
-    return tuple(verdicts), PROVENANCE_GO_TEST_JSON, reduction.source
+        atoms.append(PROVENANCE_NON_GO_MEASURED)
+    return tuple(verdicts), compose_provenance(*atoms), reduction.source
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2646,6 +4402,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_check(output.expanduser())
 
         packages, packages_explicit = _resolve_packages(args.packages)
+        # BEFORE the oracle is invoked and before anything is written: a run that
+        # would shrink the committed baseline must cost nothing and change nothing.
+        check_domain_not_narrowed(
+            packages, output, repo_root, allow_narrow=args.allow_narrow_domain
+        )
         extra_go_args = _resolve_extra_go_args(forwarded)
         verdicts, provenance, source_label = _collect_verdicts(
             args,
@@ -2654,10 +4415,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             packages_explicit=packages_explicit,
             forwarded=extra_go_args,
         )
+        # THE COMMITTED PATH IS RESERVED FOR MEASURED ROWS. Checked before the
+        # manifest is built, so a derived run cannot even reach the writer: the
+        # committed manifest is what the parity contract reads, and a file at that
+        # path claiming every test passes on the strength of having read their names
+        # is the single most damaging artifact this tool could produce.
+        if provenance != PROVENANCE_GO_TEST_JSON:
+            committed = default_baseline_path(repo_root)
+            if output.expanduser().resolve() == committed.resolve():
+                raise BaselineError(
+                    f"refusing to write provenance={provenance!r} rows to the COMMITTED "
+                    f"baseline {committed}. That file is what the parity contract reads, so a "
+                    f"manifest there asserts what the Go suite does today - and these rows "
+                    f"were not produced by running it. Write the diagnostic somewhere else "
+                    f"with --output, or run the oracle."
+                )
+
         manifest = build_manifest(
             verdicts,
             provenance=provenance,
             allow_non_green=args.allow_non_green,
+            covers_default_scope=not packages_explicit,
             source_label=source_label,
         )
         written = write_manifest_atomic(manifest, output)

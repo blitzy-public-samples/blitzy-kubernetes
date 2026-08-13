@@ -96,6 +96,7 @@ annotation actually lands in one.
 # exception. Weaken any one of those and the V6 confidentiality guard keeps
 # passing while secret payloads reach the audit log.
 
+import hashlib
 import json
 import os
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -314,7 +315,13 @@ _REDACTED_WIRE_KEYS: Final[frozenset[str]] = frozenset(
 #: Placeholder substituted for a redacted value.
 _REDACTED: Final[str] = "<redacted>"
 
-#: Longest raw line rendered in a diagnostic, in characters.
+#: Longest REDACTED line rendered in a diagnostic, in characters.
+#:
+#: It bounds only the output of :func:`redact_event`, i.e. a document whose
+#: payload-bearing members have ALREADY been replaced before the cut is made. It
+#: is never applied to a raw line: an undecodable line is described by
+#: :func:`_undecodable_line_description` and no part of it is rendered, because a truncated
+#: leak is still a leak.
 #:
 #: A blocking-mode audit log line for a create carries the whole request object, so
 #: an unbounded excerpt can be many kilobytes of one CI message. The bound is
@@ -350,24 +357,108 @@ def redact_event(raw: RawEvent) -> dict[str, object]:
     return redacted
 
 
-def _redacted_line(line: str) -> str:
-    """Render one raw log line for a diagnostic: redacted if decodable, bounded always.
+def _fingerprint(line: str) -> str:
+    """Return a short SHA-256 fingerprint of ``line``, for correlation without disclosure.
 
-    A line that will not decode cannot be redacted field by field, so it is
-    truncated instead. That is the honest trade: the reader needs to see the text
-    that failed to parse, and a malformed line is by definition not a document
-    whose payload members can be located.
+    Twelve hex characters of a cryptographic digest: enough that two diagnostics
+    from the same run can be told to describe the same record or different ones,
+    and enough that a reader holding the log can confirm WHICH line is meant by
+    hashing it themselves. It discloses nothing about the content, which is the
+    whole point -- see :func:`_undecodable_line_description`.
+    """
+    return hashlib.sha256(line.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
+
+
+def _undecodable_line_description(
+    line: str,
+    *,
+    line_number: int | None,
+    error: ValueError | None,
+    decoded_type: str | None,
+) -> str:
+    """Describe a record that will not decode, WITHOUT reproducing any of its bytes.
+
+    THE RULE THIS ENFORCES, and it has no exception: audit-log bytes that cannot be
+    decoded are never echoed. A field-by-field redaction is only possible once a
+    line has decoded to an object, so for everything else the diagnostic is built
+    from METADATA alone.
+
+    That restriction is not tidiness. A blocking-mode audit log for a Secret create
+    carries the object in ``requestObject``, and a `RequestResponse`-level line
+    would carry it in ``responseObject`` as well. A line truncated by a disk-full
+    writer, a partially flushed line, or a line written at an unrecognised version
+    is exactly the kind of record whose payload survives while its JSON envelope
+    does not -- so echoing "just the first 400 characters" of it publishes the very
+    material F-006-RQ-002 exists to keep out of the log, into pytest output and
+    from there into the JUnit XML that TestGrid and Spyglass archive.
+
+    What is reported instead is everything a reader needs to find and fix the
+    record without seeing it: WHERE it is (the one-based line number), HOW BIG it is
+    (characters), WHY it failed (the parser's message and position, or the JSON type
+    it decoded to when that type is simply not an event), and WHICH record it is
+    (:func:`_fingerprint`). The reader has the log; this message tells them which
+    line of it to look at.
+
+    Args:
+        line: The offending record. Used only to measure and fingerprint it.
+        line_number: One-based position in the stream, or ``None`` when the caller
+            has no position to report.
+        error: The decoder's exception when the bytes were not JSON at all.
+        decoded_type: The Python type name the bytes DID decode to, when they were
+            valid JSON but not an object.
+
+    Returns:
+        A single-line, content-free description.
+    """
+    parts: list[str] = [_REDACTED, "undecodable audit record"]
+    if line_number is not None:
+        parts.append(f"line {line_number}")
+    parts.append(f"{len(line)} character(s)")
+    if decoded_type is not None:
+        parts.append(f"decoded as JSON {decoded_type}, which is not an audit event object")
+    if error is not None:
+        position = ""
+        error_line = getattr(error, "lineno", None)
+        error_column = getattr(error, "colno", None)
+        if isinstance(error_line, int) and isinstance(error_column, int):
+            position = f" at line {error_line} column {error_column}"
+        parts.append(f"{type(error).__name__}: {error}{position}")
+    parts.append(f"sha256:{_fingerprint(line)}")
+    return f"<{'; '.join(parts)}>"
+
+
+def _redacted_line(line: str, *, line_number: int | None = None) -> str:
+    """Render one log line for a diagnostic: redacted when decodable, never raw.
+
+    A line that decodes to a JSON OBJECT is rendered through :func:`redact_event`,
+    so its envelope is visible and every payload-bearing member is replaced by its
+    type and size. Bounding what remains is then safe, because the payload is
+    already gone before the cut is made.
+
+    Anything else -- a line that will not parse at all, or one that parses to a
+    list or a scalar -- is described by :func:`_undecodable_line_description` and never
+    rendered. A scalar is not a document whose members can be located, and a
+    scalar in an audit log is as likely to be a fragment of one as anything else.
     """
     try:
         decoded = json.loads(line)
-    except ValueError:
-        decoded = None
-    if isinstance(decoded, dict):
-        rendered = json.dumps(redact_event(decoded), sort_keys=True)
-    else:
-        rendered = line
+    except ValueError as exc:
+        return _undecodable_line_description(
+            line, line_number=line_number, error=exc, decoded_type=None
+        )
+    if not isinstance(decoded, dict):
+        return _undecodable_line_description(
+            line,
+            line_number=line_number,
+            error=None,
+            decoded_type=type(decoded).__name__,
+        )
+    rendered = json.dumps(redact_event(decoded), sort_keys=True)
     if len(rendered) <= _MAX_DIAGNOSTIC_CHARS:
         return rendered
+    # A redacted envelope that is still oversized: every payload member is already
+    # a placeholder, so what remains is envelope metadata and truncating it cannot
+    # disclose a body.
     return (
         f"{rendered[:_MAX_DIAGNOSTIC_CHARS]}... "
         f"[truncated, {len(rendered)} characters total]"
@@ -630,21 +721,61 @@ def _line_source(source: AuditLogSource) -> Iterator[Iterable[str]]:
         yield source
 
 
-def _decode_failure(line: str, version: str) -> str:
+def _strip_line_terminator(raw_line: str) -> str:
+    """Remove the line terminator and nothing else. Port of ``bufio.ScanLines``.
+
+    ``ScanLines`` (bufio/scan.go) returns the token up to but excluding the ``\\n``,
+    and then calls ``dropCR``, which removes a SINGLE trailing ``\\r`` -- and only
+    one, and only when it sat immediately before that newline. It trims no other
+    whitespace, from either end.
+
+    Reproducing that exactly is what makes this reader's verdicts the same as Go's.
+    ``strip()`` would additionally swallow interior indentation and, worse, would
+    turn a whitespace-only record into the empty string that the old blank-line
+    skip then discarded -- and a discarded record is a verdict the caller never
+    learns about.
+
+    Args:
+        raw_line: One record as the line source yielded it, terminator included
+            when there was one.
+
+    Returns:
+        The record without its terminator.
+    """
+    if raw_line.endswith("\n"):
+        raw_line = raw_line[:-1]
+        if raw_line.endswith("\r"):
+            raw_line = raw_line[:-1]
+    return raw_line
+
+
+def _decode_failure(line: str, version: str, *, line_number: int | None = None) -> str:
     """Build the decode-failure message, keeping Go's shape from audit.go 109.
 
     Go's exact wording leads so a reader can grep the two suites for the same
     diagnostic; the requirement this guards is named after it, because the
     reader of a CI failure is often not the author of the test.
+
+    ``line_number`` is the one-based position of the record in the stream. It is
+    what makes a content-free diagnostic actionable: the reader cannot be shown the
+    bytes (see :func:`_undecodable_line_description`), so they are told exactly
+    which line of their own log to open.
     """
     return (
-        f"failed decoding buf: {_redacted_line(line)}, apiVersion: {version}"
+        f"failed decoding buf: {_redacted_line(line, line_number=line_number)},"
+        f" apiVersion: {version}"
         " (F-006-RQ-002: sensitive-resource audit fidelity is asserted from the"
         " audit log, so a line that will not decode invalidates the check)"
     )
 
 
-def _decode_line(line: str, version: str, report: MissingEventsReport) -> RawEvent:
+def _decode_line(
+    line: str,
+    version: str,
+    report: MissingEventsReport,
+    *,
+    line_number: int | None = None,
+) -> RawEvent:
     """Decode one audit-log line. Port of the decode step at audit.go 106-110.
 
     Go builds `audit.Codecs.UniversalDecoder(version)` and decodes into an
@@ -658,18 +789,34 @@ def _decode_line(line: str, version: str, report: MissingEventsReport) -> RawEve
     not a quietly skipped line. Skipping it would let the caller's poll spin
     until it timed out and then blame a missing event, hiding the real cause.
     The partial report rides out on the exception so that diagnostic survives.
+
+    INVARIANT PRESERVED: no raw byte of an undecodable line reaches the message.
+    ``line_number`` is threaded in from the scan so the line can still be located
+    (F-006-RQ-002, CWE-532) -- see :func:`_undecodable_line_description`.
+
+    Args:
+        line: the stripped log line.
+        version: the audit apiVersion the line must carry.
+        report: the partial report to attach to any raised error.
+        line_number: 1-based physical line number within the log, for diagnostics.
     """
     try:
         decoded = json.loads(line)
     except ValueError as exc:
         # ValueError rather than JSONDecodeError: the latter subclasses it, and
         # this also catches the non-strict numeric failures json can raise.
-        raise AuditLogDecodeError(_decode_failure(line, version), report) from exc
+        raise AuditLogDecodeError(
+            _decode_failure(line, version, line_number=line_number), report
+        ) from exc
     if not isinstance(decoded, dict):
         # Valid JSON, but a scalar or a list is not an audit event.
-        raise AuditLogDecodeError(_decode_failure(line, version), report)
+        raise AuditLogDecodeError(
+            _decode_failure(line, version, line_number=line_number), report
+        )
     if decoded.get("apiVersion") != version:
-        raise AuditLogDecodeError(_decode_failure(line, version), report)
+        raise AuditLogDecodeError(
+            _decode_failure(line, version, line_number=line_number), report
+        )
     if decoded.get("kind") != AUDIT_EVENT_KIND:
         # The other half of what UniversalDecoder(version) enforced, and it was
         # missing. Go decodes through the audit scheme, which resolves a document
@@ -680,7 +827,9 @@ def _decode_line(line: str, version: str, report: MissingEventsReport) -> RawEve
         # alone accepted every one of those, and an EventList - whose `items` the
         # projection never reads - projected to a wholly empty AuditEvent that
         # then matched nothing while being counted as a checked event.
-        raise AuditLogDecodeError(_decode_failure(line, version), report)
+        raise AuditLogDecodeError(
+            _decode_failure(line, version, line_number=line_number), report
+        )
     return decoded
 
 
@@ -754,21 +903,33 @@ def check_audit_lines_filtered(
     report = MissingEventsReport(missing_events=list(expected))
 
     index = 0
+    # PHYSICAL line number, counted separately from `index`. `index` is Go's `i`
+    # and counts DECODED EVENTS, so it does not advance across blank lines and
+    # cannot locate a line in the file. A reader handed an undecodable line needs
+    # the file position, because the fingerprint deliberately withholds the text
+    # (F-006-RQ-002 / CWE-532) and the position is then the only way to find it.
+    line_number = 0
     with _line_source(stream) as lines:
         for raw_line in lines:
-            # bufio.ScanLines hands Go the line without its trailing newline or
-            # carriage return, which is what strip() reproduces here.
-            line = raw_line.strip()
-            if not line:
-                # A blocking-mode audit log can end with a trailing newline, and
-                # a caller that split the text itself yields a final "" for it.
-                # Go's scanner produces no token in that case, so skipping
-                # without advancing the counter keeps num_events_checked equal to
-                # Go's i for every well-formed log. Nothing else is ever
-                # skipped: a non-blank line that will not decode raises.
-                continue
+            # THE LINE TERMINATOR ONLY, NEVER strip(). bufio.ScanLines hands Go the
+            # token with its trailing "\n" removed, and its trailing "\r" removed
+            # only when that "\r" immediately preceded the newline (dropCR). It does
+            # NOT trim interior or leading whitespace, and -- decisively for this
+            # loop -- it EMITS a token for a blank line rather than swallowing it,
+            # which `runtime.DecodeInto` then fails at audit.go 106-110.
+            #
+            # NOTHING IS SKIPPED HERE, and that is the fix rather than an omission.
+            # A blank or whitespace-only record in an audit log is a real defect: a
+            # partially flushed write, a truncated line, a writer that emitted a
+            # bare newline. Skipping it let the caller's poll spin to its deadline
+            # and then blame a missing event, which points the reader at the API
+            # server instead of at the log. Every emitted record is decoded, and the
+            # empty token fails with the same content-free diagnostic as any other
+            # undecodable one.
+            line = _strip_line_terminator(raw_line)
+            line_number = index + 1
 
-            raw = _decode_line(line, version, report)
+            raw = _decode_line(line, version, report, line_number=line_number)
             if index == 0:
                 report.first_event_checked = raw
             # Every line, so this ends up holding the last one. audit.go 111-114.
@@ -956,4 +1117,3 @@ class _AuditEventTracker:
         Python equivalent and is what the caller's `len(...) > 0` check reads.
         """
         return [tracked.event for tracked in self._events if not tracked.found]
-

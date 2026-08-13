@@ -223,16 +223,25 @@ const AUDIT_SECRET_SYNTHETIC_DATA_VALUE = 'dmFs';
 // SECTION 2 -- Recorded request and response bodies.
 //
 // PRESENCE is what the parity oracle measures: `test/utils/audit.go` L151-156
-// records only `RequestObject bool` / `ResponseObject bool`. The bodies below
-// therefore carry the objects the measured operations actually construct
-// (`secretOperations` L742-755, `rbacOperations` L762-800) and nothing more.
-// Server-populated fields -- `uid`, `resourceVersion`, `creationTimestamp` --
-// are deliberately absent: they are not recorded anywhere in the cited sources,
-// and inventing them would breach "evidence over assumption" for no gain, since
-// no assertion in this tier reads them.
+// records only `RequestObject bool` / `ResponseObject bool`.
 //
-// Consumers must treat body CONTENTS as illustrative and body PRESENCE as the
-// contract.
+// REQUEST bodies below carry the objects the measured operations actually
+// construct and pass (`secretOperations` L742-755, `rbacOperations` L762-800), so
+// they are traceable evidence. Server-populated fields -- `uid`,
+// `resourceVersion`, `creationTimestamp` -- are deliberately absent: they are not
+// recorded anywhere in the cited sources, and inventing them would breach
+// "evidence over assumption" for no gain, since no assertion in this tier reads
+// them.
+//
+// RESPONSE bodies carry AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED instead of any
+// object, because the oracle records only that one existed. They previously reused
+// the corresponding REQUEST object, which no server returns -- a create response
+// carries the server-populated fields a request cannot have, and a delete response
+// is a `Status` or the deleted object rather than the target. That made invented
+// content indistinguishable from recorded wire data in a file named `fixtures`.
+//
+// Consumers read body PRESENCE and never contents, which is exactly the fact the
+// oracle supports.
 // ---------------------------------------------------------------------------
 
 /**
@@ -315,6 +324,36 @@ function auditRoleBindingBody(namespace: string): AuditPayload {
  * `RequestObject: true` on all three deletes records.
  */
 const AUDIT_DELETE_OPTIONS_BODY: AuditPayload = { kind: 'DeleteOptions' };
+
+/**
+ * The body recorded where the oracle measured PRESENCE and nothing else.
+ *
+ * WHY A SELF-DESCRIBING MARKER RATHER THAN A PLAUSIBLE BODY. `test/utils/audit.go`
+ * L151-156 reduces every audited body to a BOOLEAN -- `if e.ResponseObject != nil {
+ * event.ResponseObject = true }` -- so the oracle records that a response body
+ * existed and records nothing whatever about its contents. The response bodies here
+ * were previously filled with the corresponding REQUEST object, which is not what a
+ * server returns: a create response carries `uid`, `resourceVersion` and
+ * `creationTimestamp` that the request never had, and a delete response is a `Status`
+ * or the deleted object rather than the target. Those bodies were therefore invented
+ * content presented, in a file named `fixtures`, as recorded wire data -- and the
+ * accompanying comments conceded as much ("contents are illustrative").
+ *
+ * A marker that names its own limit cannot be mistaken for API-server output, and it
+ * makes the boundary of the evidence visible at every use site instead of only in a
+ * section header a reader may not reach. Behaviour is unchanged: every consumer in
+ * this tier reads body PRESENCE and never contents (`AuditFidelityPanel.tsx` L1274-
+ * L1275 renders `undefined ? 'not recorded' : 'recorded'`), which is precisely the
+ * fact the oracle supports.
+ *
+ * REQUEST bodies are NOT replaced by this marker. Those are the objects the measured
+ * operations actually construct and pass, traceable to `audit_test.go` L743-746,
+ * L763-766 and L781-793, so they are sourced evidence rather than invention.
+ */
+const AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED: AuditPayload = Object.freeze({
+  'audit.k8s.io.blitzy/body': 'present; contents not measured by the parity oracle',
+});
+
 
 // ---------------------------------------------------------------------------
 // SECTION 3 -- The THREE secrets events, at level `Request`.
@@ -605,7 +644,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 201 },
       requestObject: auditRoleBody(namespace),
-      responseObject: auditRoleBody(namespace),
+      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -628,7 +667,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 200 },
       requestObject: auditRoleBody(namespace),
-      responseObject: auditRoleBody(namespace),
+      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -651,12 +690,12 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 200 },
       requestObject: AUDIT_DELETE_OPTIONS_BODY,
-      // The oracle records ResponseObject: true for this delete (L895) but
-      // records only PRESENCE. The recorded target object is used as the body
-      // rather than a synthesised `Status`, because no `Status` shape appears in
-      // any cited source and inventing one would breach "evidence over
-      // assumption". Presence is the contract; contents are illustrative.
-      responseObject: auditRoleBody(namespace),
+      // The oracle records ResponseObject: true for this delete (L895) and records
+      // only PRESENCE, so the marker stands in for a body whose contents were never
+      // measured. Neither a `Status` nor the target object may be substituted: no
+      // `Status` shape appears in any cited source, and the target object is not what
+      // a delete returns -- either choice would be an invention presented as evidence.
+      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -678,7 +717,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 201 },
       requestObject: auditRoleBindingBody(namespace),
-      responseObject: auditRoleBindingBody(namespace),
+      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -701,7 +740,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 200 },
       requestObject: auditRoleBindingBody(namespace),
-      responseObject: auditRoleBindingBody(namespace),
+      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
     {
@@ -724,7 +763,7 @@ export function rbacResponseAuditEvents(namespace: string): AuditEvent[] {
       },
       responseStatus: { code: 200 },
       requestObject: AUDIT_DELETE_OPTIONS_BODY,
-      responseObject: auditRoleBindingBody(namespace),
+      responseObject: AUDIT_BODY_PRESENT_CONTENTS_NOT_MEASURED,
       annotations: { [AUTHORIZATION_DECISION_ANNOTATION]: AUDIT_DECISION_ALLOW },
     },
   ];

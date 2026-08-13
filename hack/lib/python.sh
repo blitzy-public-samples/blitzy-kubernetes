@@ -140,7 +140,7 @@ KUBE_PYTHON_REQUIREMENTS=${KUBE_PYTHON_REQUIREMENTS:-${KUBE_PYTHON_DIR}/requirem
 # records the digest of every artifact each pin may be satisfied by, so
 # `pip install --require-hashes` refuses a substituted or tampered artifact
 # instead of installing it. Exact direct pins cannot give that guarantee on their
-# own, because 40 of the 58 distributions are selected transitively and are named
+# own, because 39 of the 58 distributions are selected transitively and are named
 # nowhere in the manifest.
 KUBE_PYTHON_LOCK=${KUBE_PYTHON_LOCK:-${KUBE_PYTHON_DIR}/requirements-test.lock}
 
@@ -209,6 +209,98 @@ KUBE_PYTHON_LOCK_TIMEOUT=${KUBE_PYTHON_LOCK_TIMEOUT:-600}
 # it (see kube::python::internal::safe_rm), which is what makes "delete the store
 # and start again" incapable of deleting a directory this library did not create.
 KUBE_PYTHON_STORE_MARKER_NAME=".kube-python-store"
+
+# ---------------------------------------------------------------------------
+# BOUNDED NETWORK AND PROCESS LIFECYCLES
+# ---------------------------------------------------------------------------
+# Provisioning runs BEFORE any test, in every gate that touches this tier, and it
+# talks to two networks it does not control: the pip wheel host and the Python
+# package index. Without an end-to-end deadline, a TCP connection that is accepted
+# and then never spoken on, or a TLS read that stalls mid-transfer, wedges
+# `make test-python`, `make test-web`, `hack/verify-python.sh` and every other
+# consumer indefinitely - and it does so with no output, so the job looks busy
+# rather than broken. Each bound below is therefore a separate, overridable
+# ceiling rather than one global one, because a slow LINK and a slow INDEX need
+# very different allowances and collapsing them would force the tighter bound to
+# be loosened to the looser one's value.
+
+# Seconds to wait for the TCP+TLS handshake to a package host. Deliberately short:
+# a host that has not completed a handshake in this long is unreachable, not slow,
+# and every second beyond it is spent learning nothing.
+KUBE_PYTHON_CONNECT_TIMEOUT=${KUBE_PYTHON_CONNECT_TIMEOUT:-30}
+
+# Seconds for one wheel download to complete end to end. The pip wheel is a couple
+# of megabytes, so this is generous by an order of magnitude and still bounds a
+# stalled transfer - which is the failure a connect timeout alone cannot catch,
+# because the connection succeeded.
+KUBE_PYTHON_DOWNLOAD_TIMEOUT=${KUBE_PYTHON_DOWNLOAD_TIMEOUT:-300}
+
+# Seconds for the whole dependency install. Covers resolution, download and wheel
+# building for the entire pinned set across however many artifacts it names, so it
+# is the loosest of the three by design.
+KUBE_PYTHON_INSTALL_TIMEOUT=${KUBE_PYTHON_INSTALL_TIMEOUT:-1800}
+
+# kube::python::internal::bounded runs "$@" under a wall-clock ceiling of $1
+# seconds and returns its exact exit status - or reports the timeout and returns
+# the status timeout(1) gave.
+#
+# EXACT STATUS PROPAGATION IS THE POINT. A provisioning failure and a provisioning
+# TIMEOUT need different responses from a human (fix the dependency versus fix the
+# link), and a wrapper that collapsed both to 1 would erase the distinction just
+# where it matters most.
+#
+# timeout(1) is not one program, and this is measured rather than assumed: GNU
+# coreutils returns 124 when it fires, while the uutils Rust reimplementation
+# shipped as coreutils-from-uutils on Ubuntu 25.10 returns 125 whenever
+# --kill-after is given. Both are recognised, together with 137 (128+SIGKILL) from
+# the escalation. When timeout(1) is absent the command still runs, unbounded, with
+# a warning - losing the bound must not mean losing the ability to provision.
+kube::python::internal::bounded() {
+  local seconds=${1:?a ceiling in seconds is required}
+  shift
+
+  if [[ ! "${seconds}" =~ ^[1-9][0-9]*$ ]]; then
+    kube::python::internal::log_error \
+      "internal: a bounded command needs a positive integer ceiling, got '${seconds}'."
+    return 1
+  fi
+
+  # timeout(1) is an EXTERNAL program, so it can only ever execute an external
+  # command: handed the name of a shell function it fails with 127 "command not
+  # found" and the bound silently becomes a broken call. That failure mode is
+  # indistinguishable from a missing binary in a log, so it is refused loudly
+  # here rather than left to surface as a mystery 127 from a provisioning step.
+  # Callers that need to bound work expressed as a function must invert the
+  # nesting - call the function, and bound the external command INSIDE it.
+  if [[ $(type -t "${1:-}") == function ]]; then
+    kube::python::internal::log_error \
+      "internal: '$1' is a shell function, which timeout(1) cannot execute (it would exit 127)." \
+      "Bound the external command inside the function instead of bounding the function."
+    return 1
+  fi
+
+  if ! command -v timeout >/dev/null 2>&1; then
+    kube::python::internal::log_error \
+      "timeout(1) was not found, so '$1' runs with NO deadline." \
+      "A stalled registry or TLS read will wedge this gate rather than failing it." \
+      "Install coreutils to restore the bound."
+    "$@"
+    return $?
+  fi
+
+  local rc=0
+  timeout --signal=TERM --kill-after=30s "${seconds}s" "$@" || rc=$?
+  if [[ "${rc}" -eq 124 || "${rc}" -eq 125 || "${rc}" -eq 137 ]]; then
+    kube::python::internal::log_error \
+      "'$1' exceeded its ${seconds}s deadline and was terminated (timeout exited ${rc})." \
+      "This is a stalled network or process rather than a dependency problem: the step was" \
+      "still running, not failing. Check connectivity to the Python package index, then" \
+      "re-run; nothing was recorded, so provisioning will be retried." \
+      "Raise KUBE_PYTHON_INSTALL_TIMEOUT or KUBE_PYTHON_DOWNLOAD_TIMEOUT only if the link is" \
+      "genuinely that slow."
+  fi
+  return "${rc}"
+}
 
 # kube::python::internal::log_error writes an actionable, ERROR:-prefixed
 # message to stderr. On return the message has been written and nothing else has
@@ -928,18 +1020,45 @@ kube::python::internal::bootstrap_pip() {
     fi
     source_description="the pinned pip wheel from ${url}"
 
+    # EVERY DOWNLOAD PATH IS BOUNDED, and each one twice over: the downloader's own
+    # connect and total-transfer limits, plus an outer timeout(1) ceiling. The inner
+    # limits give the better diagnostic ("connection timed out") and fire first; the
+    # outer one exists because kube::util::download_file is not this library's code
+    # and its own flags could change, and because a downloader can stall in ways its
+    # own timers do not cover.
+    #
+    # kube::util::download_file is DELIBERATELY NOT USED here, even though it is
+    # this repository's own helper and would otherwise be the conventional
+    # choice. Two measured reasons, in order of weight:
+    #   * It cannot be bounded. It is a shell function, and timeout(1) - an
+    #     external program - cannot execute one: the attempt exits 127 and the
+    #     download silently never happens.
+    #   * It would add nothing if it could be. Its body (hack/lib/util.sh:399) is
+    #     a `for i in $(seq 5)` loop around `curl -fsSL --retry 3` with no
+    #     --max-time at all, so it is strictly LESS bounded than the branch
+    #     below, and it needs curl to be present anyway - the same curl this
+    #     branch calls directly with explicit connect and transfer limits.
     local fetched=n
-    if [[ $(type -t kube::util::download_file) == function ]]; then
-      kube::util::download_file "${url}" "${wheel}" >/dev/null 2>&1 && fetched=y
-    elif command -v curl >/dev/null 2>&1; then
-      curl -fsSL --retry 3 --keepalive-time 2 "${url}" -o "${wheel}" && fetched=y
+    if command -v curl >/dev/null 2>&1; then
+      # --connect-timeout bounds the handshake; --max-time bounds the WHOLE
+      # transfer, which is the stall a connect timeout cannot see because the
+      # connection succeeded. --retry 3 multiplies the wall clock, so --max-time is
+      # applied per attempt and the outer ceiling bounds the sum.
+      kube::python::internal::bounded "${KUBE_PYTHON_DOWNLOAD_TIMEOUT}" \
+        curl -fsSL --retry 3 --keepalive-time 2 \
+          --connect-timeout "${KUBE_PYTHON_CONNECT_TIMEOUT}" \
+          --max-time "${KUBE_PYTHON_DOWNLOAD_TIMEOUT}" \
+          "${url}" -o "${wheel}" && fetched=y
     elif command -v wget >/dev/null 2>&1; then
-      wget -q -O "${wheel}" "${url}" && fetched=y
+      # --timeout sets wget's connect, read AND dns timeouts together; --tries
+      # bounds the retries so they cannot multiply indefinitely.
+      kube::python::internal::bounded "${KUBE_PYTHON_DOWNLOAD_TIMEOUT}" \
+        wget -q --timeout="${KUBE_PYTHON_CONNECT_TIMEOUT}" --tries=3 \
+          -O "${wheel}" "${url}" && fetched=y
     else
       kube::python::internal::log_error \
-        "no downloader is available to fetch pip: kube::util::download_file, curl and wget are all absent." \
-        "Source hack/lib/init.sh before hack/lib/python.sh, install curl, or pre-seed the wheel and" \
-        "point KUBE_PYTHON_PIP_WHEEL at it."
+        "no downloader is available to fetch pip: curl and wget are both absent." \
+        "Install curl, or pre-seed the wheel and point KUBE_PYTHON_PIP_WHEEL at it."
       rm -rf "${tmpdir}"
       return 1
     fi
@@ -1288,7 +1407,7 @@ kube::python::create_venv() {
 # been written to stderr and the status is non-zero. ${PATH} is not modified.
 #
 # WHAT IS INSTALLED: the hash-locked graph ${KUBE_PYTHON_LOCK}, with
-# `--require-hashes`, so every artifact - including the 40 transitive ones the
+# `--require-hashes`, so every artifact - including the 39 transitive ones the
 # manifest never names - must match a digest recorded in the repository. The
 # manifest is cross-checked against the lock rather than installed directly; the
 # two disagreeing means the lock is stale, which is reported rather than resolved
@@ -1368,7 +1487,7 @@ kube::python::internal::install_requirements_locked() {
   # python/requirements-test.lock is the fully resolved graph with a SHA-256 for
   # every artifact each pin may be satisfied by, so --require-hashes refuses a
   # substituted or tampered artifact rather than installing it. The manifest pins
-  # only the 18 direct distributions; installing from it would leave 40 transitive
+  # only the 19 direct distributions; installing from it would leave 39 transitive
   # artifacts unverified and free to resolve differently on any future run.
   local -a install_args=()
   local source_file
@@ -1395,8 +1514,16 @@ kube::python::internal::install_requirements_locked() {
 
   kube::python::internal::log_status \
     "Installing the pinned Python test dependencies from ${source_file}"
-  if ! "${KUBE_PYTHON_VENV_BIN}/python" -m pip install \
-    --disable-pip-version-check --progress-bar off "${install_args[@]}"; then
+  # BOUNDED, because this is the single longest network step in the whole tier and
+  # the one most likely to stall: it resolves, downloads and may build wheels for
+  # every artifact the pinned set names. An index that accepts the connection and
+  # then stops responding mid-download leaves pip waiting with no output, so the job
+  # looks busy rather than broken.
+  if ! kube::python::internal::bounded "${KUBE_PYTHON_INSTALL_TIMEOUT}" \
+    "${KUBE_PYTHON_VENV_BIN}/python" -m pip install \
+    --disable-pip-version-check --progress-bar off \
+    --timeout "${KUBE_PYTHON_CONNECT_TIMEOUT}" --retries 3 \
+    "${install_args[@]}"; then
     kube::python::internal::log_error \
       "installing ${source_file} into ${KUBE_PYTHON_VENV} failed." \
       "This step needs network access to the Python package index." \
@@ -1409,7 +1536,11 @@ kube::python::internal::install_requirements_locked() {
   # An integrity assertion rather than decoration: AAP §0.6 records `pip check`
   # reporting "No broken requirements found." for exactly this pin set, so a
   # conflict here is a real regression in the manifest and not noise.
-  if ! "${KUBE_PYTHON_VENV_BIN}/python" -m pip check; then
+  # Bounded too, and with a much tighter ceiling: `pip check` is a purely local
+  # metadata walk that needs no network at all, so a minute is generous and a
+  # `pip check` that has not finished in one is wedged rather than working.
+  if ! kube::python::internal::bounded 60 \
+    "${KUBE_PYTHON_VENV_BIN}/python" -m pip check; then
     kube::python::internal::log_error \
       "'pip check' reported broken requirements in ${KUBE_PYTHON_VENV} after installing ${source_file}." \
       "The pinned set is expected to be internally consistent, so treat this as a manifest regression." \

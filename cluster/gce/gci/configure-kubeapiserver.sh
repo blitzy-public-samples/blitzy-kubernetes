@@ -38,15 +38,36 @@ function configure-etcd-params {
       # the GCE profiles — specifically the in-tree unit tests
       # (apiserver_etcd_test.go / apiserver_kms_test.go), which call this function
       # without supplying etcd certs or the hardened profile variables.
+      # THE TWO FATAL DIAGNOSTICS BELOW GO TO STDERR (>&2); THE WARNING STAYS ON
+      # STDOUT. A fail-closed refusal is precisely the message an operator needs to
+      # see when stdout is redirected or discarded, and stderr is where a diagnostic
+      # belongs on a stream that is conventionally left attached; it also keeps the
+      # refusal out of the stream a caller reads the assembled parameter string from,
+      # so a fail-closed abort can never be mistaken for a flag. This is the contract
+      # the ported V8 scenarios assert (python/tests/unit/shell/test_etcd_failclosed.py,
+      # AAP §0.10.2, which requires the refusal on stderr and says nothing about the
+      # warning's stream).
+      # The WARNING is deliberately left where it was: it is NOT a failure, it is the
+      # permissive branch the in-tree Go unit tests exercise, and moving it would be a
+      # behaviour change to a shipped script beyond what the ported tests require
+      # (AAP §0.10.1, minimal change to production artifacts).
+      # Nothing else changes: the flags, the branch conditions and both `exit 1`
+      # statuses are exactly as they were, and the in-tree unit tests capture the two
+      # streams together (configure_helper_test.go's mustInvokeFunc uses
+      # CombinedOutput), so they observe the same text on the same run.
       if [[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]; then
           params_ref+=" --etcd-servers=${ETCD_SERVERS:-http://127.0.0.1:2379}"
           echo "WARNING: ALL of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, mTLS between etcd server and kube-apiserver is not enabled."
       else
-          echo "ERROR: ALL etcd mTLS credentials (ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY, ETCD_APISERVER_CLIENT_CERT) are missing and ETCD_APISERVER_ALLOW_INSECURE is not set to true; refusing to fall back to plaintext etcd for a hardened profile. Provide etcd mTLS credentials, or set ETCD_APISERVER_ALLOW_INSECURE=true for local/dev."
+          # Fatal diagnostic on STDERR, matching this directory's convention for every
+          # other pre-exit failure (see the "Bailing out." paths in
+          # configure-helper.sh). See the note above the `if` for the full reasoning.
+          echo "ERROR: ALL etcd mTLS credentials (ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY, ETCD_APISERVER_CLIENT_CERT) are missing and ETCD_APISERVER_ALLOW_INSECURE is not set to true; refusing to fall back to plaintext etcd for a hardened profile. Provide etcd mTLS credentials, or set ETCD_APISERVER_ALLOW_INSECURE=true for local/dev." >&2
           exit 1
       fi
   else
-      echo "ERROR: Some of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, mTLS between etcd server and kube-apiserver cannot be enabled. Please provide all mTLS credential."
+      # Fatal diagnostic on STDERR; see the note in the branch above.
+      echo "ERROR: Some of ETCD_APISERVER_CA_KEY, ETCD_APISERVER_CA_CERT, ETCD_APISERVER_SERVER_KEY, ETCD_APISERVER_SERVER_CERT, ETCD_APISERVER_CLIENT_KEY and ETCD_APISERVER_CLIENT_CERT are missing, mTLS between etcd server and kube-apiserver cannot be enabled. Please provide all mTLS credential." >&2
       exit 1
   fi
 

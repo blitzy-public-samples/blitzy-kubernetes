@@ -30,8 +30,8 @@
 # period, so an inexact pin would let a future release fail the suite during
 # collection rather than during a deliberate upgrade.
 #
-# WHAT IS ACTUALLY INSTALLED - and why this file is not it. These 18 pins are the
-# DIRECT dependencies, and they are what a human edits. They pull in 40 more
+# WHAT IS ACTUALLY INSTALLED - and why this file is not it. These 19 pins are the
+# DIRECT dependencies, and they are what a human edits. They pull in 39 more
 # distributions that are named nowhere here, so pinning only these would leave
 # every transitive version - and, without a digest, the CONTENTS of every artifact
 # at those versions - free to differ between two runs of the same manifest.
@@ -165,6 +165,22 @@ httpx==0.28.1
 
 # Declarative HTTP mocking for httpx, replacing bespoke fake servers.
 respx==0.23.1
+
+# The transport layer beneath the Kubernetes client, DECLARED HERE BECAUSE IT IS
+# IMPORTED DIRECTLY. tests/helpers/apierrors.py names urllib3.exceptions.HTTPError
+# in the tuple of failures a bounded expectation is allowed to retry, and it has to:
+# kubernetes/client/rest.py converts only urllib3's SSLError into an
+# ApiException(status=0) (line 222), so a refused connection, an exhausted retry or
+# a broken protocol reaches the caller as the urllib3 exception itself. Retrying
+# those is correct while a control plane settles; catching bare `Exception` to reach
+# them - which is what this replaced - also swallowed genuine programming errors for
+# thirty seconds and then misreported them.
+# This is the same resolution AAP §0.3.4.2 applied to @testing-library/dom: a
+# distribution that is imported directly is declared directly, rather than relied on
+# as a transitive of `kubernetes`. It was already resolved and hash-locked at this
+# version as a transitive, so the lock is unchanged and needs no regeneration - the
+# 58 locked distributions are the same 58, with one of them now also named here.
+urllib3==2.3.0
 
 # --- lint and type gates -----------------------------------------------------
 

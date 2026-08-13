@@ -729,6 +729,37 @@ describe('EtcdTransportPanel — M9: the two plaintext states are different stat
     expect(renderedVerdict(container)).toBe('warn');
   });
 
+  it('records the SAME warning for both plaintext states, as the shell emits', () => {
+    // INVARIANT LOCKED (finding V), structurally: the two recorded payloads must agree
+    // on the diagnostic, because they describe one shell branch. The fixture used to
+    // record the warning for the explicit opt-in and `null` for the compatibility
+    // default, which encoded a difference the shell does not have -- and made the panel
+    // reject the only report the shim path can produce while accepting one it cannot.
+    const operatorDiagnostic = V8_ETCD_TRANSPORT_WARNING.evidence.observations.find(
+      (entry) => entry.label === V8_OBSERVATIONS.diagnostic,
+    )?.value;
+    const shimDiagnostic = V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT.evidence.observations.find(
+      (entry) => entry.label === V8_OBSERVATIONS.diagnostic,
+    )?.value;
+
+    expect(typeof operatorDiagnostic, 'the operator opt-in records its warning').toBe('string');
+    expect(
+      shimDiagnostic,
+      'the compatibility default emits the same warning, so it records the same text',
+    ).toBe(operatorDiagnostic);
+    expect(String(shimDiagnostic)).toContain(ETCD_PLAINTEXT_WARNING_MESSAGE);
+
+    // What DOES differ is the explicit-supply flag, and it is the only thing that does.
+    // Typed as the shared contract rather than as one fixture's `as const` literal,
+    // so the same reader works for both payloads.
+    const flagOf = (status: ControlStatus): unknown =>
+      status.evidence?.observations?.find(
+        (entry) => entry.label === V8_OBSERVATIONS.unitTestCompatibilityDefault,
+      )?.value;
+    expect(flagOf(V8_ETCD_TRANSPORT_WARNING)).toBe(false);
+    expect(flagOf(V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT)).toBe(true);
+  });
+
   it('explains the two plaintext states differently, since only one is a decision', () => {
     const operator = renderWithProviders(<EtcdTransportPanel status={V8_ETCD_TRANSPORT_WARNING} />);
     const operatorText = operator.container.textContent ?? '';
@@ -807,10 +838,25 @@ describe('EtcdTransportPanel — M9: the two plaintext states are different stat
     expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
   });
 
-  it('fails a compatibility default that announced itself', () => {
-    // The mirror of the case above. The shim prints NOTHING; a branch that emitted a warning
-    // consulted the opt-out and found it explicitly true, so reporting it as the shim path
-    // misattributes an operator decision to a test harness.
+  it('accepts a compatibility default that announced itself, because the shell always does', () => {
+    // INVARIANT LOCKED (finding V), AND THIS CASE IS THE INVERSE OF WHAT IT USED TO
+    // ASSERT. It previously required a compatibility default carrying a warning to
+    // FAIL, on the belief that the shim path prints nothing and that its silence is
+    // what tells it apart from an operator's explicit opt-in.
+    //
+    // Executing the shipped shell disproves the belief. The fallback guard is
+    // `[[ "${ETCD_APISERVER_ALLOW_INSECURE:-true}" == "true" ]]`
+    // (cluster/gce/gci/configure-kubeapiserver.sh L41), so an UNSET variable takes the
+    // same branch as an explicit `true` and reaches the same `echo`. All three states,
+    // measured against the real script:
+    //   unset          -> rc=0, http endpoint, 1 WARNING on stdout, 0 ERROR on stderr
+    //   explicit true  -> rc=0, http endpoint, 1 WARNING on stdout, 0 ERROR on stderr
+    //   explicit false -> rc=1, no endpoint,   0 WARNING,           1 ERROR on stderr
+    //
+    // So the old expectation rejected the ONLY report the shell can actually produce.
+    // What distinguishes the two plaintext states is
+    // `unitTestCompatibilityDefault` -- whether the variable was explicitly supplied --
+    // and nothing else.
     const status = claimingPass(
       replacing(
         COMPATIBILITY_DEFAULT_PROVEN,
@@ -820,8 +866,26 @@ describe('EtcdTransportPanel — M9: the two plaintext states are different stat
     );
     const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
 
-    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, V8_OBSERVATIONS.diagnostic)).toBe('satisfied');
+    // Still capped at WARN and never a pass: the transport is unauthenticated either
+    // way, and accepting the truthful diagnostic must not soften that.
+    expect(renderedVerdict(container)).toBe('warn');
+    // And the branch is still identified as the shim rather than the operator's choice.
+    expect(renderedBranch(container)).toBe('compatibility-default');
+  });
+
+  it('fails a compatibility default that claimed silence, which the shell cannot produce', () => {
+    // THE MIRROR, CORRECTED. Silence on this path is not the shim's signature -- it is
+    // an impossible measurement, because the branch unconditionally echoes its warning.
+    // A report claiming it describes a boot that did not happen, so it is refused for
+    // the same reason a silent operator opt-in is refused just below.
+    const status = claimingPass(
+      replacing(COMPATIBILITY_DEFAULT_PROVEN, V8_OBSERVATIONS.diagnostic, null),
+    );
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
     expect(measurementResult(container, V8_OBSERVATIONS.diagnostic)).toBe('violated');
+    expect(renderedVerdict(container)).toBe('fail');
   });
 
   it('withholds the verdict when the compatibility default reported no diagnostic field', () => {
@@ -1338,4 +1402,3 @@ describe('EtcdTransportPanel — a duplicated or wrong-typed measurement is neve
     expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
   });
 });
-

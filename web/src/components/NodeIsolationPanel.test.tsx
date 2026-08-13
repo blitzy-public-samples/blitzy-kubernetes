@@ -1243,4 +1243,3 @@ describe('NodeIsolationPanel — the self-driving path and the remaining absence
     expect(container.textContent ?? '').not.toMatch(/HTTP undefined|HTTP NaN/u);
   });
 });
-

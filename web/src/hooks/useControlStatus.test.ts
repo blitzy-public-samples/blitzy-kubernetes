@@ -102,10 +102,17 @@ import {
   controlStatusListFixture,
 } from '../test/fixtures/controlStatus';
 import type { ControlStatusVariant, PostureRequirementId } from '../test/fixtures/controlStatus';
+import {
+  POSTURE_CONTROLS_QUALIFIED_RESOURCE,
+  internalErrorStatusDocument,
+  kubernetesStatus,
+} from '../test/msw/handlers';
+import type { KubernetesStatus, KubernetesStatusReason } from '../test/msw/handlers';
 import { server } from '../test/msw/server';
 import {
   CONTROL_IDS,
   CONTROL_STATUS_BASE_PATH,
+  CONTROL_STATUS_REQUEST_TIMEOUT_MS,
   controlStatusPath,
   isControlId,
   selectControlStatus,
@@ -135,6 +142,43 @@ import type { ControlId, ControlStatus, UseControlStatusResult } from './useCont
 function forRequirement(requirementId: PostureRequirementId, invariant: string): string {
   return `${requirementId}: ${invariant}`;
 }
+
+/**
+ * The requirement each control attributes itself to, one entry per control in the roster.
+ *
+ * WHY IT EXISTS. Four of the cases below are parameterized over the roster — the failing-verdict
+ * case, the admitted-but-warned case, the per-control 403 and the per-control 500 — and a single
+ * hardcoded identifier inside a parameterized case labels EVERY control with ONE control's
+ * requirement. A red V7 case reading `F-001-RQ-002` sends its reader to the RBAC requirement for
+ * a NodeRestriction defect, which is worse than carrying no identifier at all because it is
+ * confidently wrong. AAP §0.7.2 asks a failure to read as a requirement violation rather than as
+ * a value mismatch, and it can only do that when the requirement named is one the failing control
+ * actually covers.
+ *
+ * IT IS NOT A SECOND SOURCE OF TRUTH. Each entry is the FIRST identifier that control's own
+ * recorded payload declares in `requirementIds`, and the final `describe` in this file asserts
+ * exactly that, control by control, against `../test/fixtures/controlStatus` — which AAP §0.5.1
+ * makes the single definition site for the recorded wire shapes. The table therefore cannot drift
+ * away from the fixtures without a red test, and it cannot drift away from the roster or from the
+ * closed requirement union without a `tsc --noEmit` error: `satisfies Record<ControlId,
+ * PostureRequirementId>` closes both axes at compile time, so a ninth control breaks the build and
+ * so does an invented identifier.
+ *
+ * WHERE A CASE IS GENUINELY CROSS-CUTTING — the collection-level 403 and 500, the parser refusals,
+ * the abort cases and the arbitrary-status table — the case is NOT parameterized over the roster
+ * and its label stays as written, because there the semantics belong to the transport or to the
+ * parser rather than to any one control.
+ */
+const PRIMARY_REQUIREMENT_BY_CONTROL = {
+  V1: 'F-001-RQ-001',
+  V2: 'F-002-RQ-001',
+  V3: 'F-003-RQ-001',
+  V4: 'F-004-RQ-001',
+  V5: 'F-005-RQ-001',
+  V6: 'F-006-RQ-001',
+  V7: 'F-007-RQ-001',
+  V8: 'F-008-RQ-001',
+} as const satisfies Record<ControlId, PostureRequirementId>;
 
 // ---------------------------------------------------------------------------
 // Wire helpers. Every response this file serves is stated by the test that needs it, so no
@@ -211,10 +255,19 @@ function respondWithRawJson(
 interface KubernetesStatusWire {
   /** The HTTP status, repeated in the body exactly as the API server repeats it. */
   readonly code: number;
-  /** The machine-readable reason, for example `Forbidden`. */
+  /**
+   * The machine-readable reason, for example `Forbidden`.
+   *
+   * Deliberately `string` rather than {@link KubernetesStatusReason}: the generic
+   * HTTP sweep below serves 401, 502 and 503 bodies that come from no `apierrors`
+   * constructor at all, and forcing them into the constructor vocabulary would
+   * claim a provenance they do not have.
+   */
   readonly reason: string;
   /** The server's own explanation, which a panel shows in preference to a generic sentence. */
   readonly message: string;
+  /** Object name for the `details` of a resource-scoped refusal; `''` for a collection. */
+  readonly name?: string;
 }
 
 /**
@@ -234,24 +287,55 @@ function respondWithKubernetesStatus(
   wire: KubernetesStatusWire,
   path: string = CONTROL_STATUS_BASE_PATH,
 ): void {
-  server.use(
-    http.get(
-      path,
-      () =>
-        HttpResponse.json(
-          {
-            kind: 'Status',
-            apiVersion: 'v1',
-            metadata: {},
-            status: 'Failure',
-            code: wire.code,
-            reason: wire.reason,
-            message: wire.message,
-          },
-          { status: wire.code },
-        ),
-    ),
-  );
+  server.use(http.get(path, () => HttpResponse.json(statusBody(wire), { status: wire.code })));
+}
+
+/**
+ * Composes `wire` through the SHARED envelope factory, with the `details` shape the
+ * matching `apierrors` constructor would have produced.
+ *
+ * WHY THIS DELEGATES RATHER THAN BUILDING THE OBJECT INLINE. This helper used to
+ * assemble the `Status` document itself, and it drifted from the real constructors
+ * in one specific way: it emitted no `details` at all. Every refusal this spec
+ * served was therefore structurally unlike a refusal from an API server, where
+ * `NewForbidden` and `NewNotFound` set `Details` UNCONDITIONALLY and
+ * `NewInternalError` sets `Details.Causes`. A hook reading `details` could have
+ * been written against this spec, passed, and failed in production - and the spec
+ * would have kept reporting green. Routing through `kubernetesStatus` gives the
+ * tier ONE definition of the envelope, so a future correction to the wire shape
+ * cannot reach the handlers while missing the hook specs.
+ *
+ * The details shape is selected by reason FAMILY, exactly as the constructors do:
+ * the resource-scoped reasons carry group/kind/name, and `InternalError` carries
+ * the underlying cause instead.
+ *
+ * @param wire - the recorded code, reason and message.
+ * @returns the `Status` document to serve.
+ */
+function statusBody(wire: KubernetesStatusWire): KubernetesStatus {
+  if (wire.reason === 'InternalError') {
+    // `NewInternalError` prefixes its message with `Internal error occurred: ` and
+    // carries the UNPREFIXED text as the single cause. The recorded fixture message
+    // already includes the prefix, so the cause is recovered by removing it rather
+    // than by restating the detail and risking the two disagreeing.
+    const detail = wire.message.replace(/^Internal error occurred: /, '');
+    return internalErrorStatusDocument(detail);
+  }
+  if (wire.reason === 'Forbidden' || wire.reason === 'NotFound') {
+    return kubernetesStatus(
+      wire.reason,
+      wire.code,
+      wire.message,
+      POSTURE_CONTROLS_QUALIFIED_RESOURCE,
+      wire.name ?? '',
+    );
+  }
+  // Every other reason carries NO details, and that is faithful rather than lazy:
+  // `NewUnauthorized` and `NewBadRequest` set none, and the 502/503 bodies the
+  // generic sweep serves are what a proxy in front of the API server produces -
+  // they come from no constructor, so inventing `details` for them would assert a
+  // shape no server sends.
+  return kubernetesStatus(wire.reason as KubernetesStatusReason, wire.code, wire.message);
 }
 
 /**
@@ -585,7 +669,10 @@ describe('category 1 of 4 — a successful fetch carries the recorded verdict', 
     expect
       .soft(
         control?.findings.length,
-        forRequirement('F-001-RQ-002', `a failing ${controlId} must carry the findings that produced it`),
+        forRequirement(
+          PRIMARY_REQUIREMENT_BY_CONTROL[controlId],
+          `a failing ${controlId} must carry the findings that produced it`,
+        ),
       )
       .toBe(recorded.findings.length);
     expect
@@ -614,13 +701,19 @@ describe('category 1 of 4 — a successful fetch carries the recorded verdict', 
       expect
         .soft(
           control?.verdict,
-          forRequirement('F-002-RQ-001', 'an operation permitted with a warning is warn, not pass'),
+          forRequirement(
+            PRIMARY_REQUIREMENT_BY_CONTROL[controlId],
+            `an operation ${controlId} permits with a warning is warn, not pass`,
+          ),
         )
         .toBe('warn');
       expect
         .soft(
           control?.warnings.length,
-          forRequirement('F-002-RQ-001', 'the warn verdict must carry the warnings that justify it'),
+          forRequirement(
+            PRIMARY_REQUIREMENT_BY_CONTROL[controlId],
+            `the ${controlId} warn verdict must carry the warnings that justify it`,
+          ),
         )
         .toBeGreaterThan(0);
       expect.soft(control?.warnings, `${controlId} warnings survive verbatim`).toEqual(recorded.warnings);
@@ -811,7 +904,10 @@ describe('category 2 of 4 — a 403 Forbidden can never be reported as a passing
     expect
       .soft(
         reportedPassVerdicts(result),
-        forRequirement('F-001-RQ-002', `a forbidden ${controlId} read must not report ${controlId} as passing`),
+        forRequirement(
+          PRIMARY_REQUIREMENT_BY_CONTROL[controlId],
+          `a forbidden ${controlId} read must not report ${controlId} as passing`,
+        ),
       )
       .toEqual([]);
     expect.soft(result.error.httpStatus, `${controlId} preserves the 403`).toBe(FORBIDDEN_STATUS);
@@ -941,7 +1037,10 @@ describe('category 3 of 4 — a 500 Internal Server Error can never be reported 
     expect
       .soft(
         reportedPassVerdicts(result),
-        forRequirement('F-006-RQ-002', `a failed ${controlId} evaluation must not report ${controlId} as passing`),
+        forRequirement(
+          PRIMARY_REQUIREMENT_BY_CONTROL[controlId],
+          `a failed ${controlId} evaluation must not report ${controlId} as passing`,
+        ),
       )
       .toEqual([]);
     expect.soft(result.error.httpStatus, `${controlId} preserves the 500`).toBe(
@@ -1302,17 +1401,17 @@ describe('category 4 of 4 — an abort is not a failure', () => {
   // must sit outside the non-2xx branch, or a panel unmounting while a 403 is in flight would
   // paint the refusal it was navigating away from.
   it('does not paint a refusal that was aborted before it arrived', async () => {
+    // Built through `statusBody` rather than inline: this is the same refusal
+    // `respondWithKubernetesStatus(FORBIDDEN_WIRE)` serves, so a second hand-rolled
+    // copy of the envelope here is a second place for it to drift from the real
+    // `apierrors.NewForbidden` shape - which is precisely what had happened.
     const gate = gateResponse(CONTROL_STATUS_BASE_PATH, () =>
       HttpResponse.json(
-        {
-          kind: 'Status',
-          apiVersion: 'v1',
-          metadata: {},
-          status: 'Failure',
+        statusBody({
           code: FORBIDDEN_STATUS,
           reason: FORBIDDEN_CONTROL_STATUS_ERROR.reason,
           message: FORBIDDEN_CONTROL_STATUS_ERROR.message,
-        },
+        }),
         { status: FORBIDDEN_STATUS },
       ),
     );
@@ -2247,3 +2346,204 @@ describe('the exported helpers', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// This file's own traceability, asserted rather than trusted.
+// ---------------------------------------------------------------------------
+
+describe('the requirement labels this file cites belong to the controls they label', () => {
+  // INVARIANT LOCKED: {@link PRIMARY_REQUIREMENT_BY_CONTROL} is DERIVED from the recorded
+  // payloads, not written alongside them. A label table maintained by hand beside a fixture set
+  // is a second source of truth, and the failure mode of a second source of truth is silent: the
+  // suite stays green while a red case points its reader at a requirement the control does not
+  // cover. So the table is checked here entry by entry against
+  // `../test/fixtures/controlStatus` -- the single definition site AAP §0.5.1 names -- which
+  // makes editing a fixture's `requirementIds` without editing the table a red test rather than a
+  // quiet inconsistency.
+  it.each([...CONTROL_IDS])(
+    '%s is labelled with the requirement its own recorded payload declares first',
+    (controlId) => {
+      const recorded = controlStatusFixture(controlId);
+      const labelled = PRIMARY_REQUIREMENT_BY_CONTROL[controlId];
+      const declared = recorded.requirementIds ?? [];
+
+      // Setup breakage rather than a finding: with nothing declared there is nothing to check
+      // against, so this aborts (AAP §0.4.1.2, the `t.Fatalf` row) instead of accumulating.
+      expect(
+        declared.length,
+        `${controlId}'s recorded payload must declare the requirements it covers`,
+      ).toBeGreaterThan(0);
+      expect
+        .soft(labelled, `${controlId}'s label must be the requirement ${controlId} declares first`)
+        .toBe(declared[0]);
+      expect
+        .soft(declared, `${controlId}'s label must be one ${controlId} itself declares`)
+        .toContain(labelled);
+      // Belt and braces on the feature number: catches a fixture that declared some other
+      // feature's requirement first, which the two assertions above would accept.
+      expect
+        .soft(labelled.slice(0, 5), `${controlId}'s label must belong to ${controlId}'s own feature`)
+        .toBe(`F-${controlId.slice(1).padStart(3, '0')}`);
+    },
+  );
+
+  // INVARIANT LOCKED: the table spans the roster exactly, and no two controls share a label.
+  // `satisfies Record<ControlId, PostureRequirementId>` already makes both axes a compile-time
+  // matter, so this is the runtime guard against a future cast quietly widening either one.
+  it('covers the whole roster, and gives no two controls the same label', () => {
+    expect
+      .soft(
+        Object.keys(PRIMARY_REQUIREMENT_BY_CONTROL).sort(),
+        'one entry per control in the roster, and no entry outside it',
+      )
+      .toEqual([...CONTROL_IDS].sort());
+
+    const labels = Object.values(PRIMARY_REQUIREMENT_BY_CONTROL);
+    expect
+      .soft(
+        new Set(labels).size,
+        'a shared label would make two controls indistinguishable in a failure message',
+      )
+      .toBe(labels.length);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The elapsed request deadline (finding 1).
+// ---------------------------------------------------------------------------
+
+describe('a request that is never answered ends at its deadline', () => {
+  /**
+   * THE GAP THIS GROUP CLOSES. Every other case in this file settles: the server
+   * answers, or refuses, or the consumer aborts. None of them covers the failure
+   * the `AbortController` structurally cannot see -- a server that ACCEPTS the
+   * connection and then never responds. `fetch` carries no default timeout, so
+   * before the deadline existed that request never settled, nothing was ever
+   * committed, and the panel stayed in `loading` for as long as the tab was open.
+   * A posture surface that silently shows nothing is worse than one that reports a
+   * failure, because nothing is indistinguishable from "not yet".
+   *
+   * THE CLOCK IS CONTROLLED, NOT WAITED ON. This file's `gateResponse` comment
+   * forbids sleeping past a delay, and that reasoning applies with more force
+   * here: waiting 15 real seconds would exceed the 10 s `testTimeout` and would
+   * make the case a race against scheduling jitter. `vi.useFakeTimers` with
+   * `toFake` limited to the timer functions advances the deadline deterministically
+   * while leaving `Date`, promises and msw's own async machinery on the real
+   * clock -- which is what keeps the gated handler working.
+   */
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Installs a handler that never answers, and fakes only the timer functions. */
+  function gateAndFakeTimers(): ResponseGate {
+    const gate = gateResponse(CONTROL_STATUS_BASE_PATH, () =>
+      HttpResponse.json(controlStatusListFixture()),
+    );
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    return gate;
+  }
+
+  it('commits a timeout error carrying no HTTP status', async () => {
+    // INVARIANT LOCKED: an unanswered request becomes a REPORTED failure, and it
+    // reports the absence of a response rather than inventing one. `httpStatus`
+    // must be absent -- a synthesised 0 or 504 would tell a reader that a server
+    // answered when none did.
+    const gate = gateAndFakeTimers();
+    const { result } = renderHook(() => useControlStatus());
+
+    expect(result.current.status, 'the request is in flight before the deadline').toBe('loading');
+
+    await act(async () => {
+      vi.advanceTimersByTime(CONTROL_STATUS_REQUEST_TIMEOUT_MS);
+    });
+
+    expect(result.current.status, 'the deadline must resolve the loading state').toBe('error');
+    if (result.current.status !== 'error') {
+      throw new Error(`expected the error arm, got ${result.current.status}`);
+    }
+    expect
+      .soft(result.current.error.kind, 'a deadline is its own failure kind, not a network error')
+      .toBe('timeout');
+    expect
+      .soft(
+        result.current.error.httpStatus,
+        'no response arrived, so no status may be reported for one',
+      )
+      .toBeUndefined();
+    expect
+      .soft(result.current.error.message, 'the message names the deadline that elapsed')
+      .toContain('did not complete');
+    // Structural: the error arm carries no controls, so an unanswered request
+    // cannot be rendered as a verdict even by accident.
+    expect.soft('controls' in result.current, 'the timeout arm exposes no controls').toBe(false);
+
+    gate.release();
+  });
+
+  it('does not fire the deadline for a request that is answered in time', async () => {
+    // CONTROL. Without this, a deadline hard-wired to fire would satisfy the case
+    // above and still be wrong. The timer is cleared in a `finally`, so advancing
+    // the clock far past the deadline after a successful response must change
+    // nothing at all.
+    //
+    // `flushPendingWork` rather than `waitFor`: `waitFor` POLLS on a timer, and the
+    // timers are faked here, so it would never observe its own condition and the
+    // case would fail on `testTimeout` having proven nothing. This was measured.
+    // Draining the queue is also the stronger statement -- it returns when React
+    // has no work left, rather than when a clock says it probably does not.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    respondWithControlList(controlStatusListFixture());
+
+    const { result } = renderHook(() => useControlStatus());
+    await flushPendingWork();
+    await flushPendingWork();
+
+    expect(result.current.status, 'the response must have settled before the clock moves').toBe(
+      'success',
+    );
+
+    await act(async () => {
+      vi.advanceTimersByTime(CONTROL_STATUS_REQUEST_TIMEOUT_MS * 10);
+    });
+
+    expect(
+      result.current.status,
+      'a cleared deadline cannot demote a settled success to an error',
+    ).toBe('success');
+  });
+
+  it('treats a consumer cancellation before the deadline as no failure at all', async () => {
+    // INVARIANT LOCKED, and it is the distinction the fix turns on: unmounting is
+    // NOT a timeout. Both end the request without a response and both abort the
+    // same controller, so the only thing separating them is the flag the deadline
+    // sets before it aborts. If the two were conflated, either every unmount would
+    // report a spurious failure or every timeout would be silently swallowed --
+    // and the swallowed case is precisely the bug this group exists to prevent.
+    const gate = gateAndFakeTimers();
+    const { result, unmount } = renderHook(() => useControlStatus());
+
+    expect(result.current.status).toBe('loading');
+    unmount();
+
+    await act(async () => {
+      vi.advanceTimersByTime(CONTROL_STATUS_REQUEST_TIMEOUT_MS * 2);
+    });
+
+    expect(
+      result.current.status,
+      'an unmounted consumer receives no committed state, timeout or otherwise',
+    ).toBe('loading');
+
+    gate.release();
+  });
+
+  it('bounds the deadline by the contract the surface reports on', () => {
+    // The value is a boundary condition, so it is asserted rather than left to
+    // drift. AAP §0.10.2 freezes the webhook at `timeoutSeconds: 5` and the KMS
+    // envelope call at `timeout: 3s`; a deadline shorter than either would cancel
+    // healthy reads, and one an order of magnitude longer would not bound anything
+    // a human would wait for.
+    expect(CONTROL_STATUS_REQUEST_TIMEOUT_MS).toBeGreaterThan(5_000);
+    expect(CONTROL_STATUS_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(30_000);
+  });
+});

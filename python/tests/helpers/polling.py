@@ -241,11 +241,12 @@ cost an interval:
 # change them, and neither may be widened (which makes a test meaningless) nor
 # narrowed (which makes it flaky).
 
+import inspect
 import time
 from collections.abc import Callable
 from typing import Final
 
-__all__ = ["PollTimeoutError", "poll", "poll_immediate"]
+__all__ = ["PollPredicateError", "PollTimeoutError", "poll", "poll_immediate"]
 
 
 # ---------------------------------------------------------------------------
@@ -289,11 +290,17 @@ def _session_defaults() -> tuple[float, float]:
     THE FALLBACK EXISTS SO THIS MODULE REMAINS USABLE STANDALONE - imported by
     a script, or by ``python -c "import tests.helpers.polling"`` from a tree
     where pytest is not installed, which is exactly how this file's
-    stdlib-only property is verified. ``Exception`` is caught rather than
-    ``ImportError`` alone because the failure mode being defended against is
-    "conftest.py could not be imported FOR ANY REASON", and an unimportable
-    conftest raising something else is no reason for a timing primitive to
-    become unusable.
+    stdlib-only property is verified.
+
+    ONLY ``ImportError`` IS CAUGHT, and the narrowness is the point. That one
+    exception covers both genuine unavailabilities and nothing else: its
+    ``ModuleNotFoundError`` subclass is raised when ``tests.conftest`` cannot be
+    found at all, and ``ImportError`` itself is raised when the module is found but
+    does not define one of the two names. Catching ``Exception`` also swallowed
+    every failure raised WHILE conftest executed - a typo, a bad constant, a
+    fixture-module bug - and substituted plausible-looking defaults for it, so a
+    real programming error surfaced later as a mysterious timing difference instead
+    of as the traceback that names the line. Such an error now propagates.
 
     The fallback values are not an independent opinion about how long to wait:
     each mirrors the same Go source the conftest constant cites, so the two
@@ -305,7 +312,7 @@ def _session_defaults() -> tuple[float, float]:
             DEFAULT_POLL_INTERVAL_SECONDS,
             FOREVER_TEST_TIMEOUT_SECONDS,
         )
-    except Exception:
+    except ImportError:
         return (_FALLBACK_POLL_INTERVAL_SECONDS, _FALLBACK_POLL_TIMEOUT_SECONDS)
     return (DEFAULT_POLL_INTERVAL_SECONDS, FOREVER_TEST_TIMEOUT_SECONDS)
 
@@ -451,6 +458,39 @@ def _render_exhaustion(
     return "\n".join(lines)
 
 
+class PollPredicateError(TypeError):
+    """Raised when a polled condition returns anything other than ``True`` or ``False``.
+
+    THE FALSE-PASS THIS CLOSES. Go's ``wait.ConditionFunc`` is
+    ``func() (done bool, err error)``, so the compiler guarantees the decision is
+    a boolean and nothing else can end a poll. Python has no such guarantee, and
+    ``if condition():`` accepts every truthy object -- which in this suite means a
+    security gate can be cleared by a value that never said ``True``:
+
+      * a ``(False, None)`` tuple, the shape a literal transcription of the Go
+        signature produces. A non-empty tuple is truthy, so the poll would return
+        on a predicate that reported NOT DONE;
+      * a ``MissingEventsReport``, a ``Response``, an ``ApiException`` or any
+        other object with no ``__bool__`` -- truthy by default, so returning the
+        evidence instead of a verdict about it would satisfy the poll;
+      * an un-awaited coroutine, which a missing ``await`` produces and which is
+        always truthy;
+      * a non-empty list of remaining work, whose emptiness is the real
+        condition and whose truthiness is its exact negation.
+
+    Every one of those clears the poll on the FIRST attempt, so the failure is
+    silent: the caller's own assertions then run against whatever state exists
+    and frequently pass. A ``TypeError`` at the first attempt is the opposite -
+    loud, immediate, and naming the returned type.
+
+    A ``TypeError`` and deliberately NOT an ``AssertionError``: this is a defect
+    in the calling test's code, not a finding about the system under test, so it
+    must not be capturable by a ``pytest.Subtests`` block that is accumulating
+    security findings. It also must not derive from :class:`PollTimeoutError`,
+    whose whole meaning is "the budget elapsed", which is not what happened.
+    """
+
+
 class PollTimeoutError(AssertionError, TimeoutError):
     """Raised when a poll exhausts its budget without the condition holding.
 
@@ -553,6 +593,65 @@ class PollTimeoutError(AssertionError, TimeoutError):
 # ---------------------------------------------------------------------------
 
 
+def _evaluate(condition: Callable[[], bool], *, attempt: int) -> bool:
+    """Invoke ``condition`` once and return its result ONLY if it is a real boolean.
+
+    THE ONE PLACE a polled decision is read, so both call sites in :func:`_poll`
+    are exact by construction rather than by two copies of the same care.
+
+    ``type(result) is not bool`` and NOT ``isinstance``: ``bool`` has no
+    subclasses in CPython, but the check is written as an exact type test to say
+    that nothing bool-LIKE is accepted either - notably ``numpy.bool_``, which
+    ``isinstance`` would reject anyway and which a reader should not have to
+    reason about, and ``0``/``1``, which ``isinstance(x, int)`` would accept.
+
+    An un-awaited coroutine is named specifically, because it is the mistake with
+    the least informative default message: ``<coroutine object ...>`` in a
+    ``TypeError`` about types tells a reader nothing, whereas "you forgot to
+    await it" tells them everything. The coroutine is closed before raising so
+    the interpreter does not additionally emit a "coroutine was never awaited"
+    RuntimeWarning that would displace this message.
+
+    A RAISE from the condition itself is NOT touched here: it propagates
+    unchanged, which is the port of ``if err != nil { return err }`` at
+    wait.go:213-215.
+
+    Args:
+        condition: The predicate under test.
+        attempt: 1-based attempt number, quoted in the failure so a reader can
+            see whether the wrong type appeared immediately or only later.
+
+    Returns:
+        The predicate's boolean decision.
+
+    Raises:
+        PollPredicateError: if the predicate returned anything but ``True`` or
+            ``False``.
+    """
+    __tracebackhide__ = True
+    result = condition()
+    if type(result) is bool:
+        return result
+
+    if inspect.iscoroutine(result):
+        result.close()
+        raise PollPredicateError(
+            f"the polled condition returned a COROUTINE on attempt {attempt} instead of a "
+            f"bool: it is an async function that was never awaited, so the poll would have "
+            f"returned immediately on a truthy object that made no decision at all. Await it "
+            f"inside a synchronous wrapper, or poll the synchronous predicate."
+        )
+
+    raise PollPredicateError(
+        f"the polled condition returned {type(result).__name__} ({result!r}) on attempt "
+        f"{attempt} instead of a bool. A poll ends on an exact True and on nothing else: "
+        f"every other value is truthy or falsey by accident, so accepting one would let a "
+        f"predicate that never reported success end the poll - a (False, None) tuple, a "
+        f"report object, an HTTP response and a list of remaining work are all truthy. "
+        f"Return True or False."
+    )
+
+
 def _poll(
     condition: Callable[[], bool],
     *,
@@ -595,6 +694,12 @@ def _poll(
       * A raise from the predicate leaves this function at once, unwrapped,
         with no further attempt - reproducing ``if err != nil { return err }``
         at wait.go:213-215.
+      * ONLY an exact boolean ``True`` ends the poll. Go's ``ConditionFunc``
+        returns ``(bool, error)``, so the type system guarantees it there; here
+        :func:`_evaluate` guarantees it, and every other value raises
+        :class:`PollPredicateError` on the attempt that produced it. Truthiness
+        is never consulted, because a truthy non-boolean would clear the poll -
+        and therefore a security gate - without any predicate having said so.
       * Exhaustion raises :class:`PollTimeoutError`, reproducing ``return
         ErrWaitTimeout`` at wait.go:220 and adding the diagnostic Go's error
         does not carry.
@@ -638,7 +743,7 @@ def _poll(
         # poll.go:244-251: invoke once, let a raise propagate, return on
         # success, otherwise fall through into the interval loop below.
         attempts += 1
-        if condition():
+        if _evaluate(condition, attempt=attempts):
             return
 
     while True:
@@ -658,7 +763,7 @@ def _poll(
         # (poll.go:281 closes, wait.go:211-221 runs fn for the closed receive) -
         # and let the next iteration exhaust.
         attempts += 1
-        if condition():
+        if _evaluate(condition, attempt=attempts):
             return
 
     raise PollTimeoutError(
@@ -740,6 +845,9 @@ def poll(
         PollTimeoutError: The budget was exhausted with the condition never
             true. Derives from ``AssertionError``, so the call site decides
             between accumulate and abort, and from ``TimeoutError``.
+        PollPredicateError: ``condition`` returned something other than ``True``
+            or ``False``. Raised on the attempt that returned it, before any
+            further attempt and before the budget can elapse.
         ValueError: ``interval`` or ``timeout`` is not greater than zero.
         Exception: Anything the predicate raises, propagated unchanged.
     """
@@ -808,6 +916,8 @@ def poll_immediate(
     Raises:
         PollTimeoutError: The budget was exhausted with the condition never
             true.
+        PollPredicateError: ``condition`` returned something other than ``True``
+            or ``False``.
         ValueError: ``interval`` or ``timeout`` is not greater than zero.
         Exception: Anything the predicate raises, propagated unchanged.
     """
@@ -821,4 +931,3 @@ def poll_immediate(
         requirement=requirement,
         describe_last=describe_last,
     )
-

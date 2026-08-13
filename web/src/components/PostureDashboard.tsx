@@ -75,7 +75,10 @@ import {
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
 import type { EffectiveVerdict } from '../domain/evidence';
-import { safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeProse,
+} from '../domain/safeText';
 import AuditFidelityPanel from './AuditFidelityPanel';
 import EncryptionAtRestPanel from './EncryptionAtRestPanel';
 import EtcdTransportPanel from './EtcdTransportPanel';
@@ -302,6 +305,7 @@ export const ERROR_KIND_DESCRIPTIONS: Readonly<Record<ControlStatusErrorKind, st
     http: 'The server answered, and its status was not a success.',
     network: 'No response arrived, so nothing could be read.',
     payload: 'A success response arrived, but its body could not be trusted.',
+    timeout: 'The request was still outstanding when its deadline elapsed, and was cancelled.',
   });
 
 /**
@@ -636,7 +640,7 @@ function AggregateError({
         <span className={`${BLOCK}__error-status`}>{` HTTP status ${error.httpStatus}.`}</span>
       )}
       {error.reason === undefined ? null : (
-        <span className={`${BLOCK}__error-reason`}>{` Reason: ${safeProse(error.reason)}.`}</span>
+        <span className={`${BLOCK}__error-reason`}>{` Reason: ${describeStatusReason(error.reason)}.`}</span>
       )}
       <span className={`${BLOCK}__error-kind`}>{` ${ERROR_KIND_DESCRIPTIONS[error.kind]}`}</span>
       <span className={`${BLOCK}__state-detail`}>

@@ -49,11 +49,16 @@ import {
   useAuditEvents,
   type AuditEvent,
   type AuditEventsError,
+  type AuditEventsErrorKind,
   type AuditLevel,
   type AuditPayload,
   type AuditResourceIdentity,
 } from '../hooks/useAuditEvents';
-import { safeObservationValue, safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeObservationValue,
+  safeProse,
+} from '../domain/safeText';
 
 /**
  * The plural resource name whose response bodies must never be rendered.
@@ -614,6 +619,28 @@ function renderResponseBodyCell(event: AuditEvent, identity: AuditResourceIdenti
 }
 
 /**
+ * What to say when a failure carries no HTTP status, keyed by the layer that failed.
+ *
+ * `Record` over the imported union rather than a default string, so that adding a
+ * new {@link AuditEventsErrorKind} is a COMPILE ERROR here instead of silently
+ * rendering a blank or a wrong sentence. `http` and `payload` both always carry a
+ * status, so their entries are unreachable in practice; they are still stated,
+ * because a hook change that stopped supplying one must produce a legible sentence
+ * rather than fall through to nothing.
+ *
+ * Every string is LOCAL. Nothing a failing backend controls reaches these
+ * sentences, which is what lets them be rendered into a live `role="alert"` region
+ * unconditionally.
+ */
+const NO_RESPONSE_DESCRIPTIONS: Readonly<Record<AuditEventsErrorKind, string>> = Object.freeze({
+  http: 'The server answered, but no status was recorded for its response.',
+  network: 'No HTTP response was received.',
+  payload: 'A response arrived, but no status was recorded for it.',
+  timeout: 'No HTTP response was received before the request deadline elapsed.',
+});
+
+
+/**
  * Describes a failed read without ever implying a healthy control.
  *
  * A refused or failed read is evidence of nothing about the audit configuration, so the
@@ -636,13 +663,19 @@ function renderResponseBodyCell(event: AuditEvent, identity: AuditResourceIdenti
 function describeFailure(failure: AuditEventsError): string {
   const parts = ['Audit events could not be read.'];
 
+  // Read from the PRESENCE of httpStatus, not from a magic value. The hook used to
+  // fabricate `httpStatus: 0` for a request that never got a response, so this
+  // branch tested for that sentinel - and a single missed comparison anywhere in
+  // the tier rendered the literal text "HTTP status 0". The field is now simply
+  // absent when no response existed, which is unmissable: `undefined` cannot be
+  // mistaken for a status, and the `kind` discriminant names the layer that failed.
   parts.push(
-    failure.httpStatus === 0
-      ? 'No HTTP response was received.'
+    failure.httpStatus === undefined
+      ? NO_RESPONSE_DESCRIPTIONS[failure.kind]
       : `HTTP status ${failure.httpStatus}.`,
   );
 
-  const reason = safeProse(failure.reason);
+  const reason = describeStatusReason(failure.reason);
   if (reason.length > 0) {
     parts.push(`Reason: ${reason}.`);
   }

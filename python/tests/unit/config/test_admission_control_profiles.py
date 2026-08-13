@@ -444,10 +444,23 @@ def test_profile_admission_control_is_parseable(
     # trustworthy parse finds strictly more assignments than bases. Asserted as a
     # relationship rather than as the measured 3-and-1, so that adding or
     # removing an append is not a failure of this module.
-    assert len(parsed.assignments) >= parsed.base_count >= 1, (
-        f"{profile_filename}: expected at least one base {_ADMISSION_CONTROL} "
-        f"assignment among {len(parsed.assignments)} total, got "
-        f"{parsed.base_count}."
+    #
+    # STRICTLY more, and the strictness is the entire assertion. `base_count` is
+    # derived by counting a subset of `assignments`, so `len(assignments) >=
+    # base_count` is true for every conceivable input including an empty parse -
+    # it is a tautology dressed as a check, and it would hold just as happily if
+    # the parser had found nothing but a single base line and silently dropped
+    # every append. The membership verdicts downstream are read off the ASSEMBLED
+    # chain, so a parser that missed the appends would report "plugin missing"
+    # against a profile that still lists it. Requiring at least one append proves
+    # the append-parsing path actually ran. Measured on both profiles: 3
+    # assignments, base_count 1.
+    assert len(parsed.assignments) > parsed.base_count >= 1, (
+        f"{profile_filename}: expected exactly one base {_ADMISSION_CONTROL} assignment "
+        f"plus at least one append, but found {len(parsed.assignments)} assignment(s) of "
+        f"which {parsed.base_count} are bases. Equal counts mean no append was parsed, so "
+        f"this module's view of the effective chain is incomplete and every membership "
+        f"verdict below it is untrustworthy."
     )
 
 

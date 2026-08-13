@@ -202,6 +202,91 @@ KUBE_NODE_LOCK_TIMEOUT=${KUBE_NODE_LOCK_TIMEOUT:-900}
 # after every install, because `npm ci` deletes the whole tree first.
 KUBE_NODE_STORE_MARKER_NAME=".kube-node-store"
 
+# ---------------------------------------------------------------------------
+# BOUNDED NETWORK AND PROCESS LIFECYCLES
+# ---------------------------------------------------------------------------
+# `npm ci` runs BEFORE any React test, in every gate that touches this tier, and
+# it talks to a registry this repository does not control. Without an end-to-end
+# deadline, a connection that is accepted and then never spoken on wedges
+# `make test-web` and `hack/verify-web.sh` indefinitely - silently, because npm's
+# progress output is suppressed here, so the job looks busy rather than broken.
+
+# Milliseconds npm waits for a single registry request, passed as --fetch-timeout.
+# npm's own unit is milliseconds, and it is kept in npm's unit rather than
+# converted so that what is configured here is exactly what npm is told.
+KUBE_NODE_FETCH_TIMEOUT_MS=${KUBE_NODE_FETCH_TIMEOUT_MS:-60000}
+
+# Attempts npm makes per failed request. Bounded because npm's default retry
+# behaviour multiplies the wall clock, and the whole-install ceiling below bounds
+# the sum rather than any one attempt.
+KUBE_NODE_FETCH_RETRIES=${KUBE_NODE_FETCH_RETRIES:-3}
+
+# Seconds for the WHOLE `npm ci`, covering every request, every extraction and
+# every lifecycle script the lockfile names. The loosest bound of the three by
+# design: a cold install of the 254-package set is minutes of legitimate work.
+KUBE_NODE_INSTALL_TIMEOUT=${KUBE_NODE_INSTALL_TIMEOUT:-1800}
+
+# kube::node::internal::bounded runs "$@" under a wall-clock ceiling of $1 seconds
+# and returns its EXACT exit status - or reports the timeout and returns the status
+# timeout(1) gave.
+#
+# Exact propagation matters because a failed install and a STALLED one need
+# different responses from a human (reconcile the lockfile versus fix the link),
+# and collapsing both to 1 would erase the distinction precisely where it counts.
+#
+# timeout(1) is not one program, and this is measured rather than assumed: GNU
+# coreutils returns 124 when it fires, while the uutils Rust reimplementation
+# shipped as coreutils-from-uutils on Ubuntu 25.10 returns 125 whenever
+# --kill-after is given. Both are recognised, with 137 (128+SIGKILL) from the
+# escalation. When timeout(1) is absent the command still runs, unbounded, with a
+# warning: losing the bound must not mean losing the ability to provision.
+kube::node::internal::bounded() {
+  local seconds=${1:?a ceiling in seconds is required}
+  shift
+
+  if [[ ! "${seconds}" =~ ^[1-9][0-9]*$ ]]; then
+    kube::node::internal::log_error \
+      "internal: a bounded command needs a positive integer ceiling, got '${seconds}'."
+    return 1
+  fi
+
+  # timeout(1) is an EXTERNAL program, so it can only ever execute an external
+  # command: handed the name of a shell function it fails with 127 "command not
+  # found" and the bound silently becomes a broken call. That failure mode is
+  # indistinguishable from a missing binary in a log, so it is refused loudly
+  # here rather than left to surface as a mystery 127 from a provisioning step.
+  # Callers that need to bound work expressed as a function must invert the
+  # nesting - call the function, and bound the external command INSIDE it, which
+  # is exactly what kube::node::ensure_deps does with kube::node::exec.
+  if [[ $(type -t "${1:-}") == function ]]; then
+    kube::node::internal::log_error \
+      "internal: '$1' is a shell function, which timeout(1) cannot execute (it would exit 127)." \
+      "Bound the external command inside the function instead of bounding the function."
+    return 1
+  fi
+
+  if ! command -v timeout >/dev/null 2>&1; then
+    kube::node::internal::log_error \
+      "timeout(1) was not found, so '$1' runs with NO deadline." \
+      "A stalled npm registry read will wedge this gate rather than failing it." \
+      "Install coreutils to restore the bound."
+    "$@"
+    return $?
+  fi
+
+  local rc=0
+  timeout --signal=TERM --kill-after=30s "${seconds}s" "$@" || rc=$?
+  if [[ "${rc}" -eq 124 || "${rc}" -eq 125 || "${rc}" -eq 137 ]]; then
+    kube::node::internal::log_error \
+      "'$1' exceeded its ${seconds}s deadline and was terminated (timeout exited ${rc})." \
+      "This is a stalled network or process rather than a dependency problem: the step was" \
+      "still running, not failing. Check connectivity to the npm registry, then re-run;" \
+      "nothing was recorded, so provisioning will be retried." \
+      "Raise KUBE_NODE_INSTALL_TIMEOUT only if the link is genuinely that slow."
+  fi
+  return "${rc}"
+}
+
 # kube::node::internal::log_error writes an actionable, ERROR:-prefixed message
 # to stderr. On return the message has been written and nothing else has
 # changed; the status is always 0 so callers control their own exit code.
@@ -1165,16 +1250,43 @@ kube::node::internal::ensure_deps_locked() {
   # extra registry calls and printing funding notices into a gate's output.
   # kube::node::exec so that npm - itself a `#!/usr/bin/env node` script - runs under
   # the runtime this library validated rather than whichever node ${PATH} finds first.
-  if ! kube::node::exec "${NPM_BIN}" --prefix "${KUBE_WEB_DIR}" ci --no-audit --no-fund; then
+  #
+  # BOUNDED TWICE OVER. --fetch-timeout and --fetch-retries bound each REQUEST and
+  # give the better diagnostic, so they fire first; the outer timeout(1) ceiling
+  # bounds the WHOLE install, which is the failure npm's per-request timers cannot
+  # catch - a registry that answers every request slowly, or a postinstall lifecycle
+  # script that never returns, keeps npm busy indefinitely without any single
+  # request timing out.
+  #
+  # NESTING ORDER IS LOAD-BEARING: kube::node::exec is the OUTER call and the
+  # bound is applied INSIDE it. timeout(1) is an external program, so it can
+  # only execute an external command - handed the name of the kube::node::exec
+  # shell function it exits 127 "command not found" and npm never runs at all.
+  # This way kube::node::exec establishes the runtime ${PATH} first and timeout
+  # then bounds the real npm binary underneath it, so both properties hold.
+  local npm_rc=0
+  kube::node::exec kube::node::internal::bounded "${KUBE_NODE_INSTALL_TIMEOUT}" \
+    "${NPM_BIN}" --prefix "${KUBE_WEB_DIR}" ci \
+      --no-audit --no-fund \
+      --fetch-timeout "${KUBE_NODE_FETCH_TIMEOUT_MS}" \
+      --fetch-retries "${KUBE_NODE_FETCH_RETRIES}" || npm_rc=$?
+  if [[ "${npm_rc}" -ne 0 ]]; then
     kube::node::internal::log_error \
-      "'${NPM_BIN} --prefix ${KUBE_WEB_DIR} ci' failed, so the React test tier is not provisioned." \
+      "'${NPM_BIN} --prefix ${KUBE_WEB_DIR} ci' failed (exit ${npm_rc}), so the React test tier is not provisioned." \
       "This step needs network access to the npm registry." \
       "If the failure names an out-of-sync lockfile, then ${KUBE_NODE_PACKAGE_LOCK} and ${KUBE_NODE_PACKAGE_JSON} genuinely disagree and must be reconciled and committed; this step will not rewrite the lockfile for you." \
       "Nothing was recorded, so the install will be retried on the next run."
-    # npm can leave a partial tree behind. Keep it out of the working tree, and
-    # leave no stamp calling it good.
+    # npm can leave a partial tree behind - and a TERMINATED npm almost certainly
+    # does, since the ceiling can fire at any point in the extraction. Keep it out
+    # of the working tree either way, because a real in-tree node_modules makes
+    # hack/verify-boilerplate.sh walk 254 packages and fail, and leave no stamp
+    # calling the tree good. `|| true` because this cleanup must not mask the
+    # install failure that caused it.
     kube::node::externalize_modules || true
-    return 1
+    # The EXACT status, not 1: 124/125/137 says the registry stalled, while npm's
+    # own codes say the lockfile and manifest disagree. A caller that saw only 1
+    # could not tell those apart.
+    return "${npm_rc}"
   fi
 
   # npm has just replaced the symlink with a real in-tree directory.

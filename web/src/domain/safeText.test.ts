@@ -55,6 +55,7 @@ import {
   PLAINTEXT_CANARY,
 } from './securityConstants';
 import {
+  KUBERNETES_STATUS_REASONS,
   MAX_SAFE_LABEL_LENGTH,
   MAX_SAFE_PATH_LENGTH,
   MAX_SAFE_PROSE_INPUT_LENGTH,
@@ -64,7 +65,9 @@ import {
   SAFE_OVERSIZED_TEXT,
   SAFE_PROSE_ELISION,
   SAFE_REDACTED,
+  SAFE_UNRECOGNISED_REASON,
   containsCredentialShape,
+  describeStatusReason,
   isSafeAbsolutePath,
   safeLabel,
   safeObservationValue,
@@ -458,5 +461,150 @@ describe('safeProse over the recorded corpus', () => {
     expect(sanitized).not.toContain(RECORDED_TEST_KEY);
     expect(sanitized).toContain(SAFE_REDACTED);
     expect(sanitized).toContain('the provider key is');
+  });
+});
+
+// ---------------------------------------------------------------------------------
+// Section 6 - CWE-200: prose arriving from the control plane
+//
+// AAP §0.4.2.4 / tech-spec §6.6.3.3. LOCKS: an API-server message, reason or detail is
+// attacker-influenced text, so no panel may render it verbatim. Two mechanisms enforce
+// that and this section pins both.
+//
+// WHY THIS SECTION EXISTS AT ALL. The panels previously routed every server string
+// through `safeProse`, which is a DENYLIST: it removes the credential shapes it knows.
+// A denylist is sound only where the value space is open-ended prose. It is the wrong
+// tool for `reason`, whose value space is CLOSED - nineteen constants declared in
+// staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go - because there a denylist
+// leaks anything it fails to recognise while an allowlist leaks nothing at all. The two
+// groups below therefore test two different guarantees, not one guarantee twice.
+// ---------------------------------------------------------------------------------
+
+describe('credential shapes are removed from open-ended prose', () => {
+  // Every vector here reached the DOM unaltered before the fix. Each names the shape
+  // rule that now catches it, so a rule deleted in a future edit fails a named case
+  // rather than silently widening the leak.
+  const VECTORS: ReadonlyArray<readonly [string, string, string]> = [
+    ['bare assignment', 'the request carried password=hunter2 in its body', 'hunter2'],
+    ['colon assignment', 'upstream replied token: abc123def456ghi789', 'abc123def456ghi789'],
+    [
+      'quoted assignment',
+      'the client sent api_key = "sk_live_4eC39HqLyjWDarjtT1zdp7dc"',
+      'sk_live_4eC39HqLyjWDarjtT1zdp7dc',
+    ],
+    [
+      'URI userinfo',
+      'dial postgres://svc:s3cr3tpassword@db.internal:5432/posture failed',
+      's3cr3tpassword',
+    ],
+    ['opaque token run', 'presented identity AKIAIOSFODNN7EXAMPLE', 'AKIAIOSFODNN7EXAMPLE'],
+    ['padded base64', 'authorization header was dGhpc2lzYXNlY3JldHRva2Vu', 'dGhpc2lzYXNlY3JldHRva2Vu'],
+  ];
+
+  it.each(VECTORS)('removes a %s', (_shape, prose, secret) => {
+    const sanitized = safeProse(prose);
+    expect(sanitized).not.toContain(secret);
+    expect(sanitized).toContain(SAFE_REDACTED);
+  });
+
+  it.each(VECTORS)('reports a %s as credential-shaped', (_shape, prose) => {
+    // THE PREDICATE MUST AGREE WITH THE SANITIZER, and this case exists because it once
+    // did not. `safeProse` redacts surgically, but `safeLabel` and
+    // `safeObservationValue` consult this predicate and return the value VERBATIM when
+    // it answers false. So a shape the sanitizer knows and the predicate does not is
+    // not a weaker redaction — it is no redaction at all, through a different entry
+    // point. When the assignment, URI-userinfo and opaque-run rules were first added to
+    // the sanitizer alone, `safeLabel('password=hunter2')` returned its own input.
+    expect(containsCredentialShape(prose)).toBe(true);
+  });
+
+  it.each(VECTORS)('redacts a %s reaching a label or observation value', (_shape, prose, secret) => {
+    // The consequence of the agreement above, asserted at the two entry points that
+    // depend on it, so the guarantee is pinned where it is actually consumed rather
+    // than only on the predicate that happens to implement it.
+    expect(safeLabel(prose)).not.toContain(secret);
+    expect(safeObservationValue(prose)).not.toContain(secret);
+  });
+
+  // CONTROLS. Redaction that swallows legitimate diagnostics is its own outage: the
+  // reader loses the sentence that tells them WHY a control failed. Each of these is a
+  // real string this system emits, taken from the shipped manifests, the Go tests or
+  // the shell generator, and each must survive byte for byte.
+  const PRESERVED: ReadonlyArray<readonly [string, string]> = [
+    ['an admission refusal', 'pods "privileged-pod" is forbidden: violates PodSecurity "baseline:latest"'],
+    ['an etcd client flag', '--etcd-keyfile=/etc/srv/kubernetes/pki/etcd-client.key'],
+    ['a UUID storage prefix', 'a3f05d29-5b83-4e72-9d14-8c60a7be215f'],
+    ['a namespace name', 'psa-enforce-baseline'],
+    ['a Pod Security label', 'pod-security.kubernetes.io/enforce=baseline'],
+    ['a release marker', 'v1.34.0-blitzy'],
+    ['a transport summary', 'mTLS between etcd server and kube-apiserver is required'],
+    ['a not-found message', 'secrets "audit-secret" not found'],
+    ['a scan summary', '12 events scanned in 3400 milliseconds'],
+  ];
+
+  it.each(PRESERVED)('leaves %s untouched', (_what, prose) => {
+    expect(safeProse(prose)).toBe(prose);
+    expect(containsCredentialShape(prose)).toBe(false);
+  });
+
+  it.each(PRESERVED)('still renders %s as a label and an observation value', (_what, prose) => {
+    // THE COST OF WIDENING THE PREDICATE, held down explicitly. Because a true answer
+    // redacts the WHOLE label or value rather than part of it, a rule that is one
+    // character too greedy does not blur a value — it erases a namespace name, a
+    // provider prefix or an audit id that a panel exists to display. Every string here
+    // is one this tier really renders, so an over-broad rule fails a named case.
+    if (prose.length <= MAX_SAFE_VALUE_LENGTH) {
+      expect(safeObservationValue(prose)).toBe(prose);
+    }
+    if (prose.length <= MAX_SAFE_LABEL_LENGTH) {
+      expect(safeLabel(prose)).toBe(prose);
+    }
+  });
+});
+
+describe('describeStatusReason allowlists the closed StatusReason set', () => {
+  it('passes through every reason apimachinery declares', () => {
+    // Transcribed from the authoritative Go constants. A reason dropped from this list
+    // would be silently refused at runtime, which would read to an operator as a broken
+    // server rather than as a missing entry, so the whole set is asserted at once.
+    expect(KUBERNETES_STATUS_REASONS).toContain('Forbidden');
+    expect(KUBERNETES_STATUS_REASONS).toContain('NotFound');
+    expect(KUBERNETES_STATUS_REASONS).toContain('Unauthorized');
+    expect(KUBERNETES_STATUS_REASONS).toHaveLength(19);
+    for (const reason of KUBERNETES_STATUS_REASONS) {
+      expect(describeStatusReason(reason)).toBe(reason);
+    }
+  });
+
+  it('refuses anything outside the set, including credential-free text', () => {
+    // THE POINT OF THE ALLOWLIST. None of these carries a shape any denylist could
+    // detect - `hunter2` is eight ordinary characters - yet all of them are attacker
+    // supplied. Only membership testing keeps them out.
+    for (const hostile of [
+      'hunter2',
+      'Forbidden ',
+      'forbidden',
+      'FORBIDDEN',
+      'Forbidden; token=abc',
+      '-----BEGIN PRIVATE KEY----- abcd -----END PRIVATE KEY-----',
+      'z'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+    ]) {
+      expect(describeStatusReason(hostile)).toBe(SAFE_UNRECOGNISED_REASON);
+    }
+  });
+
+  it('refuses non-string input rather than coercing it', () => {
+    // A malformed body can put any JSON type in `reason`. Coercion would stringify an
+    // object's contents straight into the document, so the type is required exactly.
+    for (const value of [undefined, null, 42, true, {}, ['Forbidden'], { reason: 'Forbidden' }]) {
+      expect(describeStatusReason(value)).toBe(SAFE_UNRECOGNISED_REASON);
+    }
+  });
+
+  it('never emits a marker that could be mistaken for a real reason', () => {
+    // The sentinel has to be visibly not-a-reason, or an operator reading the panel
+    // would treat a refusal as a verdict the server actually sent.
+    expect(KUBERNETES_STATUS_REASONS).not.toContain(SAFE_UNRECOGNISED_REASON);
+    expect(SAFE_UNRECOGNISED_REASON).toContain('[');
   });
 });

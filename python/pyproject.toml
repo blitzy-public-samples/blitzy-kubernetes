@@ -62,9 +62,26 @@
 # in this suite lives in a conftest.py.
 minversion = "9.1.1"
 
-# Resolved relative to rootdir (python/), so this is python/tests.
-# hack/make-rules/test-python.sh passes no path arguments and depends on it.
-testpaths = ["tests"]
+# Resolved relative to rootdir (python/), so the first entry is python/tests.
+# hack/make-rules/test-python.sh passes no path arguments and depends on this.
+#
+# The SECOND entry reaches outside rootdir on purpose. AAP §0.4.3 / §0.5.3 make
+# hack/boilerplate/boilerplate_test.py the one pre-existing Python test this
+# migration adopts, and it owns the only exact-equality assertion over the
+# scanner's expected offender list (its EXPECTED_FAILING_FILES). With
+# testpaths = ["tests"] alone that file was NEVER COLLECTED, so the assertion
+# could not fail and a scanner or fixture regression stayed green - the boundary
+# condition AAP §0.5.5 records, that adding hack/boilerplate/test/fail.ts and
+# fail.tsx changes that expected list, was therefore unenforced.
+#
+# It is listed here rather than duplicated into python/tests/ so the expected
+# list stays single-sourced, and rather than being passed by the runner so that a
+# bare `pytest` from python/ collects exactly what CI collects. The path stays
+# valid because pyproject.toml and hack/ share the repository root as a fixed
+# ancestor. pytest's default `prepend` import mode puts hack/boilerplate on
+# sys.path for it - the directory holds no __init__.py - which is what lets its
+# own `import boilerplate` resolve the checker beside it.
+testpaths = ["tests", "../hack/boilerplate/boilerplate_test.py"]
 
 # Put rootdir on sys.path so `tests.fixtures.*` and `tests.helpers.*` resolve
 # with no install step. python/tests/ deliberately carries no __init__.py -
@@ -231,12 +248,18 @@ source = ["tests"]
 # portable across the runner, CI and a developer checkout.
 relative_files = true
 
-omit = [
-  # Executed as a standalone CLI by hack/make-rules/test-parity.sh, never
-  # imported by a test, so its coverage under pytest would be a meaningless 0%
-  # that drags the reported number away from what the suite actually exercises.
-  "tests/parity/tools/*",
-]
+# NOTHING IS OMITTED. `tests/parity/tools/*` used to be, on the grounds that the
+# baseline generator is "executed as a standalone CLI ... never imported by a
+# test", so measuring it would report a meaningless 0%. That premise no longer
+# holds: `tests/unit/parity/test_generate_baseline_contracts.py` imports the
+# generator directly and exercises its reducer, its domain guards, its builder,
+# its validator and its CLI. Omitting it now would HIDE the coverage of the code
+# that decides whether the parity gate exists at all - the manifest is a gate
+# exactly as wide as the domain that generator records - which is precisely the
+# code AAP §0.7.1.3 puts in its 100 percent line-and-branch category. Coverage
+# remains a reported signal and never a gate: `fail_under` appears nowhere in
+# this file (AAP §0.7.1, §0.9.3), so making the generator visible can inform a
+# reader without being able to fail a build.
 
 [tool.coverage.report]
 # Name the uncovered lines: a percentage tells you nothing actionable.

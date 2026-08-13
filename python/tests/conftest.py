@@ -106,6 +106,7 @@ WHAT THIS FILE DELIBERATELY DOES NOT DO
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import getpass
 import json
@@ -124,7 +125,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -132,6 +133,15 @@ from types import MappingProxyType
 from typing import IO, Any, Final
 
 import pytest
+
+# The writer of the artifact this file reads. Imported for its DOMAIN VALIDATOR and
+# nothing else: `check_committed_domain` is what `generate_baseline.py --check`
+# calls, so reader and writer share one definition of a complete baseline and the
+# measured cardinalities live only in `PACKAGE_EXPECTATIONS`. A second copy here
+# would be a second thing to drift, which is the defect this import removes rather
+# than adds. The module is pure - its argparse and subprocess work all happens
+# inside functions - so importing it costs nothing at collection time.
+from tests.parity.tools.generate_baseline import BaselineError, check_committed_domain
 
 __all__ = [
     "DEFAULT_ETCD_URL",
@@ -369,7 +379,17 @@ _PROBE_TIMEOUT_SECONDS: Final[float] = 1.0
 #: key sits outside every per-run storage prefix, so it can never be mistaken for
 #: an object the apiserver wrote.
 _ETCD_SMOKE_PUT_PATH: Final[str] = "/v3/kv/put"
-_ETCD_SMOKE_PUT_BODY: Final[bytes] = b'{"key": "X3Rlc3Q=", "value": ""}'
+_ETCD_SMOKE_PUT_KEY: Final[str] = "_test"
+
+#: Prefix for the ISOLATED probe key used against a REUSED etcd.
+#:
+#: A borrowed datastore belongs to somebody else, so the shell's shared ``_test``
+#: key is the wrong thing to write there: two concurrent runs, or a developer
+#: watching that key, would see each other. The reuse probe therefore writes
+#: ``<this prefix><run uuid>`` instead, which no other run and no apiserver can
+#: collide with, and which is still outside every per-run STORAGE prefix so it can
+#: never be mistaken for an object the apiserver wrote.
+_ETCD_REUSE_PROBE_KEY_PREFIX: Final[str] = "_blitzy_parity_gateway_probe/"
 
 #: The health endpoint and the value etcd reports when it is serving. Measured
 #: against etcd 3.6.5: ``{"health":"true","reason":""}``. The value is a STRING
@@ -377,6 +397,13 @@ _ETCD_SMOKE_PUT_BODY: Final[bytes] = b'{"key": "X3Rlc3Q=", "value": ""}'
 #: than making this brittle across versions.
 _ETCD_HEALTH_PATH: Final[str] = "/health"
 _ETCD_HEALTH_KEY: Final[str] = "health"
+
+#: The version endpoint and the key carrying the SERVER's version. Measured against
+#: etcd 3.6.5: ``{"etcdserver":"3.6.5","etcdcluster":"3.6.0"}``. ``etcdserver`` is
+#: the one that matters - ``etcdcluster`` is the negotiated cluster protocol version
+#: and is legitimately lower than the binary's own.
+_ETCD_VERSION_PATH: Final[str] = "/version"
+_ETCD_SERVER_VERSION_KEY: Final[str] = "etcdserver"
 
 #: Characters of the etcd log quoted into a startup-failure message. Enough to
 #: carry the reason ("bind: address already in use", a corrupt data dir) without
@@ -394,6 +421,15 @@ _THREAD_NAME_PREFIX: Final[str] = "kube-shared-etcd-"
 #: (test/integration/framework/etcd.go:73), carried over so that a directory left
 #: behind by an interrupted run is identifiable as this harness's.
 _ETCD_DATA_DIR_PREFIX: Final[str] = "integration_test_etcd_data"
+
+#: How many times to reselect a port and respawn when etcd loses the bind race.
+#:
+#: Four, because the failure is independent per attempt and narrow to begin with,
+#: so four attempts reduce an already-rare flake to a negligible one while bounding
+#: the worst case at four spawn attempts rather than an unbounded retry that could
+#: hide a genuine, permanent inability to bind. Only a bind failure is retried -
+#: see :func:`_looks_like_a_port_conflict`.
+_ETCD_PORT_ATTEMPTS: Final[int] = 4
 
 #: The executable this tier means when it says "the API server".
 _APISERVER_BINARY_NAME: Final[str] = "kube-apiserver"
@@ -950,19 +986,41 @@ def _free_port(host: str = DEFAULT_ETCD_HOST) -> int:
     port 0, read the port the kernel assigned, close the socket, then hand the
     number to the process that will really listen on it.
 
-    There is an unavoidable race between closing and re-binding. It is narrow -
-    the kernel does not reissue a just-assigned ephemeral port immediately - and
-    the alternative is worse: hardcoding 2379 would collide with a developer's own
+    There is an inherent race between closing the probe socket and etcd binding the
+    number: any bind-0-then-close technique has one. It is narrow - the kernel does
+    not reissue a just-assigned ephemeral port immediately - and the alternative is
+    worse: hardcoding 2379 would collide with a developer's own
     ``kube::etcd::start`` session, with ``kube::etcd::validate``'s port check, and
-    with every other pytest-xdist worker in the same run. If the race is ever
-    lost, etcd fails to bind and the readiness probe reports it with the bind
-    error quoted from the etcd log, which is a legible failure rather than a
-    silent one.
+    with every other pytest-xdist worker in the same run.
+
+    The race is therefore not avoided but RECOVERED FROM: the caller retries on a
+    fresh port when the bind fails, up to :data:`_ETCD_PORT_ATTEMPTS` times, so a
+    lost race costs a few hundred milliseconds instead of failing the session. That
+    matters most under ``pytest-xdist``, where N workers probing simultaneously is
+    exactly the condition that makes a narrow race start happening - and a flake in
+    the fixture that starts the datastore would be indistinguishable, to whoever
+    reads the CI output, from a real failure of the test that happened to run first.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((host, 0))
         return int(probe.getsockname()[1])
+
+
+def _looks_like_a_port_conflict(log_path: Path) -> bool:
+    """True when etcd's log says it could not bind its port.
+
+    Deliberately NARROW. Retrying is only correct for a lost port race; every other
+    startup failure - a corrupt data directory, a bad flag, a missing shared library
+    - must propagate on the first attempt carrying its original diagnostic, because
+    retrying it would turn one legible error into four identical ones and delay the
+    report by the full readiness timeout each time.
+
+    Matches on the Go runtime's own bind-failure wording, which is what etcd emits
+    through ``net.Listen``.
+    """
+    tail = _read_log_tail(log_path).lower()
+    return "address already in use" in tail or "bind: " in tail
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = _PROBE_TIMEOUT_SECONDS) -> bool:
@@ -1002,8 +1060,101 @@ def _etcd_healthy(url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> bool:
     return health in ("true", True)
 
 
-def _etcd_gateway_writable(url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> str | None:
-    """Write the smoke key through the HTTP v3 gateway; return None on success.
+def _etcd_server_version(url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> str | None:
+    """Return the server version ``<url>/version`` reports, or ``None``.
+
+    Every transport and decoding failure means "cannot tell" and yields ``None``;
+    the caller decides what that costs.
+    """
+    try:
+        with urllib.request.urlopen(f"{url}{_ETCD_VERSION_PATH}", timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    reported = payload.get(_ETCD_SERVER_VERSION_KEY)
+    return reported if isinstance(reported, str) and reported.strip() else None
+
+
+def _etcd_reuse_refusal(url: str, *, probe_key: str = _ETCD_SMOKE_PUT_KEY) -> str | None:
+    """Return why ``url`` may NOT be adopted, or ``None`` when it may.
+
+    "SOMETHING ANSWERS" IS NOT "THE RIGHT THING ANSWERS", and the gap between the
+    two is what this closes. The reuse path previously adopted any listener whose
+    ``/health`` said ``true``, which means a session could silently run its
+    integration assertions against an etcd of any version, reached through an
+    interface that may not serve the requests those assertions depend on. Two
+    concrete consequences, both of which surface far from the cause:
+
+    * VERSION. ``hack/lib/etcd.sh:19`` pins ``ETCD_VERSION`` to 3.6.5 and
+      ``build/dependencies.yaml`` registers that pin, and the SPAWN path in this
+      file already enforces it through :func:`_resolve_etcd_binary`. Letting the
+      reuse path skip it means the same session is version-checked or not depending
+      on whether a developer happened to leave an etcd running - and V3's
+      assertions read raw storage, where a storage-format difference is exactly the
+      kind of thing a pin exists to prevent.
+    * TRANSPORT. ``etcd3gw`` 2.7.0 is an HTTP/JSON client that speaks the gRPC
+      GATEWAY, so V3's raw read needs ``/v3/kv/*`` to be serving. ``/health``
+      answering proves the server is up, not that the gateway is exposed: a listener
+      behind a proxy, or an etcd started with the gateway disabled, passes the health
+      check and fails the first raw read with an error about JSON that says nothing
+      about the real cause. ``kube::etcd::start`` (hack/lib/etcd.sh:93) smoke-writes
+      through that very endpoint for the same reason, and this reuses that check.
+
+    The version floor is the SAME resolution the spawn path uses -
+    ``$ETCD_VERSION`` if set, else :data:`REQUIRED_ETCD_VERSION` - so a reused and a
+    spawned instance are held to one standard rather than two.
+
+    Args:
+        url: The candidate endpoint, already known to be reachable and healthy.
+        probe_key: The key the gateway write uses. A reused datastore belongs to
+            somebody else, so its caller passes an isolated per-run key rather than
+            the shell's shared ``_test`` - see :data:`_ETCD_REUSE_PROBE_KEY_PREFIX`.
+
+    Returns:
+        ``None`` when the endpoint is adoptable, else a reason naming the check that
+        refused it and what the caller can do about it.
+    """
+    required_text = os.environ.get(ENV_ETCD_VERSION, "").strip() or REQUIRED_ETCD_VERSION
+    required = _parse_version_triple(required_text)
+    if required is None:
+        raise _HarnessError(
+            f"{ENV_ETCD_VERSION}={required_text!r} is not a version this gate can compare; "
+            f"hack/lib/etcd.sh:19 defaults it to {REQUIRED_ETCD_VERSION}"
+        )
+
+    reported = _etcd_server_version(url)
+    if reported is None:
+        return (
+            f"{url}{_ETCD_VERSION_PATH} did not report a server version, so the {required_text} "
+            f"floor cannot be checked"
+        )
+    found = _parse_version_triple(reported)
+    if found is None:
+        return f"{url}{_ETCD_VERSION_PATH} reported an unparsable version {reported!r}"
+    if _version_key(found) < _version_key(required):
+        return (
+            f"{url} runs etcd {reported}, below the {required_text} this repository pins "
+            f"(hack/lib/etcd.sh:19, build/dependencies.yaml)"
+        )
+
+    gateway_problem = _etcd_gateway_writable(url, key=probe_key)
+    if gateway_problem is not None:
+        return (
+            f"{url} is healthy and new enough but its HTTP v3 gateway is not usable "
+            f"({gateway_problem}); etcd3gw speaks that gateway, so V3's raw read would fail "
+            f"later with an error that does not name this cause"
+        )
+    return None
+
+
+def _etcd_gateway_writable(
+    url: str,
+    timeout: float = _PROBE_TIMEOUT_SECONDS,
+    key: str = _ETCD_SMOKE_PUT_KEY,
+) -> str | None:
+    """Write ``key`` through the HTTP v3 gateway; return None on success.
 
     This is ``curl -fs -X POST "${URL}/v3/kv/put" -d '{"key": "X3Rlc3Q=", "value":
     ""}'`` from hack/lib/etcd.sh:93, and it earns its place for a reason specific
@@ -1012,12 +1163,26 @@ def _etcd_gateway_writable(url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) ->
     interface V3's raw read depends on is serving. This proves it, once, at
     startup, instead of letting the first raw read discover it.
 
+    ``key`` is a parameter, not a constant, because the two callers write to
+    different datastores. A SPAWNED instance is this session's own, so the shell's
+    shared ``_test`` key is exactly right there. A REUSED instance belongs to
+    somebody else, so that caller passes an isolated per-run key -- see
+    :data:`_ETCD_REUSE_PROBE_KEY_PREFIX`.
+
+    Args:
+        url: The etcd base URL.
+        timeout: Per-attempt budget for this one call.
+        key: The key to write, given as plain text and base64-encoded here
+            because the JSON gateway requires base64 for ``key`` and ``value``.
+
     Returns:
         None when the write succeeded, otherwise a human-readable reason.
     """
+    encoded = base64.b64encode(key.encode("utf-8")).decode("ascii")
+    body = json.dumps({"key": encoded, "value": ""}).encode("utf-8")
     request = urllib.request.Request(
         f"{url}{_ETCD_SMOKE_PUT_PATH}",
-        data=_ETCD_SMOKE_PUT_BODY,
+        data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -1332,42 +1497,94 @@ def _resolve_baseline_path(root: Path) -> Path:
     return root.joinpath(*_BASELINE_RELATIVE_PATH)
 
 
+def _deep_freeze(value: Any) -> Any:
+    """Return ``value`` with every nested container made immutable.
+
+    Mappings become :class:`types.MappingProxyType`, sequences become tuples, and
+    scalars are returned as they are. Applied to the parity baseline because that
+    document is session-scoped shared state: freezing only its outer mapping leaves
+    every verdict row, the ``verdicts`` list itself and the nested ``counts`` maps
+    writable, which is where all the state a test could perturb actually lives.
+
+    Sets are frozen too, for completeness; ``json.loads`` never produces one, so
+    that branch exists so the helper cannot silently pass a mutable container
+    through if it is ever pointed at something other than parsed JSON.
+
+    Recursion depth is bounded by the document's own nesting, which the writer emits
+    at four levels, so no depth guard is needed.
+
+    Args:
+        value: Any parsed-JSON value.
+
+    Returns:
+        An immutable equivalent. Tuples replace lists, so consumers iterate and
+        index exactly as before but cannot append, assign or sort in place.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(value)
+    return value
+
+
 def _load_parity_baseline(path: Path) -> Mapping[str, Any]:
     """Read and structurally sanity-check the baseline manifest.
 
-    THE ASYMMETRY IS THE POINT. An ABSENT manifest is a skip: a fresh checkout has
-    not run the generator yet, and the unit, shell and config tiers must stay
-    runnable there. A manifest that is PRESENT but untrustworthy is a loud
-    failure, because the parity contract's whole value is that it cannot pass
-    vacuously - ``generate_baseline.py`` puts it plainly: a short manifest "does
-    not fail the gate, it EMPTIES it, and an empty gate reports green forever".
-    This function is the second line of that defence; the generator is the first.
+    THERE IS NO SKIP PATH, AND THAT IS THE FIX. An absent manifest used to skip,
+    on the reasoning that a fresh checkout has not run the generator yet - and the
+    consequence was that DELETING the committed baseline turned the parity tier
+    green. The manifest is a COMMITTED repository artifact, not a machine-local
+    tool like the etcd binary: its absence is a statement about the repository, and
+    the one thing this migration cannot tolerate is a gate that reports green
+    because it asserted nothing. ``generate_baseline.py`` puts it plainly: a short
+    manifest "does not fail the gate, it EMPTIES it, and an empty gate reports
+    green forever". Absent, unreadable, unparsable, empty, row-less or NARROW - all
+    six are :class:`_HarnessError`.
 
-    Exactly three structural conditions are checked, and deliberately no more:
-    the document parses, it is a non-empty JSON object, and it carries a non-empty
-    ``verdicts`` list. Everything beyond that - schema version compatibility, the
-    shape of an identity, the counts cross-check, the mapping to ported node ids -
-    belongs to ``tests/parity/conftest.py`` and
-    ``tests/parity/test_parity_contract.py``, which own the index and the
-    contract. Duplicating their logic here would put two answers in the tree.
+    The structural checks here are the cheap ones: the document parses, it is a
+    non-empty JSON object, and it carries a non-empty ``verdicts`` list. The
+    DOMAIN check is then delegated to
+    ``generate_baseline.check_committed_domain``, which is the same function the
+    writer's own ``--check`` gate calls, so the reader and the writer cannot
+    disagree about what a complete baseline is and the measured cardinalities have
+    exactly one home (``PACKAGE_EXPECTATIONS``). Re-typing those numbers here
+    would create a second thing to drift.
 
-    The returned mapping is wrapped in :class:`types.MappingProxyType`: it is
-    session-scoped and shared by every parity test, so read-only at the top level
-    removes the most obvious way one test could perturb another. Nested containers
-    stay mutable - Python offers no cheap deep freeze - so consumers index and
-    copy rather than mutate.
+    What is still NOT done here: indexing. The ``(package, test, subtest)`` index
+    and the completeness, verdict-equality and no-new-failure assertions belong to
+    ``tests/parity/conftest.py`` and ``tests/parity/test_parity_contract.py``.
+    Validating the domain is not indexing it.
+
+    The returned document is DEEPLY frozen by :func:`_deep_freeze`. It is
+    session-scoped and shared by every parity test, and a top-level-only
+    ``MappingProxyType`` froze almost none of what matters: the interesting state is
+    all nested - the ``verdicts`` list, each verdict row, and the ``counts`` and
+    ``by_package`` maps - so ``baseline["verdicts"][0]["action"] = "pass"`` or
+    ``baseline["counts"]["by_package"][pkg]["subtests"] = 0`` would have silently
+    rewritten what every later test in the session compares against. That is the
+    worst class of cross-test interference available here, because it does not
+    crash: it makes the contract agree with a mutated expectation, and under
+    ``pytest-randomly`` it would agree differently on each run. "Consumers index and
+    copy rather than mutate" was a convention, and a convention is not an invariant
+    when the object is shared session state.
 
     Raises:
-        _ArtifactUnavailableError: the file does not exist.
-        _HarnessError: it exists and cannot be trusted.
+        _HarnessError: the file is absent, unreadable, not JSON, empty, carries no
+            verdict rows, or does not describe the complete measured domain.
     """
     if not path.is_file():
-        raise _ArtifactUnavailableError(
-            f"the parity baseline manifest {path} does not exist, so there is no record "
-            "of today's Go verdicts to compare against. Generate it with `make "
-            "test-parity`, or directly with `python/.venv/bin/python "
-            "python/tests/parity/tools/generate_baseline.py`. Set "
-            f"{ENV_PARITY_BASELINE} to read one from another location."
+        raise _HarnessError(
+            f"the parity baseline manifest {path} does not exist, so there is no record of "
+            "today's Go verdicts to compare against - and without it every completeness and "
+            "verdict-equality assertion would be vacuous. This is a COMMITTED artifact, so "
+            "its absence is a repository error rather than a missing local tool: it is "
+            "reported instead of skipped, because skipping would mean deleting the baseline "
+            "turns the parity tier green. Regenerate it by executing the oracle: "
+            "`python/.venv/bin/python python/tests/parity/tools/generate_baseline.py`, or "
+            f"restore it from version control. Set {ENV_PARITY_BASELINE} to read one from "
+            "another location."
         )
     try:
         raw = path.read_text(encoding="utf-8")
@@ -1402,13 +1619,34 @@ def _load_parity_baseline(path: Path) -> Mapping[str, Any]:
             "verdict-equality assertion built on it would be vacuous. Regenerate it "
             "with `make test-parity`."
         )
+    # THE DOMAIN, not just the shape. Non-empty is not the same as complete: a
+    # manifest holding one row is a perfectly well-formed document that asserts
+    # nothing about the 3,104 Go verdicts it omits. The writer's own --check gate
+    # calls this same function, so a baseline this fixture accepts is exactly a
+    # baseline the generator would certify - one definition, one set of measured
+    # numbers, no second copy to drift.
+    try:
+        check_committed_domain(document, source=str(path))
+    except BaselineError as exc:
+        raise _HarnessError(
+            f"the parity baseline manifest {path} does not describe the complete measured "
+            f"parity domain, so the contract built on it would be narrower than the suite it "
+            f"claims to cover: {exc} Regenerate it by executing the oracle rather than "
+            f"narrowing what is expected of it."
+        ) from exc
     logger.info(
         "loaded the parity baseline from %s: %d verdict rows, provenance %r",
         path,
         len(verdicts),
         document.get("provenance", "<unrecorded>"),
     )
-    return MappingProxyType(document)
+    frozen = _deep_freeze(document)
+    if not isinstance(frozen, Mapping):  # pragma: no cover - document is a dict above
+        raise _HarnessError(
+            f"the parity baseline manifest {path} did not survive freezing as a mapping "
+            f"(got {type(frozen).__name__}), which should be impossible here."
+        )
+    return frozen
 
 
 # ---------------------------------------------------------------------------
@@ -1551,6 +1789,22 @@ def shared_etcd(request: pytest.FixtureRequest) -> Iterator[SharedEtcdInstance]:
     idempotent with respect to the developer's environment. The storage prefix is
     still fresh, so adopting a shared datastore cannot make two runs collide.
 
+    AND REUSE IS ADMITTED ON THE SAME EVIDENCE AS A SPAWN, which is the point of
+    the third probe. TCP plus ``/health`` proves only that something is listening
+    and calls itself healthy; the interface this tier actually needs is the HTTP v3
+    GATEWAY, because ``etcd3gw`` speaks nothing else and V3's raw ciphertext read
+    is the one assertion that must bypass the API server. A reverse proxy, an
+    ``etcd grpc-proxy`` without the JSON gateway, a TLS-only listener or an etcd
+    built with ``--enable-grpc-gateway=false`` all answer ``/health`` and then
+    refuse ``/v3/kv/put``, and admitting one of those surfaced the problem much
+    later as "expected exactly one key/value pair, got 0" - a report about
+    encryption for what is really a transport fault. So a reused endpoint must also
+    accept a ``/v3/kv/put``, written to an ISOLATED per-run key because the
+    datastore is somebody else's, and an endpoint that refuses it is not adopted:
+    the fixture falls through and starts a private instance, which is what
+    ``startEtcd``'s own "reuse if usable, otherwise start your own" contract
+    implies.
+
     LAZY, and never autouse: a ``pytest -m "not integration"`` run must not start
     a datastore, and the cheapest way to guarantee that is for nothing in the fast
     tiers to request this fixture. ``etcd_binary`` is resolved through
@@ -1569,22 +1823,62 @@ def shared_etcd(request: pytest.FixtureRequest) -> Iterator[SharedEtcdInstance]:
     configured_url = os.environ.get(ENV_ETCD_URL, "").strip() or DEFAULT_ETCD_URL
     configured_host, configured_port = _split_host_port(configured_url)
 
-    if _tcp_reachable(configured_host, configured_port) and _etcd_healthy(configured_url):
-        logger.info("etcd already running at %s; reusing it with prefix %s", configured_url, prefix)
-        # The Go counterpart returns `func() {}` here. This session did not create
-        # the instance, so it must not stop it and must not delete its data: the
-        # developer's own etcd has to survive the run that borrowed it.
-        yield SharedEtcdInstance(
-            url=configured_url,
-            prefix=prefix,
-            data_dir=None,
-            log_file=None,
-            pid=None,
-            reused=True,
-        )
-        return
+    url_was_requested = bool(os.environ.get(ENV_ETCD_URL, "").strip())
 
-    if os.environ.get(ENV_ETCD_URL, "").strip():
+    if _tcp_reachable(configured_host, configured_port) and _etcd_healthy(configured_url):
+        # HEALTHY IS NECESSARY AND NOT SUFFICIENT. The version floor and the v3
+        # gateway are checked before adoption, so a reused instance is held to the
+        # same standard `_resolve_etcd_binary` holds a spawned one to. See
+        # `_etcd_reuse_refusal` for what each check costs when it is skipped.
+        # THE GATEWAY PROBE USES AN ISOLATED KEY, because the datastore belongs to
+        # somebody else: this writes `_blitzy_parity_gateway_probe/<run uuid>` rather
+        # than the shell's shared `_test`, which no concurrent run and no apiserver can
+        # collide with. Admitting a listener that answers `/health` but does not serve
+        # `/v3/kv/put` meant the failure surfaced later, in the middle of the V3 test, as
+        # "expected exactly one key/value pair, got 0" - a misleading report about
+        # encryption for what is actually a transport problem.
+        probe_key = f"{_ETCD_REUSE_PROBE_KEY_PREFIX}{prefix.split('/', 1)[0]}"
+        refusal = _etcd_reuse_refusal(configured_url, probe_key=probe_key)
+        if refusal is None:
+            logger.info(
+                "etcd already running at %s and usable; reusing it with prefix %s",
+                configured_url,
+                prefix,
+            )
+            # The Go counterpart returns `func() {}` here. This session did not create
+            # the instance, so it must not stop it and must not delete its data: the
+            # developer's own etcd has to survive the run that borrowed it.
+            yield SharedEtcdInstance(
+                url=configured_url,
+                prefix=prefix,
+                data_dir=None,
+                log_file=None,
+                pid=None,
+                reused=True,
+            )
+            return
+
+        # AN EXPLICIT URL IS AN INSTRUCTION, NOT A HINT. When the operator named the
+        # endpoint, quietly spawning a different one would run the suite against
+        # something they did not choose and report green about it. When the endpoint
+        # is merely this file's default, whatever is listening is a coincidence and
+        # falling through to the pinned private binary is the correct repair.
+        if url_was_requested:
+            raise _HarnessError(
+                f"{ENV_ETCD_URL}={configured_url} names an etcd that answers but cannot be "
+                f"used: {refusal}. It is not adopted and no substitute is started, because "
+                f"you asked for this endpoint: running the suite against a different one "
+                f"would report a result about an instance nobody chose. Point "
+                f"{ENV_ETCD_URL} at a conforming etcd, or unset it to let this fixture start "
+                f"the pinned {REQUIRED_ETCD_VERSION} binary itself."
+            )
+        logger.info(
+            "something is listening at the default %s but it cannot be reused (%s); starting "
+            "a private instance instead",
+            configured_url,
+            refusal,
+        )
+    elif url_was_requested:
         logger.info(
             "%s=%s is set but nothing healthy is listening there; starting a private "
             "instance instead, as startEtcd does",
@@ -1600,25 +1894,41 @@ def shared_etcd(request: pytest.FixtureRequest) -> Iterator[SharedEtcdInstance]:
     data_dir = Path(tempfile.mkdtemp(prefix=_ETCD_DATA_DIR_PREFIX))
     try:
         log_path = _etcd_log_path(data_dir)
-        url = f"http://{DEFAULT_ETCD_HOST}:{_free_port()}"
-        process, log_handle = _spawn_etcd(binary, url, data_dir / "data", log_path)
+        # Reselect the port and respawn when - and only when - etcd could not bind.
+        # _free_port cannot close the bind-0 race on its own (nothing can), so the
+        # race is recovered from here instead. Every other startup failure breaks
+        # out on the first attempt with its original diagnostic intact.
+        for attempt in range(1, _ETCD_PORT_ATTEMPTS + 1):
+            url = f"http://{DEFAULT_ETCD_HOST}:{_free_port()}"
+            process, log_handle = _spawn_etcd(binary, url, data_dir / "data", log_path)
+            try:
+                _await_etcd_ready(process, url, log_path)
+            except _HarnessError:
+                # Reap this attempt before deciding, so a half-started etcd never
+                # holds the port into the next one.
+                _terminate_etcd(process)
+                log_handle.close()
+                if attempt == _ETCD_PORT_ATTEMPTS or not _looks_like_a_port_conflict(log_path):
+                    raise
+                logger.warning(
+                    "etcd could not bind %s (attempt %d of %d); reselecting a port and "
+                    "retrying",
+                    url,
+                    attempt,
+                    _ETCD_PORT_ATTEMPTS,
+                )
+                # A fresh data directory for the retry: the previous attempt exited
+                # during startup, and reusing a directory it may have begun writing
+                # would turn a port conflict into a corrupt-datastore failure that
+                # looks nothing like its cause.
+                _remove_data_dir(data_dir / "data")
+                continue
+            break
     except BaseException:
-        # Nothing was started, so there is nothing to reap - but the temp directory
+        # Nothing is running by this point - either the spawn itself failed, or the
+        # loop above reaped the attempt it gave up on - but the temp directory
         # already exists and would otherwise outlive the run. Removing it here is
         # what keeps "the fixture failed" from also meaning "the fixture littered".
-        _remove_data_dir(data_dir)
-        raise
-
-    try:
-        _await_etcd_ready(process, url, log_path)
-    except BaseException:
-        # Startup failed, or the session was interrupted mid-startup. Reap the
-        # child and remove the directory before propagating: _await_etcd_ready has
-        # already quoted the log tail into its message, so nothing diagnostic is
-        # lost by cleaning up, and leaving a half-started etcd holding a port would
-        # poison every later test in the run.
-        _terminate_etcd(process)
-        log_handle.close()
         _remove_data_dir(data_dir)
         raise
 
@@ -1641,11 +1951,31 @@ def shared_etcd(request: pytest.FixtureRequest) -> Iterator[SharedEtcdInstance]:
     try:
         yield instance
     finally:
-        status = _terminate_etcd(process)
-        log_handle.close()
-        released = _wait_for_port_release(instance.host, instance.port)
-        removed = _remove_data_dir(data_dir)
-        leaked_threads = _owned_live_threads()
+        # EVERY cleanup step runs, even when an earlier one raises. Sequentially
+        # chained teardown means the first failure silently cancels the rest: a
+        # _terminate_etcd that threw would leave the log handle open, the port held
+        # and the data directory on disk, and the assertions below - the goleak
+        # substitute - would never be reached to say so. Each step is therefore
+        # attempted independently and its failure recorded, so teardown reports
+        # everything that went wrong rather than only the first thing.
+        teardown_failures: list[str] = []
+
+        def _attempt(label: str, action: Callable[[], Any]) -> Any:
+            """Run one cleanup step, recording rather than propagating its failure."""
+            try:
+                return action()
+            except Exception as exc:
+                teardown_failures.append(f"{label}: {exc!r}")
+                return None
+
+        status = _attempt("terminate etcd", lambda: _terminate_etcd(process))
+        _attempt("close the etcd log handle", log_handle.close)
+        released = _attempt(
+            "wait for the port to be released",
+            lambda: _wait_for_port_release(instance.host, instance.port),
+        )
+        removed = _attempt("remove the etcd data directory", lambda: _remove_data_dir(data_dir))
+        leaked_threads = _attempt("enumerate this fixture's threads", _owned_live_threads) or ()
         logger.info(
             "etcd (pid %d) exited with status %s; port released=%s, data dir removed=%s",
             process.pid,
@@ -1654,11 +1984,17 @@ def shared_etcd(request: pytest.FixtureRequest) -> Iterator[SharedEtcdInstance]:
             removed,
         )
 
+        assert not teardown_failures, (
+            "etcd teardown steps raised, so the session cannot claim it left nothing "
+            f"behind: {teardown_failures}. Every step was still attempted; the "
+            "assertions that follow report which resources are actually leaking."
+        )
+
         # THE goleak SUBSTITUTE (AAP §0.4.1.2: Python has no `-race` and no
         # goleak, so what those tools would have caught is asserted explicitly).
-        # These run after every cleanup step, so a genuine leak is reported and a
-        # merely untidy temp directory is not - _remove_data_dir already logged
-        # that, and failing on it would mask the result of the last test.
+        # These run after every cleanup step precisely so that cleanup completes
+        # first and only then reports - the ordering is what lets an assertion be
+        # both truthful and non-destructive.
         assert status is not None, (
             f"etcd (pid {process.pid}) survived SIGTERM and SIGKILL and was not reaped "
             f"within {_ETCD_TERM_GRACE_SECONDS + _ETCD_KILL_GRACE_SECONDS:.0f}s; the "
@@ -1678,6 +2014,24 @@ def shared_etcd(request: pytest.FixtureRequest) -> Iterator[SharedEtcdInstance]:
             f"{leaked_threads}. This fixture starts none by design - etcd's stderr goes "
             f"to a file rather than being pumped by a reader thread - so a name here "
             f"means a background thread was added without a shutdown path"
+        )
+        # The data directory completes the set. This fixture's INVARIANT LOCKED says
+        # "nothing is left behind - no process, no listening socket, no temporary
+        # directory", and the third clause was the one being computed and thrown
+        # away: `removed` was assigned, logged and never asserted, so the claim was
+        # documented but unenforced. Asserting it costs nothing that the two
+        # assertions above do not already cost - each of them equally reports at the
+        # end of a session - and an unasserted invariant is indistinguishable from
+        # an untrue one. It runs LAST because it is the least consequential of the
+        # three: a leaked directory wastes disk, while a leaked process or port
+        # poisons the next run.
+        assert removed, (
+            f"the etcd data directory {data_dir} was not removed, so this session left a "
+            f"temporary directory behind and its stated invariant does not hold. Each run "
+            f"creates a fresh {_ETCD_DATA_DIR_PREFIX}* directory, so a persistent failure "
+            f"here accumulates one datastore per run until the disk fills - and every "
+            f"leftover is a copy of whatever the integration tier wrote, including "
+            f"encrypted Secret material."
         )
 
 
@@ -1707,15 +2061,28 @@ def parity_baseline(repo_root: Path) -> Mapping[str, Any]:
     give the tree two answers and would violate the rule that a child conftest
     must not need to shadow this one.
 
+    NO SKIP PATH. Every way this can go wrong - the file is absent, unreadable,
+    not JSON, empty, row-less, or narrower than the measured domain - is a LOUD
+    failure. The baseline is a committed artifact, and a fixture that skipped when
+    it was missing meant deleting it turned the parity tier green: precisely the
+    hard gate AAP §§0.4.5 and 0.7 require it to be.
+
     Returns:
-        The manifest as a read-only mapping. Absent file: the test SKIPS. Present
-        but empty, unparsable or carrying no verdict rows: the test FAILS, loudly.
+        The manifest as a DEEPLY read-only mapping - nested rows, lists and count
+        maps included, since it is session-scoped shared state - already checked
+        against the complete measured domain.
+
+    Raises:
+        _HarnessError: the manifest is absent, unreadable, unparsable, empty,
+            carries no verdict rows, or does not describe the complete measured
+            domain. Every one of those FAILS loudly and none of them skips: the
+            manifest is committed, so it is present in any checkout, and a skipped
+            parity gate reads as green to anyone who did not look. Skips here are
+            reserved for genuinely external prerequisites - see ``etcd_binary`` and
+            ``apiserver_binary``, which are statements about the MACHINE rather than
+            about the repository.
     """
-    path = _resolve_baseline_path(repo_root)
-    try:
-        return _load_parity_baseline(path)
-    except _ArtifactUnavailableError as unavailable:
-        pytest.skip(str(unavailable))
+    return _load_parity_baseline(_resolve_baseline_path(repo_root))
 
 
 # ---------------------------------------------------------------------------

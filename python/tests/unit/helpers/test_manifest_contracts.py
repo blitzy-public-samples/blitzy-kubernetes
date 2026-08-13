@@ -180,14 +180,23 @@ def test_teardown_keeps_the_other_contents_of_a_pre_existing_caller_directory(
     Go only ever receives a ``MkdirTemp`` path of its own making, whereas this
     harness accepts ``kube_home=``. Cleaning up after itself is right; removing a
     directory whose other contents it never inspected is not.
+
+    The directory arrives EMPTY -- a non-empty one is refused outright, see
+    :func:`test_a_non_empty_kube_home_is_refused` -- so what teardown must preserve
+    is the directory ITSELF, and what it must remove is every entry the case put
+    inside it. Anything the caller adds while the case is running is preserved too,
+    because it was never recorded as created here.
     """
     home = tmp_path / "caller-owned"
     home.mkdir()
-    keeper = home / "the-callers-own-file.txt"
-    keeper.write_text("must survive teardown", encoding="utf-8")
 
     case = _make_case(repo_root, kube_home=home)
     assert (home / MANIFEST_SOURCES_RELATIVE_PATH[0]).is_dir()
+
+    # Written AFTER construction, so it is something the harness never created and
+    # therefore never tracked -- the case teardown must not touch it.
+    keeper = home / "the-callers-own-file.txt"
+    keeper.write_text("must survive teardown", encoding="utf-8")
 
     case.tear_down()
 
@@ -196,6 +205,69 @@ def test_teardown_keeps_the_other_contents_of_a_pre_existing_caller_directory(
     assert not (home / MANIFEST_SOURCES_RELATIVE_PATH[0]).exists()
     assert not (home / MANIFEST_DESTINATION_RELATIVE_PATH[0]).exists()
     assert not (home / CASE_OWNERSHIP_MARKER).exists()
+
+
+def test_teardown_keeps_the_caller_supplied_root_and_removes_only_what_it_created(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    """A LAYOUT ROOT the caller already had is not evidence that the harness made it.
+
+    THE DATA LOSS THIS LOCKS OUT. The superseded teardown removed ``KUBE_HOME/etc``
+    and ``KUBE_HOME/kube-manifests`` whole, because those are the two layout roots.
+    But a root is not evidence of authorship, so a caller who passed a ``kube_home``
+    it owned had directories deleted that this harness had never created.
+
+    Two independent defences now close that, and this asserts the second of them: a
+    non-empty caller-supplied root is refused outright
+    (:func:`test_a_non_empty_kube_home_is_refused`), AND teardown removes only the
+    entries it recorded creating, leaving the caller's own directory in place. The
+    directory the caller supplied therefore survives while everything the harness
+    brought into existence beneath it - both layout roots and the generator's output
+    inside them - is gone.
+    """
+    home = tmp_path / "caller-owned-empty"
+    home.mkdir()
+
+    case = _make_case(repo_root, kube_home=home)
+    # The harness created both layout roots below the caller's directory.
+    assert (home / Path(*MANIFEST_DESTINATION_RELATIVE_PATH)).is_dir()
+    assert (home / MANIFEST_SOURCES_RELATIVE_PATH[0]).is_dir()
+
+    case.tear_down()
+
+    assert home.is_dir(), "a directory the caller supplied must survive teardown"
+    assert not (home / MANIFEST_DESTINATION_RELATIVE_PATH[0]).exists(), (
+        "the layout roots the harness created must be removed"
+    )
+    assert not (home / MANIFEST_SOURCES_RELATIVE_PATH[0]).exists()
+    assert not (home / CASE_OWNERSHIP_MARKER).exists()
+
+
+def test_a_non_empty_kube_home_is_refused(repo_root: Path, tmp_path: Path) -> None:
+    """An explicit ``kube_home=`` that already holds anything is refused at construction.
+
+    THE HAZARD THIS CLOSES. Teardown removes what the case created; a pre-existing
+    entry would either have to be reasoned about -- which is how a caller's data gets
+    deleted, and the earlier behaviour did exactly that by removing the ``etc/``
+    layout root by name -- or left behind, which reintroduces the isolation hazard the
+    marker exists to prevent. Requiring emptiness removes the question, and costs
+    nothing: every real call site passes ``base_dir=tmp_path`` or a fresh
+    subdirectory.
+    """
+    home = tmp_path / "not-empty"
+    home.mkdir()
+    unrelated = home / MANIFEST_DESTINATION_RELATIVE_PATH[0] / "somebody-elses"
+    unrelated.mkdir(parents=True)
+    precious = unrelated / "keep.txt"
+    precious.write_text("must survive", encoding="utf-8")
+
+    with pytest.raises(ManifestHarnessError, match="is not empty"):
+        _make_case(repo_root, kube_home=home)
+
+    # Nothing was created, and nothing the caller had was disturbed.
+    assert precious.read_text(encoding="utf-8") == "must survive"
+    assert not (home / CASE_OWNERSHIP_MARKER).exists()
+    assert not (home / MANIFEST_SOURCES_RELATIVE_PATH[0]).exists()
 
 
 def test_symlinked_kube_home_is_refused_at_construction(repo_root: Path, tmp_path: Path) -> None:
@@ -251,11 +323,15 @@ def test_teardown_refuses_a_kube_home_replaced_by_a_symlink_mid_test(
 def test_a_kube_home_already_holding_a_case_tree_is_refused(
     repo_root: Path, tmp_path: Path
 ) -> None:
-    """Two cases sharing a KUBE_HOME lets one read what the other left: a pass proving nothing."""
+    """Two cases sharing a KUBE_HOME lets one read what the other left: a pass proving nothing.
+
+    The first case's own tree is what makes the directory non-empty, so the second
+    construction is refused for exactly the reason emptiness is required.
+    """
     home = tmp_path / "shared"
     first = _make_case(repo_root, kube_home=home)
 
-    with pytest.raises(ManifestHarnessError, match="already contains"):
+    with pytest.raises(ManifestHarnessError, match="is not empty"):
         _make_case(repo_root, kube_home=home)
 
     first.tear_down()
@@ -264,11 +340,21 @@ def test_a_kube_home_already_holding_a_case_tree_is_refused(
 def test_failed_setup_removes_only_a_directory_the_harness_created(
     repo_root: Path, tmp_path: Path
 ) -> None:
-    """A constructor failure must leak nothing it created and must not touch what it did not."""
+    """A constructor failure must leak nothing it created and must not touch what it did not.
+
+    ROLLBACK IS UNCONDITIONAL, which is the second half of the ownership fix. It used
+    to run only when the harness had created the KUBE_HOME root, so a failure part
+    way through setting up a CALLER-supplied directory left the ownership marker and
+    a half-built layout behind -- state that then made the directory look like
+    another case's tree to the next construction, and that no teardown would ever
+    remove because no object owned it.
+
+    ``kube_home`` here is a fresh empty directory, which is the only shape an
+    explicit KUBE_HOME may take, so what must survive is the directory itself and
+    what must be gone is every entry the failed constructor created.
+    """
     home = tmp_path / "caller-owned"
     home.mkdir()
-    keeper = home / "keep.txt"
-    keeper.write_text("must survive", encoding="utf-8")
 
     with pytest.raises(ManifestHarnessError):
         ManifestTestCase(
@@ -279,7 +365,17 @@ def test_failed_setup_removes_only_a_directory_the_harness_created(
         )
 
     assert home.is_dir()
-    assert keeper.read_text(encoding="utf-8") == "must survive"
+    # The marker is claimed before the failing copy step, so this is the entry that
+    # used to be left behind.
+    assert not (home / CASE_OWNERSHIP_MARKER).exists()
+    assert not (home / MANIFEST_SOURCES_RELATIVE_PATH[0]).exists()
+    assert not (home / MANIFEST_DESTINATION_RELATIVE_PATH[0]).exists()
+    assert sorted(entry.name for entry in home.iterdir()) == []
+
+    # And because nothing was left behind, the directory is usable again -- which is
+    # the practical consequence of rolling back rather than leaking.
+    case = _make_case(repo_root, kube_home=home)
+    case.tear_down()
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +556,108 @@ def test_validate_pod_document_is_usable_without_a_bash_run() -> None:
 
     with pytest.raises(ManifestHarnessError, match=r"spec\.hostNetwork"):
         validate_pod_document(_pod(spec__hostNetwork="yes"), source="probe")
+
+
+# ---------------------------------------------------------------------------
+# 3b. Kubernetes CUSTOM SCALARS: where the OpenAPI type string is not the decoder
+# ---------------------------------------------------------------------------
+# The generated Python models describe two Kubernetes scalars more loosely than the
+# Go decoder they stand for: `resource.Quantity` is `dict(str, str)` on
+# resources.limits/requests, and `intstr.IntOrString` is `object` on a probe port.
+# Both occur in the shipped manifest, and both are values the generator SUBSTITUTES,
+# so accepting whatever the OpenAPI string allows would let this harness bless a
+# document the API server refuses at boot.
+
+
+@pytest.mark.parametrize(
+    "quantity",
+    ["250m", "1", "0", "1.5", "1.5Gi", "512Mi", "2k", "100n", "1e3", "1E-3", "+2", "-1", ".5", "3."],
+    ids=lambda value: f"accepts-{value}",
+)
+def test_a_valid_quantity_is_accepted(quantity: str) -> None:
+    """Every form ``ParseQuantity`` accepts must pass, or a valid manifest is failed.
+
+    The grammar is <signedNumber><suffix> with suffix drawn from the binary prefixes
+    (Ki..Ei), the decimal ones (n u m k M G T P E) or an e/E exponent -- and the
+    number itself may be written ``3.`` or ``.5``.
+    """
+    validate_pod_document(
+        _pod(spec__containers__0__resources={"requests": {"cpu": quantity}}), source="probe"
+    )
+
+
+@pytest.mark.parametrize(
+    "quantity",
+    ["not-a-quantity", "", "250mm", "1.2.3", "100K", "10Gib", "m", "1 000", "0x10", "1e", True],
+    ids=lambda value: f"rejects-{value!r}",
+)
+def test_an_invalid_quantity_is_rejected(quantity: object) -> None:
+    """A resources value Go would reject must be reported here, naming the field.
+
+    ``cpu: not-a-quantity`` is the case that motivated this: it is "a string", so the
+    OpenAPI walk accepted it while ``resource.Quantity.UnmarshalJSON`` fails the whole
+    document. ``100K`` is included because the decimal suffix is lower-case ``k`` --
+    upper-case ``K`` is not a quantity, and treating it as one would be the same
+    defect in the opposite direction.
+    """
+    with pytest.raises(ManifestHarnessError, match=r"resource\.Quantity|Quantity"):
+        validate_pod_document(
+            _pod(spec__containers__0__resources={"requests": {"cpu": quantity}}), source="probe"
+        )
+
+
+@pytest.mark.parametrize(
+    "port",
+    [443, 8080, "https", "named-port", None, 0, 2147483647],
+    ids=lambda value: f"accepts-{value!r}",
+)
+def test_a_valid_probe_port_is_accepted(port: object) -> None:
+    """``IntOrString`` accepts a quoted name, an int32, or null. All three must pass."""
+    validate_pod_document(
+        _pod(spec__containers__0__livenessProbe__httpGet__port=port), source="probe"
+    )
+
+
+@pytest.mark.parametrize(
+    "port",
+    [True, 1.5, 1.0, 2147483648, -2147483649, [443], {"port": 443}],
+    ids=lambda value: f"rejects-{value!r}",
+)
+def test_an_invalid_probe_port_is_rejected(port: object) -> None:
+    """A probe port Go would reject must be reported, naming the field.
+
+    ``{{secure_port}}`` is substituted by the shipped generator, so a botched
+    substitution really can land a boolean, a fraction or a fragment of JSON here.
+    ``1.0`` is rejected with ``1.5`` because ``encoding/json`` parses an int32 target
+    from the literal text and a decimal point fails there whatever the value is.
+    """
+    with pytest.raises(ManifestHarnessError, match=r"IntOrString|int32"):
+        validate_pod_document(
+            _pod(spec__containers__0__livenessProbe__httpGet__port=port), source="probe"
+        )
+
+
+def test_the_custom_scalar_check_reaches_every_occurrence_not_just_the_first() -> None:
+    """The check is keyed on (model, attribute), so it applies wherever the field appears.
+
+    A readiness probe is validated exactly as a liveness probe is, and a `limits`
+    mapping exactly as `requests`. Keying on a concrete field path would have covered
+    only the places this module happened to look.
+    """
+    with pytest.raises(ManifestHarnessError, match=r"readinessProbe\.httpGet\.port"):
+        validate_pod_document(
+            _pod(
+                spec__containers__0__readinessProbe={
+                    "httpGet": {"scheme": "HTTPS", "host": "127.0.0.1", "port": 1.5, "path": "/"}
+                }
+            ),
+            source="probe",
+        )
+
+    with pytest.raises(ManifestHarnessError, match="limits"):
+        validate_pod_document(
+            _pod(spec__containers__0__resources={"limits": {"memory": "lots"}}), source="probe"
+        )
 
 
 def test_the_real_shipped_pod_manifest_template_is_json_and_locatable(repo_root: Path) -> None:

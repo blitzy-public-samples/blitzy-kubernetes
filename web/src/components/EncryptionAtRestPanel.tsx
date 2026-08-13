@@ -116,7 +116,11 @@ import {
   type EvidenceAbsenceReason,
 } from '../domain/evidence';
 import { V3_ASSERTION_TITLES, V3_OBSERVATIONS } from '../domain/observationIds';
-import { safeLabel, safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeLabel,
+  safeProse,
+} from '../domain/safeText';
 import {
   useLiveRegionRole,
   usePanelLabelId,
@@ -1339,7 +1343,7 @@ function describeFailure(error: ControlStatusError): string {
   if (error.httpStatus === undefined) {
     return `No response was received (${error.kind}). No verdict is available, so nothing is reported as passing.`;
   }
-  const reason = error.reason === undefined ? '' : ` ${safeProse(error.reason)}`;
+  const reason = error.reason === undefined ? '' : ` ${describeStatusReason(error.reason)}`;
   return `HTTP ${String(error.httpStatus)}${reason} (${error.kind}). No verdict is available, so nothing is reported as passing.`;
 }
 

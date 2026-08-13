@@ -63,14 +63,18 @@ limitations under the License.
 
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { HttpResponse, http } from 'msw';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MockInstance } from 'vitest';
 
 import {
   AUDIT_EVENTS_DEFAULT_PAGE_SIZE,
   AUDIT_EVENTS_ENDPOINT,
   AUDIT_EVENTS_QUERY_PARAMS,
+  AUDIT_EVENTS_REQUEST_TIMEOUT_MS,
   AUDIT_LEVEL_ORDER,
   AUDIT_STAGES,
+  MAX_HTTP_STATUS_CODE,
+  MIN_HTTP_STATUS_CODE,
   isConfidentialAuditIdentity,
   resolveAuditResourceIdentity,
   useAuditEvents,
@@ -86,6 +90,12 @@ import {
   SECRET_AUDIT_REQUEST_NAMESPACE,
   secretsRequestAuditEvents,
 } from '../test/fixtures/auditEvents';
+import {
+  AUDIT_EVENTS_QUALIFIED_RESOURCE,
+  internalErrorStatusDocument,
+  kubernetesStatus,
+} from '../test/msw/handlers';
+import type { KubernetesStatus } from '../test/msw/handlers';
 import { server } from '../test/msw/server';
 
 /** A conforming `audit.k8s.io/v1` event for a Secret create, with `overrides` applied. */
@@ -169,24 +179,44 @@ function respondWithText(text: string, status = 200): IssuedQueries {
  * @returns the recorder, newest query last.
  */
 function serveRefusal(status: number): IssuedQueries {
-  const reason = status === 403 ? 'Forbidden' : 'InternalError';
-  return respondWith(
-    {
-      kind: 'Status',
-      apiVersion: 'v1',
-      metadata: {},
-      status: 'Failure',
-      code: status,
-      reason,
-      message:
-        status === 403
-          ? 'events.audit.k8s.io is forbidden: sensitive-resource audit fidelity ' +
-            '(F-006-RQ-003) cannot be reported without the listing'
-          : 'audit event evaluation failed; sensitive-resource audit fidelity ' +
-            '(F-006-RQ-003) is unreported',
-    },
-    status,
-  );
+  return respondWith(refusalBody(status), status);
+}
+
+/**
+ * Composes the refusal document through the SHARED envelope factory.
+ *
+ * WHY THIS DELEGATES RATHER THAN BUILDING THE OBJECT INLINE. This helper used to
+ * assemble the `Status` document itself and emitted no `details` at all, which made
+ * every refusal it served structurally unlike one from an API server:
+ * `apierrors.NewForbidden` sets `Details{Group, Kind, Name}` UNCONDITIONALLY - only
+ * its message branches on an empty `GroupResource` - and `NewInternalError` sets
+ * `Details.Causes` and prefixes its message with `Internal error occurred: `. A
+ * second hand-rolled envelope is also how two specs drift apart while both stay
+ * green, so the tier now has ONE definition of the shape and this spec reads it.
+ *
+ * @param status - 403 or 500, the two recorded refusals.
+ * @returns the `Status` document to serve.
+ */
+function refusalBody(status: number): KubernetesStatus {
+  if (status === 403) {
+    return kubernetesStatus(
+      'Forbidden',
+      status,
+      // The collection-scope branch: `<resource> is forbidden: <detail>`, which is
+      // the form a listing denial takes because it addresses no single object.
+      'events.audit.k8s.io is forbidden: sensitive-resource audit fidelity ' +
+        '(F-006-RQ-003) cannot be reported without the listing',
+      AUDIT_EVENTS_QUALIFIED_RESOURCE,
+      '',
+    );
+  }
+  const detail =
+    'audit event evaluation failed; sensitive-resource audit fidelity ' +
+    '(F-006-RQ-003) is unreported';
+  // `internalErrorStatus` is not reused here because this helper must return the
+  // DOCUMENT for `respondWith` to serve, not an `HttpResponse`; the envelope and
+  // the cause still come from the shared factory, so the shape cannot drift.
+  return internalErrorStatusDocument(detail);
 }
 
 /**
@@ -283,6 +313,40 @@ function gate(): Gate {
   return { open: release, passed };
 }
 
+/**
+ * The `name` of an abort reason, read structurally.
+ *
+ * `instanceof DOMException` is deliberately NOT how this reaches `name`: under the pinned
+ * jsdom the reason the platform attaches to an aborted signal is a `DOMException` created in
+ * a DIFFERENT realm, so `reason instanceof DOMException` is FALSE even though the object is
+ * one. Reading `name` is still reading the NAME rather than the message text, which is what
+ * matters: `AbortError` is the platform contract the hook's own `isAbortError` keys on, while
+ * the message ("This operation was aborted") is implementation-defined and localisable, so a
+ * spec matching it would go red on a jsdom upgrade that reworded it.
+ *
+ * Declared here as well as in the sibling `useControlStatus` spec rather than shared: AAP
+ * §0.5.1 fixes the file map for `web/src/test/`, and a twelve-line reader is not worth a file
+ * the plan does not name. Both copies assert the same platform fact.
+ *
+ * @param reason - `AbortSignal.reason`, whose type the platform leaves open.
+ * @returns the reason's `name` when it has a string one, otherwise its stringification, so a
+ *   failure still shows what was actually there rather than `undefined`.
+ */
+function abortReasonName(reason: unknown): string {
+  if (reason instanceof Error) {
+    return reason.name;
+  }
+  if (
+    typeof reason === 'object' &&
+    reason !== null &&
+    'name' in reason &&
+    typeof reason.name === 'string'
+  ) {
+    return reason.name;
+  }
+  return String(reason);
+}
+
 /** Renders the hook and waits until it leaves `loading`. */
 async function settled(options: Parameters<typeof useAuditEvents>[0] = {}) {
   const rendered = renderHook(() => useAuditEvents(options));
@@ -302,12 +366,62 @@ async function refusedMessage(): Promise<string> {
   return result.current.error?.message ?? '';
 }
 
+/**
+ * The `AbortSignal` the hook handed to `fetch`, one per request, in order.
+ *
+ * Recorded for every test in this file rather than only the abort case, so a case that
+ * SHOULD leave a request un-aborted can say so too. The spy passes straight through to the
+ * real `fetch`, so MSW still serves every request and this observes rather than substitutes:
+ * a spy that answered requests itself would be testing the spy.
+ */
+let observedSignals: AbortSignal[] = [];
+
+/** Everything the code under test wrote to `console.error` during the case. */
+let observedConsoleErrors: string[] = [];
+
+/**
+ * The two spies, held so they can be restored.
+ *
+ * `web/vitest.config.ts` sets `clearMocks`, which empties recorded calls between tests but
+ * deliberately does NOT restore implementations. Leaving the `fetch` spy installed would make
+ * the next test's spy wrap this one instead of the real implementation, and the recorded
+ * signals would then accumulate across tests.
+ */
+let fetchSpy: MockInstance<typeof globalThis.fetch> | undefined;
+let consoleErrorSpy: MockInstance<typeof console.error> | undefined;
+
 beforeEach(() => {
   // A default one-event page, so a test whose subject is not the response body does not
   // have to state one. The recorder this returns is deliberately DISCARDED: a test that
   // asserts on the issued query installs its own handler and keeps that handler's
   // recorder, which is what keeps every observation local to the test that made it.
   respondWith({ items: [auditEvent()] });
+
+  observedSignals = [];
+  observedConsoleErrors = [];
+
+  const realFetch = globalThis.fetch;
+  fetchSpy = vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.signal) {
+        observedSignals.push(init.signal);
+      }
+      return realFetch(input, init);
+    });
+
+  consoleErrorSpy = vi
+    .spyOn(console, 'error')
+    .mockImplementation((...args: readonly unknown[]) => {
+      observedConsoleErrors.push(args.map((arg) => String(arg)).join(' '));
+    });
+});
+
+afterEach(() => {
+  fetchSpy?.mockRestore();
+  fetchSpy = undefined;
+  consoleErrorSpy?.mockRestore();
+  consoleErrorSpy = undefined;
 });
 
 describe('the accepted envelope shapes', () => {
@@ -941,13 +1055,37 @@ describe('an HTTP refusal is never an empty page', () => {
     expect(result.current.error?.message).toBe('auditevents is forbidden');
   });
 
-  it('reports a transport failure with httpStatus 0', async () => {
+  it('reports a transport failure with NO http status at all', async () => {
+    // INVARIANT LOCKED: a request that never produced a response reports the
+    // ABSENCE of a status, not a fabricated one.
+    //
+    // This case previously asserted `httpStatus === 0`, which encoded the defect
+    // rather than the requirement: 0 is not an HTTP status, it put an invented
+    // value in the field that otherwise carries a real one, and it obliged every
+    // consumer to recognise it as a sentinel. ConfidentialityRedaction did exactly
+    // that and any consumer that forgot rendered the literal text "HTTP status 0".
+    // The `kind` discriminant now names the layer that failed and `httpStatus` is
+    // simply absent, which agrees with the sibling hook useControlStatus.
     server.use(http.get(AUDIT_EVENTS_ENDPOINT, () => HttpResponse.error()));
 
     const { result } = await settled();
 
     expect(result.current.status).toBe('error');
-    expect(result.current.error?.httpStatus).toBe(0);
+    expect
+      .soft(result.current.error?.kind, 'no response arrived, so the failure is a network failure')
+      .toBe('network');
+    expect
+      .soft(
+        result.current.error?.httpStatus,
+        'nothing answered, so no status may be reported for it - not even 0',
+      )
+      .toBeUndefined();
+    expect
+      .soft(
+        Object.hasOwn(result.current.error ?? {}, 'httpStatus'),
+        'the key is absent rather than present-and-undefined, so serialising the error cannot reintroduce it',
+      )
+      .toBe(false);
     expect(
       result.current.isEmpty,
       'F-006-RQ-002: a request that never reached the server is not an empty result either',
@@ -2224,7 +2362,21 @@ describe('refresh', () => {
     expect(result.current.events).toHaveLength(1);
   });
 
-  it('does not report an error when an in-flight request is aborted by unmounting', async () => {
+  it('aborts the in-flight request when the consumer unmounts, and reports no error', async () => {
+    // THE ABORT ITSELF IS THE ASSERTION, NOT ITS CONSEQUENCE. Unmounting alone prevents any
+    // further render, so `result.current` stays on its last loading value whether the hook
+    // aborts or not -- which means a spec built only on "no error state appeared" passes
+    // just as happily with the hook's `controller.abort()` deleted. That was MEASURED: with
+    // the abort neutralised, the state assertions below still held. What cannot hold without
+    // it is the signal: the object the hook handed to `fetch` is the object it aborts, so
+    // `signal.aborted` and the platform reason on it are the cancellation, observed directly.
+    //
+    // WHY NOT `request.signal` INSIDE THE MSW HANDLER. Measured under the pinned msw 2.15.0
+    // Node interception: a client abort never reaches a handler that is awaiting, so a test
+    // waiting on that event waits out the 10s testTimeout and proves nothing. Recording the
+    // signal at the `fetch` boundary is the same fact, observed where it is observable, and
+    // it is exactly what the sibling `useControlStatus` spec does.
+    //
     // GATED, NOT TIMED. Holding the response open for a fixed number of milliseconds and
     // then sleeping slightly longer, hoping the order comes out right, is decided by the
     // machine rather than by the test; the order is stated outright here instead, so the
@@ -2243,8 +2395,31 @@ describe('refresh', () => {
     const { result, unmount } = renderHook(() => useAuditEvents());
     expect(result.current.status).toBe('loading');
     observedStatuses.push(result.current.status);
+    expect(observedSignals, 'exactly one request must have been issued').toHaveLength(1);
+    const signal = observedSignals[0];
+    expect(
+      signal?.aborted,
+      'the request must still be in flight before unmounting: an assertion about the abort ' +
+        'is worthless if the signal was already aborted when it was recorded',
+    ).toBe(false);
 
     unmount();
+
+    // SYNCHRONOUSLY after unmount, because the effect's cleanup runs there: this is the
+    // cancellation itself, and it is falsified by removing the hook's `controller.abort()`.
+    expect(
+      signal?.aborted,
+      'F-006-RQ-003: unmounting must ABORT the in-flight audit request. Without it the ' +
+        'response lands on a hook that no longer exists, React logs an update-after-unmount ' +
+        'error, and the request keeps a connection open for a panel nobody is looking at',
+    ).toBe(true);
+    expect(
+      abortReasonName(signal?.reason),
+      'the abort reason must be the platform AbortError, which is the condition the ' +
+        "hook's own isAbortError keys on -- asserted by NAME, never by message text, " +
+        'which is implementation-defined and localisable',
+    ).toBe('AbortError');
+
     // Released only AFTER the unmount, so the response provably arrives at a hook that no
     // longer exists -- which is the situation under test rather than an approximation of it.
     held.open();
@@ -2252,14 +2427,18 @@ describe('refresh', () => {
       expect(answered).toBe(true);
     });
 
-    // The unmounted hook must not have been driven into an error state: the abort is a
-    // cancellation, not a failure. `result.current` still holds the last rendered value, so
-    // asserting on it is meaningful rather than vacuous -- the previous shape asserted
-    // `true === true`, which no defect could ever have falsified.
+    // The consequences, asserted second and labelled as consequences: an abort is a
+    // cancellation, not a failure, so the unmounted hook must not have been driven into an
+    // error state and no stale page may be left behind.
     expect(result.current.status).toBe('loading');
     expect(result.current.error).toBeNull();
     expect(result.current.isEmpty).toBe(false);
+    expect(result.current.events).toEqual([]);
     expect(observedStatuses).toEqual(['loading']);
+    expect(
+      observedConsoleErrors,
+      `no update may land on an unmounted consumer; console.error recorded: ${observedConsoleErrors.join(' | ')}`,
+    ).toEqual([]);
   });
 });
 
@@ -2401,5 +2580,186 @@ describe('resolveAuditResourceIdentity — one validated identity, with uncertai
     );
 
     expect(identity).toMatchObject({ kind: 'resource', resource: 'namespaces' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The elapsed request deadline (finding 1) and the error model (finding B).
+// ---------------------------------------------------------------------------
+
+describe('a request that is never answered ends at its deadline', () => {
+  /**
+   * THE GAP THIS GROUP CLOSES. Every other failure case here settles: the server
+   * refuses, or sends an unreadable body, or the transport fails. None covers the
+   * one an `AbortController` structurally cannot see -- a server that ACCEPTS the
+   * connection and never answers. `fetch` has no default timeout, so this hook
+   * stayed in `loading` for as long as the tab was open, and for a confidentiality
+   * surface that is the worst outcome available: it neither lists events nor says
+   * it could not read them, so "no response bodies were observed" becomes
+   * indistinguishable from "nothing was ever checked".
+   *
+   * The clock is CONTROLLED rather than waited on. 30 real seconds would exceed the
+   * suite's `testTimeout`; `toFake` is limited to the timer functions so promises,
+   * `Date` and msw's own async machinery stay on the real clock.
+   */
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A handler that receives the request and never answers it. */
+  function installNeverAnsweringHandler(): () => void {
+    let release = (): void => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get(AUDIT_EVENTS_ENDPOINT, async () => {
+        await released;
+        return HttpResponse.json({ items: [] });
+      }),
+    );
+    return () => {
+      release();
+    };
+  }
+
+  it('reports a timeout carrying no http status', async () => {
+    const release = installNeverAnsweringHandler();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+    const { result } = renderHook(() => useAuditEvents());
+    expect(result.current.isLoading, 'the request is in flight before the deadline').toBe(true);
+
+    await act(async () => {
+      vi.advanceTimersByTime(AUDIT_EVENTS_REQUEST_TIMEOUT_MS);
+    });
+
+    expect(result.current.status, 'the deadline must resolve the loading state').toBe('error');
+    expect.soft(result.current.error?.kind, 'a deadline is its own kind of failure').toBe('timeout');
+    expect
+      .soft(result.current.error?.httpStatus, 'nothing answered, so no status may be reported')
+      .toBeUndefined();
+    expect
+      .soft(
+        result.current.isEmpty,
+        'F-006-RQ-002: an unanswered request is not an empty page of audit events',
+      )
+      .toBe(false);
+    expect
+      .soft(result.current.events, 'a timed-out read yields no events to inspect')
+      .toEqual([]);
+
+    release();
+  });
+
+  it('does not fire the deadline for a request answered in time', async () => {
+    // CONTROL: a deadline hard-wired to fire would satisfy the case above and still
+    // be wrong. `waitFor` is avoided because it polls on the faked timers.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+    const { result } = renderHook(() => useAuditEvents());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(AUDIT_EVENTS_REQUEST_TIMEOUT_MS * 10);
+    });
+
+    expect(
+      result.current.error?.kind,
+      'a cleared deadline cannot turn a settled request into a timeout',
+    ).not.toBe('timeout');
+  });
+
+  it('treats an unmount before the deadline as no failure at all', async () => {
+    // INVARIANT LOCKED: unmounting is NOT a timeout. Both end the request without a
+    // response and both abort the same controller, so only the flag the deadline
+    // sets before aborting separates them. Conflated, either every unmount reports a
+    // spurious failure or every timeout is silently swallowed - and the swallowed
+    // case is the bug this group exists to prevent.
+    const release = installNeverAnsweringHandler();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+    const { result, unmount } = renderHook(() => useAuditEvents());
+    expect(result.current.isLoading).toBe(true);
+    unmount();
+
+    await act(async () => {
+      vi.advanceTimersByTime(AUDIT_EVENTS_REQUEST_TIMEOUT_MS * 2);
+    });
+
+    expect(
+      result.current.error,
+      'an unmounted consumer receives no committed failure, timeout or otherwise',
+    ).toBeNull();
+
+    release();
+  });
+});
+
+describe('a Status body code is accepted only as a real http status', () => {
+  /**
+   * WHY THIS IS VALIDATION AND NOT DECORATION. `code` comes out of a response body,
+   * which is data the client does not control. The predicate was
+   * `Number.isFinite`, which admits every one of the values below, so a body
+   * claiming `"code": 0` or `"code": 1.5` reached consumers as though a server had
+   * chosen it -- and `code` is rendered. An integer inside the HTTP range is the
+   * only shape the field can legitimately hold.
+   */
+  function respondWithCode(code: unknown): void {
+    server.use(
+      http.get(AUDIT_EVENTS_ENDPOINT, () =>
+        HttpResponse.json({ code, reason: 'Forbidden', message: 'refused' }, { status: 403 }),
+      ),
+    );
+  }
+
+  it.each([
+    { label: 'zero', code: 0 },
+    { label: 'negative', code: -1 },
+    { label: 'a fraction', code: 403.5 },
+    { label: 'below the http range', code: MIN_HTTP_STATUS_CODE - 1 },
+    { label: 'above the http range', code: MAX_HTTP_STATUS_CODE + 1 },
+    { label: 'absurdly large', code: 1e9 },
+    { label: 'a string', code: '403' },
+    { label: 'null', code: null },
+    { label: 'NaN serialised as null', code: Number.NaN },
+  ])('discards $label', async ({ code }) => {
+    respondWithCode(code);
+
+    const { result } = await settled();
+
+    expect(result.current.status, 'a 403 is still an error whatever the body claims').toBe('error');
+    expect
+      .soft(result.current.error?.code, 'a body code outside the http range is not reported at all')
+      .toBeUndefined();
+    // The REAL status still reaches the consumer: rejecting the body's claim must
+    // not cost the transport-level fact, which is what tells a refusal from a bug.
+    expect
+      .soft(result.current.error?.httpStatus, 'the response status is preserved verbatim')
+      .toBe(403);
+    expect.soft(result.current.error?.kind, 'a non-2xx response is an http failure').toBe('http');
+  });
+
+  it.each([
+    { label: 'the lowest valid status', code: MIN_HTTP_STATUS_CODE },
+    { label: 'a Forbidden that agrees with the response', code: 403 },
+    { label: 'a code that disagrees with the response', code: 500 },
+    { label: 'the highest valid status', code: MAX_HTTP_STATUS_CODE },
+  ])('preserves $label', async ({ code }) => {
+    // CONTROL, and the disagreeing case is the point of keeping `code` separate at
+    // all: `code` and the response status are distinct fields on the wire and a
+    // server may set them differently, so a valid code is carried through even when
+    // it contradicts the status rather than being normalised away.
+    respondWithCode(code);
+
+    const { result } = await settled();
+
+    expect(result.current.error?.code, 'a valid http status in the body is reported').toBe(code);
+    expect(result.current.error?.httpStatus, 'and never overwrites the real status').toBe(403);
   });
 });

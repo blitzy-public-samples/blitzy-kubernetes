@@ -147,7 +147,10 @@ import { V4_OBSERVATIONS } from '../domain/observationIds';
 // Only the prose bound is taken from here. This panel keeps its OWN `REDACTED` marker for the
 // credential substitution, so `SAFE_REDACTED` is deliberately not imported: two markers for
 // one meaning would make the rendered output harder to read, not safer.
-import { safeProse } from '../domain/safeText';
+import {
+  describeStatusReason,
+  safeProse,
+} from '../domain/safeText';
 import {
   useLiveRegionRole,
   usePanelLabelId,
@@ -1873,7 +1876,7 @@ function ErrorBody({ error }: { readonly error: ControlStatusError }) {
 
         <dt>Server reason</dt>
         <dd>
-          {error.reason === undefined ? NOT_REPORTED : redactCredentialShapedText(error.reason)}
+          {error.reason === undefined ? NOT_REPORTED : describeStatusReason(error.reason)}
         </dd>
       </dl>
     </div>

@@ -304,6 +304,30 @@ export const AUDIT_EVENTS_ENDPOINT = '/api/posture/audit-events';
 export const AUDIT_EVENTS_DEFAULT_PAGE_SIZE = 50;
 
 /**
+ * Wall-clock ceiling for a single audit-event request, in milliseconds.
+ *
+ * An `AbortController` bounds only what the CONSUMER does — unmount, a changed
+ * filter, a refresh, a page change. It cannot bound what the SERVER does, and
+ * `fetch` carries no default timeout, so a server that accepts the connection and
+ * then never answers leaves this hook in `loading` for as long as the tab is open.
+ * For a confidentiality surface that is the worst available outcome: the panel
+ * neither shows events nor says it failed to read them, and "no response bodies
+ * were observed" is indistinguishable from "nothing was checked".
+ *
+ * Longer than {@link useControlStatus}'s ceiling on purpose. A control-status read
+ * returns eight verdicts; this one returns a page of up to
+ * {@link AUDIT_EVENTS_DEFAULT_PAGE_SIZE} audit events read out of a log, so a
+ * healthy response legitimately takes longer.
+ */
+export const AUDIT_EVENTS_REQUEST_TIMEOUT_MS = 30_000;
+
+/** Message reported when {@link AUDIT_EVENTS_REQUEST_TIMEOUT_MS} elapses. */
+const AUDIT_EVENTS_TIMEOUT_MESSAGE =
+  `The audit-event request did not complete within ${AUDIT_EVENTS_REQUEST_TIMEOUT_MS / 1000}s ` +
+  'and was cancelled. No conclusion about recorded response bodies can be drawn from a read ' +
+  'that never completed. Retry to re-issue the request.';
+
+/**
  * The query-parameter names this hook sends.
  *
  * Exported for the same reason as {@link AUDIT_EVENTS_ENDPOINT}: the MSW
@@ -339,6 +363,30 @@ export const AUDIT_EVENTS_QUERY_PARAMS = {
 export type AuditEventsStatus = 'idle' | 'loading' | 'success' | 'error';
 
 /**
+ * Which layer a failed audit-event query failed at.
+ *
+ * The vocabulary matches {@link useControlStatus}'s `ControlStatusErrorKind`
+ * deliberately: the two hooks front the same API server, and a consumer that
+ * handles one should not have to learn a second spelling for the same four
+ * outcomes.
+ *
+ * - `http` — a response arrived and its status was not a success.
+ * - `payload` — a success response arrived but its body could not be trusted.
+ * - `network` — no response arrived at all (transport, DNS or CORS failure).
+ * - `timeout` — the request was still outstanding when its deadline elapsed.
+ *
+ * The last two carry NO {@link AuditEventsError.httpStatus}, because there was no
+ * response to take one from.
+ */
+export type AuditEventsErrorKind = 'http' | 'network' | 'payload' | 'timeout';
+
+/** Lowest integer the HTTP specification assigns as a status code. */
+export const MIN_HTTP_STATUS_CODE = 100;
+
+/** Highest integer any HTTP status registry assigns, including vendor ranges. */
+export const MAX_HTTP_STATUS_CODE = 599;
+
+/**
  * A failed audit-event query.
  *
  * Invariant locked: a refusal is never representable as a result. A 403 or a
@@ -348,19 +396,35 @@ export type AuditEventsStatus = 'idle' | 'loading' | 'success' | 'error';
  */
 export interface AuditEventsError {
   /**
-   * The HTTP status of the failed response, or `0` when the request never
-   * produced one (a transport or CORS failure, or a body that could not be
-   * parsed at all).
+   * Which layer failed. Narrow on this before reading {@link httpStatus}: it is
+   * the discriminant that says whether a response existed at all.
    */
-  readonly httpStatus: number;
+  readonly kind: AuditEventsErrorKind;
   /** Always populated; falls back to a generated description. */
   readonly message: string;
+  /**
+   * The HTTP status of the failed response, verbatim.
+   *
+   * ABSENT — not zero — for `kind: 'network'` and `kind: 'timeout'`, because no
+   * response and therefore no status ever existed. This field previously carried
+   * a fabricated `0` in those cases, which put an invented value where a real
+   * status goes: `0` is not an HTTP status, consumers had to know to test for it
+   * as a sentinel, and any that did not would render "HTTP status 0". Absence
+   * cannot be misread, and it makes this hook agree with its sibling
+   * {@link useControlStatus}, which already models it this way.
+   */
+  readonly httpStatus?: number;
   /** The `reason` of a Kubernetes `Status` body, e.g. `"Forbidden"`. */
   readonly reason?: string;
   /**
    * The `code` of a Kubernetes `Status` body. Normally equal to
    * {@link httpStatus}, but preserved separately because they are distinct
    * fields on the wire and may disagree.
+   *
+   * Accepted ONLY as an integer in the HTTP status range (see
+   * {@link MIN_HTTP_STATUS_CODE} and {@link MAX_HTTP_STATUS_CODE}). A body is
+   * attacker- or bug-supplied data, so `0`, `-1`, `1.5` and `1e9` are all
+   * discarded rather than surfaced as if a server had chosen them.
    */
   readonly code?: number;
 }
@@ -1335,19 +1399,25 @@ async function readErrorFromResponse(response: Response): Promise<AuditEventsErr
   try {
     body = await response.json();
   } catch {
-    return { httpStatus: response.status, message: fallbackMessage };
+    // Still `http`, not `payload`: the failing thing is the non-2xx STATUS, which
+    // arrived and is reported. An unreadable body on an error response only costs
+    // the server's own words, so the fallback message stands in for them.
+    return { kind: 'http', httpStatus: response.status, message: fallbackMessage };
   }
 
   if (!isRecord(body)) {
-    return { httpStatus: response.status, message: fallbackMessage };
+    return { kind: 'http', httpStatus: response.status, message: fallbackMessage };
   }
 
   const failure: {
+    kind: AuditEventsErrorKind;
     httpStatus: number;
     message: string;
     reason?: string;
     code?: number;
   } = {
+    // A response arrived and its status was not a success: that is exactly `http`.
+    kind: 'http',
     httpStatus: response.status,
     message:
       typeof body.message === 'string' && body.message.length > 0
@@ -1357,10 +1427,35 @@ async function readErrorFromResponse(response: Response): Promise<AuditEventsErr
   if (typeof body.reason === 'string' && body.reason.length > 0) {
     failure.reason = body.reason;
   }
-  if (typeof body.code === 'number' && Number.isFinite(body.code)) {
+  // `Number.isFinite` was too weak: it admits 0, negatives and fractions, so a
+  // body claiming `"code": 0` or `"code": 1.5` was surfaced as though a server had
+  // chosen it, and a consumer rendering `code` would print a value no HTTP
+  // registry defines. A response body is untrusted input; an integer inside the
+  // status range is the only shape this field can legitimately hold.
+  if (isHttpStatusCode(body.code)) {
     failure.code = body.code;
   }
   return failure;
+}
+
+/**
+ * Narrows an unknown body field to a usable HTTP status code.
+ *
+ * Integer-and-in-range rather than merely numeric, because the three ways this
+ * field goes wrong in practice are all finite numbers: `0` from a client that
+ * fabricates a sentinel, a fraction from a bad serialiser, and an out-of-range
+ * value from a field that was never a status at all.
+ *
+ * @param value - the raw `code` member of a decoded response body.
+ * @returns true when `value` is an integer in `[100, 599]`.
+ */
+function isHttpStatusCode(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_HTTP_STATUS_CODE &&
+    value <= MAX_HTTP_STATUS_CODE
+  );
 }
 
 /**
@@ -1598,8 +1693,26 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
 
     const controller = new AbortController();
     const { signal } = controller;
+    // Set by the deadline BEFORE it aborts, because the abort signal alone cannot
+    // say WHY the request ended without a response. A consumer cancellation must
+    // leave the state untouched -- the effect that superseded it owns the state --
+    // while a deadline must report a failure. Conflating them is what leaves this
+    // hook in `loading` forever when a server accepts and never answers.
+    let timedOut = false;
 
     setState({ status: 'loading', events: [], error: null });
+
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      // Flag first, then abort: the flag decides what is reported, the abort
+      // releases the socket and stops any response being parsed.
+      controller.abort();
+      setState({
+        status: 'error',
+        events: [],
+        error: { kind: 'timeout', message: AUDIT_EVENTS_TIMEOUT_MESSAGE },
+      });
+    }, AUDIT_EVENTS_REQUEST_TIMEOUT_MS);
 
     const run = async (): Promise<void> => {
       try {
@@ -1650,6 +1763,8 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
             status: 'error',
             events: [],
             error: {
+              // A 2xx arrived; the body is what could not be trusted.
+              kind: 'payload',
               httpStatus: response.status,
               message: 'audit event response body was not valid JSON',
             },
@@ -1666,6 +1781,7 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
             status: 'error',
             events: [],
             error: {
+              kind: 'payload',
               httpStatus: response.status,
               message:
                 `audit event response is unusable: ${parsed.problem}. The page is refused ` +
@@ -1682,6 +1798,7 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
             status: 'error',
             events: [],
             error: {
+              kind: 'payload',
               httpStatus: response.status,
               message:
                 `audit event pagination is incoherent: ${incoherent}. The page is refused ` +
@@ -1707,16 +1824,31 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
           loadedPage: page,
         });
       } catch (cause) {
-        // A cancelled request is not a failure and must leave the state alone:
-        // the effect that superseded it owns the state now.
+        if (timedOut) {
+          // The deadline has already reported the timeout. The abort it raised
+          // surfaces here as an AbortError; re-reporting it as a transport failure
+          // would replace an accurate diagnosis with a vaguer one.
+          return;
+        }
+        // A CONSUMER-cancelled request is not a failure and must leave the state
+        // alone: the effect that superseded it owns the state now.
         if (signal.aborted || isAbortError(cause)) {
           return;
         }
         setState({
           status: 'error',
           events: [],
-          error: { httpStatus: 0, message: describeTransportFailure(cause) },
+          // NO httpStatus. Nothing answered, so there is no status to report; this
+          // used to fabricate `0`, which is not an HTTP status and which every
+          // consumer then had to recognise as a sentinel.
+          error: { kind: 'network', message: describeTransportFailure(cause) },
         });
+      } finally {
+        // Deterministic on every path -- success, HTTP error, payload error,
+        // transport error, consumer abort, and the timeout itself. A timer that
+        // outlived its request would fire against a LATER one, so it is cleared
+        // here as well as in the cleanup below rather than only there.
+        clearTimeout(deadline);
       }
     };
 
@@ -1724,6 +1856,7 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
 
     // Runs on unmount and before every superseding request.
     return () => {
+      clearTimeout(deadline);
       controller.abort();
     };
   }, [enabled, requestUrl, refreshToken]);

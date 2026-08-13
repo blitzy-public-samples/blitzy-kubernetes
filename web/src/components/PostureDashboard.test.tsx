@@ -1216,4 +1216,3 @@ describe('PostureDashboard — the corrected per-control resolvers reach the agg
     expect(visibleControlIds(container)).toContain('V1');
   });
 });
-

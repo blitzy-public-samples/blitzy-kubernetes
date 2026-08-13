@@ -411,11 +411,23 @@ def _validated_budget(timeout: float) -> float:
         The budget, unchanged, when it is acceptable.
 
     Raises:
-        RawEtcdError: If the budget is not a positive finite number, or exceeds
-            :data:`DEFAULT_SCAN_TIMEOUT_SECONDS`.
+        RawEtcdError: If the budget is not a number at all, is not a positive
+            finite number, or exceeds :data:`DEFAULT_SCAN_TIMEOUT_SECONDS`.
     """
     __tracebackhide__ = True
-    budget = float(timeout)
+    # THE COERCION IS GUARDED, because it is the first thing a caller's value
+    # touches. `float(None)`, `float("30s")` and `float([30])` raise TypeError or
+    # ValueError, and every one of those escaped this module as itself - so a
+    # helper documented to raise only RawEtcdError leaked two other exception types
+    # from its very first line, and the failure named neither the parameter nor the
+    # bound it was being checked against.
+    try:
+        budget = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise RawEtcdError(
+            f"{_RQ}: scan timeout must be a number of seconds, got {timeout!r} "
+            f"({type(timeout).__name__}): {exc}."
+        ) from exc
     # Rejects NaN as well: every comparison with NaN is false, so `budget > 0` is
     # false for it and it is caught by the first branch rather than slipping
     # through into a request timeout that never fires.
@@ -644,6 +656,7 @@ class RawEtcdKV:
         self._client = client
         self._endpoint = endpoint
         self._closed = False
+        self._close_error: BaseException | None = None
 
     @property
     def endpoint(self) -> str:
@@ -656,9 +669,21 @@ class RawEtcdKV:
 
         Exposed so that a teardown assertion - the tier's substitute for
         ``goleak``, which has no Python analogue - can prove the connection was
-        released rather than assume it.
+        released rather than assume it. False after a FAILED close, because a
+        session that is still open is not closed however hard it was asked to be:
+        see :meth:`close` and :attr:`close_error`.
         """
         return self._closed
+
+    @property
+    def close_error(self) -> BaseException | None:
+        """The exception the last :meth:`close` attempt raised, or ``None``.
+
+        Retained rather than discarded so a teardown assertion can report WHY the
+        session is still open, and cleared on a subsequent successful close so a
+        retry that works leaves no stale evidence of a failure that no longer holds.
+        """
+        return self._close_error
 
     def scan_prefix(
         self,
@@ -768,8 +793,30 @@ class RawEtcdKV:
         # etcd3gw hands back (value, metadata) - THE VALUE FIRST - with the key
         # base64-decoded into metadata["key"] and the value popped out of that
         # mapping. Both halves are already bytes; nothing is re-encoded here, and
-        # the list comprehension preserves the order etcd chose.
-        return [EtcdKeyValue(key=metadata["key"], value=value) for value, metadata in raw]
+        # the loop preserves the order etcd chose.
+        #
+        # THE PROJECTION IS GUARDED, because the rows are WIRE DATA. A gateway that
+        # answered 200 with a body this shape does not fit - a proxy's own JSON, a
+        # future etcd that renames `key`, a truncated response - produced a bare
+        # KeyError, TypeError or unpacking ValueError from a comprehension, none of
+        # which is the RawEtcdError this method documents and none of which says
+        # which row was malformed. V3's verdict turns on this read, so an
+        # unrecognisable response has to be reported as one.
+        entries: list[EtcdKeyValue] = []
+        for index, row in enumerate(raw):
+            try:
+                value, metadata = row
+                key = metadata["key"]
+            except (TypeError, ValueError, KeyError, IndexError) as exc:
+                raise RawEtcdError(
+                    f"{_RQ}: the raw etcd prefix scan for {prefix!r} at {self._endpoint} "
+                    f"returned a row this reader does not recognise at index {index}: "
+                    f"{type(exc).__name__}: {exc}. etcd3gw yields (value, metadata) pairs "
+                    f"whose metadata carries a decoded 'key'; a different shape means the "
+                    f"endpoint is not an etcd v3 gateway, or its response was truncated."
+                ) from exc
+            entries.append(EtcdKeyValue(key=key, value=value))
+        return entries
 
     def close(self) -> None:
         """Release the HTTP session. Idempotent, and the port of ``defer Close()``.
@@ -789,14 +836,38 @@ class RawEtcdKV:
 
         Idempotent because a caller may close explicitly and still leave the
         context manager, and because ``contextlib.closing`` around a
-        directly-constructed reader would otherwise double-close. The flag is set
-        before the session is touched, so a second call is a no-op even if the
-        first one failed partway.
+        directly-constructed reader would otherwise double-close.
+
+        THE FLAG IS SET ONLY AFTER THE SESSION IS ACTUALLY CLOSED. Setting it first
+        made a FAILED close indistinguishable from a successful one: the reader was
+        marked closed, every later call returned immediately, and the socket and
+        file descriptor the close was supposed to release stayed open with nothing
+        left that could release them. Since there is no goleak analogue here, a
+        leaked socket has no other detector, so the failure is reported and the
+        reader stays open for a retry. :attr:`close_error` retains it either way.
+
+        Raises:
+            RawEtcdError: If the session could not be closed. The reader remains
+                UNCLOSED so that a caller may retry, and reads continue to be
+                permitted, because a reader whose socket is still open is still
+                usable.
         """
         if self._closed:
             return
+        try:
+            self._client.session.close()
+        except Exception as exc:
+            self._close_error = exc
+            raise RawEtcdError(
+                f"{_RQ}: failed to release the HTTP session for {self._endpoint}: "
+                f"{type(exc).__name__}: {exc}. The reader is left OPEN so the close can be "
+                "retried; until it succeeds the pooled socket and its file descriptor are "
+                "still held, and this tier has no goleak analogue to catch that later "
+                "(test/integration/secrets/encryption_test.go:120 closes the raw client "
+                "precisely to avoid the equivalent leak in Go)."
+            ) from exc
+        self._close_error = None
         self._closed = True
-        self._client.session.close()
 
     def _remaining(self, started: float, budget: float, prefix: str) -> float:
         """Return the budget left, refusing to proceed once it is gone.
@@ -995,4 +1066,3 @@ def read_prefix(
         client_key=client_key,
     ) as reader:
         return reader.scan_prefix(key_prefix, timeout=timeout)
-

@@ -46,6 +46,7 @@ import {
   SAFE_PROSE_ELISION,
   SAFE_REDACTED,
   safeProse,
+  SAFE_UNRECOGNISED_REASON,
 } from '../domain/safeText';
 import type { ControlObservation, ControlStatus } from '../hooks/useControlStatus';
 import {
@@ -638,6 +639,43 @@ describe('RbacWildcardPanel — external prose is bounded and redacted', () => {
     // `kind` and `httpStatus` are this tier's own typed values, so both still render.
     expect(screen.getByText('403')).toBeInTheDocument();
     expect(screen.getByText('http')).toBeInTheDocument();
+  });
+
+  it('allowlists the server reason, refusing one no shape rule could catch', () => {
+    // THE CASE THE SANITIZER CANNOT COVER. `reason` is not open-ended prose: it is one of
+    // nineteen constants declared in apimachinery/pkg/apis/meta/v1/types.go. The test
+    // above proves a TOKEN-SHAPED reason is removed, but shape rules only remove what
+    // they recognise, and `hunter2` is eight ordinary characters. Membership testing is
+    // what closes that, so this case asserts the refusal directly.
+    // The reason renders in the panel's definition list rather than inside the live
+    // region, so the whole subtree is the honest scope for a leak assertion.
+    const { container } = renderWithProviders(
+      <RbacWildcardPanel
+        result={{
+          status: 'error',
+          error: { kind: 'http', message: 'the request was refused', httpStatus: 403, reason: 'hunter2' },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+    expect(container.textContent ?? '').not.toContain('hunter2');
+    expect(container).toHaveTextContent(SAFE_UNRECOGNISED_REASON);
+  });
+
+  it('renders a genuine Kubernetes reason unchanged', () => {
+    // CONTROL: the allowlist must not blank the field for real values, or the panel loses
+    // the token that separates a deliberate refusal from a broken server.
+    const { container } = renderWithProviders(
+      <RbacWildcardPanel
+        result={{
+          status: 'error',
+          error: { kind: 'http', message: 'the request was refused', httpStatus: 403, reason: 'Forbidden' },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+    expect(container).toHaveTextContent('Forbidden');
+    expect(container.textContent ?? '').not.toContain(SAFE_UNRECOGNISED_REASON);
   });
 
   it('bounds the observedAt timestamp channel', () => {

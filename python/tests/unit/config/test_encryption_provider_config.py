@@ -343,6 +343,81 @@ _BASE64_BLOB_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9+/]{40,}=
 #: nothing goes unexamined.
 _ENTROPY_SCAN_MIN_LENGTH: Final[int] = 20
 
+# ---------------------------------------------------------------------------
+# Raw-artefact credential scan (F-003-RQ-003, the COMMENT blind spot)
+# ---------------------------------------------------------------------------
+# Everything above walks the PARSED document, which is the right way to assert
+# structure - and is blind to exactly one thing: a YAML comment. The parser
+# discards comments, so key material pasted into one is invisible to every leaf,
+# shape and entropy check in this module. The artefact ships with a large
+# commented-out alternative provider block (lines 54-59), which is precisely
+# where a hurried operator would paste a real key "just to try it".
+#
+# WHAT THIS SCAN IS NOT. It does not grep the raw text for `cachesize`, `aesgcm`,
+# `secret:` or `<BASE64_32_BYTE_KEY>`. Those four tokens are legitimately present
+# in that comment block, so a token scan would fail against the artefact exactly
+# as shipped and correct - which is why the structural checks above exist. This
+# scan looks for the SHAPE of a credential instead, which is orthogonal: no
+# amount of explanatory prose about a key looks like a key.
+#
+# CALIBRATED AGAINST THE SHIPPED FILE, not assumed. Measured: the artefact
+# contains exactly three base64-alphabet tokens of 20+ characters
+# (`/etc/srv/kubernetes/encryption`, `cluster/gce/gci/configure`,
+# `EncryptionConfiguration`), whose worst entropy is 3.644 against a 4.0 ceiling
+# - a comfortable margin, and zero false positives today.
+#
+# THE ALPHABET RESTRICTION IS LOAD-BEARING. Applying the leaf-value entropy
+# ceiling to raw WHITESPACE-delimited tokens produces three false positives,
+# because file paths mix many distinct characters and score above 4.0
+# (`/etc/srv/kubernetes/encryption-provider-config.yml` measures 4.201). Real
+# base64 key material cannot contain `.`, `-`, `_`, `<` or `:`, so restricting
+# the token alphabet to base64's own excludes paths and dotted identifiers
+# structurally rather than by a fudged threshold.
+#
+# EVERY RULE BELOW IS LOAD-BEARING - verified by measuring each against
+# representative credentials, where each is caught by exactly one rule:
+#   * a random 32-byte base64 key (44 chars)      -> blob shape only
+#   * the AES-GCM 16-byte test key (24 chars)     -> entropy only (4.054); too
+#     short for the 40-character blob pattern
+#   * a 32-character hex digest                   -> hex rule only (entropy 3.640)
+#   * a PEM header                                -> PEM rule only (entropy 0.000)
+#   * a JWT                                       -> JWT rule only
+
+#: A PEM armour header of any type - private keys, certificates, EC parameters.
+_PEM_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(r"-----BEGIN [A-Z0-9 ]*-----")
+
+#: A JWT: the `eyJ` signature of a base64url-encoded `{"` header, then at least
+#: one dot-separated base64url segment. Catches ServiceAccount tokens, which are
+#: the credential most likely to be pasted into a Kubernetes config by mistake.
+_JWT_PATTERN: Final[re.Pattern[str]] = re.compile(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}")
+
+#: 32+ hex characters: a digest, a hex-encoded key, or an IV. Deliberately
+#: separate from the entropy rule, which a hex string evades - a 32-character hex
+#: digest measures only 3.640 bits per character because its alphabet is 16 wide.
+_HEX_BLOB_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-fA-F]{32,}")
+
+#: Candidate credential tokens in raw text: runs drawn purely from base64's
+#: alphabet, with optional padding. See the alphabet-restriction note above.
+_RAW_CREDENTIAL_TOKEN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"[A-Za-z0-9+/]{{{_ENTROPY_SCAN_MIN_LENGTH},}}={{0,2}}"
+)
+
+#: The two documented placeholders, excised before scanning. NARROW BY DESIGN: an
+#: allow-list is how a credential scan gets quietly disabled, so it holds exactly
+#: these two literals, both of which the module already asserts positively
+#: elsewhere (the endpoint by equality, the key field by absence).
+#:
+#: Honest note: neither is flagged by any rule above as they stand -
+#: `<BASE64_32_BYTE_KEY>` contains `<`, `>` and `_`, and `unix:///tmp/kms.socket`
+#: contains `.` and `:`, so both fall outside the token alphabet. The excision is
+#: therefore defensive rather than currently load-bearing: it keeps a future rule
+#: from flagging the very placeholders this template is designed to ship, without
+#: widening what is tolerated today.
+_RAW_SCAN_ALLOWED_PLACEHOLDERS: Final[tuple[str, ...]] = (
+    "<BASE64_32_BYTE_KEY>",
+    "unix:///tmp/kms.socket",
+)
+
 #: The Shannon-entropy ceiling, in bits per character, for a scanned string.
 #:
 #: Measured against the artefact and against real key material rather than chosen
@@ -389,6 +464,79 @@ _MAX_PERMITTED_ENTROPY_BITS_PER_CHAR: Final[float] = 4.0
 def _manifest_path(repo_root: Path) -> Path:
     """Absolute path of the committed EncryptionConfiguration template."""
     return repo_root.joinpath(*_MANIFEST_RELATIVE_PATH)
+
+
+def _raw_manifest_text(repo_root: Path) -> str:
+    """The committed template as raw text, comments and all.
+
+    Deliberately NOT routed through :func:`_load_manifest`: the whole purpose is to
+    see what the YAML parser throws away.
+
+    Aborts rather than accumulating a finding when the file cannot be read, for the
+    same reason as :func:`_load_manifest` - there is then no artefact to make a
+    statement about.
+    """
+    __tracebackhide__ = True
+
+    path = _manifest_path(repo_root)
+    assert path.is_file(), (
+        f"SETUP: {path} is not a file, so the raw-artefact credential scan has nothing "
+        f"to examine."
+    )
+    return path.read_text(encoding="utf-8")
+
+
+def _scan_raw_for_credential_material(text: str) -> dict[str, list[str]]:
+    """Find credential-SHAPED material in raw text, by rule.
+
+    The documented placeholders are excised first, then each rule is applied to
+    what remains. Results are keyed by rule so a failure names WHICH shape was
+    found - a PEM block and a high-entropy token are different incidents needing
+    different responses.
+
+    Args:
+        text: The raw artefact text, comments included.
+
+    Returns:
+        A mapping from rule name to the matching evidence, in first-seen order.
+        A rule with no findings is absent from the mapping, so an empty mapping
+        means the artefact is clean.
+    """
+    scanned = text
+    for placeholder in _RAW_SCAN_ALLOWED_PLACEHOLDERS:
+        scanned = scanned.replace(placeholder, " ")
+
+    findings: dict[str, list[str]] = {}
+
+    def record(rule: str, evidence: str) -> None:
+        bucket = findings.setdefault(rule, [])
+        if evidence not in bucket:
+            bucket.append(evidence)
+
+    for match in _PEM_BLOCK_PATTERN.finditer(scanned):
+        record("pem-block", match.group(0))
+    for match in _JWT_PATTERN.finditer(scanned):
+        record("jwt", match.group(0)[:32] + "...")
+    for match in _HEX_BLOB_PATTERN.finditer(scanned):
+        record("hex-blob", match.group(0))
+
+    for match in _RAW_CREDENTIAL_TOKEN_PATTERN.finditer(scanned):
+        token = match.group(0)
+        if _BASE64_BLOB_PATTERN.fullmatch(token) is not None:
+            record("base64-blob-shape", token)
+            continue
+        entropy = _shannon_entropy_bits_per_char(token)
+        if entropy >= _MAX_PERMITTED_ENTROPY_BITS_PER_CHAR:
+            record("high-entropy-token", f"{token} ({entropy:.3f} bits/char)")
+
+    for label, literal in (
+        ("aesgcm-ciphertext-prefix", AESGCM_PREFIX),
+        ("plaintext-canary", PLAINTEXT_CANARY),
+    ):
+        if literal in scanned:
+            record(label, literal)
+
+    return findings
 
 
 def _load_manifest(repo_root: Path) -> Mapping[str, Any]:
@@ -1035,4 +1183,74 @@ def test_no_real_key_material_committed(repo_root: Path, subtests: pytest.Subtes
                 "one in a committed deployment template means runtime state or test "
                 "fixtures have leaked into a shipped artefact."
             )
+
+
+def test_raw_artefact_carries_no_credential_shaped_material(
+    repo_root: Path, subtests: pytest.Subtests
+) -> None:
+    """INVARIANT: no credential-SHAPED material anywhere in the raw file, comments included.
+
+    INVARIANT LOCKED: F-003-RQ-003 over the bytes actually committed, closing the one
+    blind spot every other check in this module shares. They all walk the PARSED
+    document, and the YAML parser discards comments - so key material pasted into a
+    comment is invisible to the leaf scan, the blob-shape scan, the entropy scan and
+    the exact-key-set closure alike. It would be committed, reviewed, and pass.
+
+    That is not a hypothetical location. The artefact ships a commented-out
+    alternative static-key provider block at lines 54-59 showing exactly where a key
+    would go, complete with a `secret:` field and a placeholder - which is precisely
+    where a hurried operator pastes a real key to try it, and precisely what this
+    test refuses.
+
+    HOW IT AVOIDS FAILING AGAINST THE CORRECT ARTEFACT. It does not grep for
+    `cachesize`, `aesgcm`, `secret:` or `<BASE64_32_BYTE_KEY>`; all four are
+    legitimately present in that comment block, which is why the checks above are
+    structural. This test asserts on credential SHAPE instead - an orthogonal
+    property, because explanatory prose about a key does not look like a key. See
+    ``_scan_raw_for_credential_material`` for the five rules, the measured
+    calibration against this file (worst legitimate token 3.644 bits/char against a
+    4.0 ceiling) and the evidence that each rule catches a credential form no other
+    rule does.
+
+    ACCUMULATE semantics: one subtest per rule plus a whole-file assertion, so a file
+    carrying two different credential shapes reports both rather than only the first.
+    """
+    raw = _raw_manifest_text(repo_root)
+
+    # A guard against a VACUOUS scan, the same failure mode the parsed scan guards:
+    # an empty read would satisfy every rule below while examining nothing.
+    assert raw.strip(), (
+        f"SETUP: {'/'.join(_MANIFEST_RELATIVE_PATH)} read as empty, so the credential "
+        f"scan below would pass without examining anything."
+    )
+
+    findings = _scan_raw_for_credential_material(raw)
+
+    for rule in (
+        "pem-block",
+        "jwt",
+        "hex-blob",
+        "base64-blob-shape",
+        "high-entropy-token",
+        "aesgcm-ciphertext-prefix",
+        "plaintext-canary",
+    ):
+        with subtests.test(check="raw-credential-scan", rule=rule):
+            assert rule not in findings, (
+                f"F-003-RQ-003: the committed template carries material matching the "
+                f"{rule!r} rule: {findings[rule]!r}. Key material is supplied out-of-band "
+                f"through the base64 ENCRYPTION_PROVIDER_CONFIG environment variable and is "
+                f"NEVER committed - including inside a comment, which every other check in "
+                f"this module is blind to. Remove it and rotate it: anything committed to "
+                f"this repository must be treated as disclosed."
+            )
+
+    # The whole-file assertion, so a NEW rule added to the scanner cannot be silently
+    # ignored by the fixed rule list above.
+    assert findings == {}, (
+        f"F-003-RQ-003: the raw credential scan reported findings under rule(s) "
+        f"{sorted(findings)}, which the per-rule subtests above do not all enumerate. "
+        f"Findings: {findings!r}. Add the new rule to the list above so it is reported "
+        f"individually."
+    )
 

@@ -405,6 +405,158 @@ for arg; do
   fi
 done
 
+# kube::test::python::flag_name echoes the bare name of the pytest option $1:
+# --collect-only=yes -> collect-only, -V -> V, --co -> co. Both the `=value` form
+# and the leading dashes are stripped BEFORE any decision is taken, because a
+# check keyed on the literal spelling has that many trivial bypasses.
+kube::test::python::flag_name() {
+  local stripped=${1#-}
+  stripped=${stripped#-}
+  echo "${stripped%%=*}"
+}
+
+# kube::test::python::reject_forbidden_args refuses any caller-supplied pytest
+# option that would let this gate SUCCEED WITHOUT RUNNING THE TESTS, remove a
+# protection the tier depends on, or wait for input forever. On return either
+# every argument is permitted, or an actionable message has been written and the
+# status is non-zero.
+#
+# WHY A GATE NEEDS THIS AT ALL. Everything else in this script protects against a
+# suite that has been deleted or mis-targeted - the exit-5 handling, the tier
+# check, the marker guards. None of them can see an argument that stops pytest
+# from executing in the first place: `--collect-only` walks the whole tier,
+# reports every test it found, and exits 0 having run nothing. To a Makefile, to
+# CI, and to a reader of the log summary, that is a pass. The same is true of
+# `--fixtures`, `--markers`, `--version` and `--help`, each of which prints
+# something and exits 0.
+#
+# THREE OTHER CLASSES, each a different way to end up with a green gate:
+#   * PROTECTION REMOVAL. `-p no:timeout` disables pytest-timeout and `-p
+#     no:randomly` disables pytest-randomly. AAP §0.4.1.2 records that Python has
+#     no `-race` and no goleak analogue, so order randomisation, worker isolation
+#     and the per-test timeout ARE the substitutes; switching one off silently
+#     lowers the tier's guarantees below the Go suite's. `--timeout=0` is the same
+#     act by another spelling: in pytest-timeout, 0 means NO timeout.
+#   * WAITING FOREVER. `-f`/`--looponfail` re-runs on file changes and never
+#     returns, which in CI is a job that consumes its whole allowance in silence.
+#   * SILENT SUBTRACTION. `--continue-on-collection-errors` turns a module that
+#     failed to IMPORT into a skipped line rather than a failure, so a syntax
+#     error in a test file becomes a smaller green run. `--ignore`, `--ignore-glob`
+#     and `--deselect` subtract with no positive counterpart at all.
+#
+# WHAT IS DELIBERATELY STILL ALLOWED, and why the line sits there. `-k` and `-m`
+# narrow the run, but they are this runner's DOCUMENTED selection mechanism (`-m`
+# has a first-class KUBE_PYTHON_TEST_MARKERS entry point) and a selection that
+# matches nothing already fails through pytest's exit 5, which this script treats
+# as a failure and refuses to excuse whenever a target or marker was named. `-x`
+# stops at the first failure, which can only make the gate stricter: the exit
+# status is still non-zero. `--ignore` differs from both because it removes tests
+# while leaving the rest green, with nothing to report that anything was removed.
+kube::test::python::reject_forbidden_args() {
+  local arg name reason
+  local expecting_plugin_value=""
+
+  for arg in "$@"; do
+    # `-p no:<plugin>` in every spelling pytest accepts: separated (-p no:timeout),
+    # joined (-pno:timeout) and long (--plugin... pytest has no long form, but the
+    # `=` form -p=no:timeout is accepted by argparse-style parsers).
+    if [[ -n "${expecting_plugin_value}" ]]; then
+      expecting_plugin_value=""
+      if [[ "${arg}" == no:* ]]; then
+        kube::test::python::reject_plugin_disable "-p ${arg}" "${arg#no:}" || return 1
+      fi
+      continue
+    fi
+    if [[ "${arg}" == "-p" || "${arg}" == "--plugins" ]]; then
+      expecting_plugin_value=1
+      continue
+    fi
+    if [[ "${arg}" == -p=no:* ]]; then
+      kube::test::python::reject_plugin_disable "${arg}" "${arg#-p=no:}" || return 1
+      continue
+    fi
+    if [[ "${arg}" == -pno:* ]]; then
+      kube::test::python::reject_plugin_disable "${arg}" "${arg#-pno:}" || return 1
+      continue
+    fi
+
+    name=$(kube::test::python::flag_name "${arg}")
+    reason=""
+    case "${name}" in
+      collect-only|co)
+        reason="it walks the tier and exits 0 HAVING RUN NOTHING, which every caller of this script reads as a pass" ;;
+      fixtures|fixtures-per-test|funcargs|markers|version|V|help|h)
+        reason="it prints information and exits 0 without executing a single test, which every caller of this script reads as a pass" ;;
+      looponfail|f)
+        reason="it watches for file changes and never returns, so in CI it consumes the whole wall-clock allowance in silence" ;;
+      continue-on-collection-errors)
+        reason="it turns a module that failed to IMPORT into a skipped line rather than a failure, so a syntax error in a test file becomes a smaller GREEN run" ;;
+      ignore|ignore-glob|deselect)
+        reason="it removes tests while leaving the remainder green and reports nothing about the removal; narrow the run with a target, -k or -m instead, all of which fail through pytest's exit 5 when they match nothing" ;;
+      timeout)
+        # A numeric value of 0 or less means NO per-test timeout. The value may be
+        # joined or, for the separated form, arrive as the next token - handled by
+        # the numeric branch below, which sees a bare number.
+        if [[ "${arg}" == *=* ]]; then
+          local value=${arg#*=}
+          if [[ "${value}" =~ ^-?([0-9]+)(\.[0-9]+)?$ ]] && (( $(printf '%.0f' "${value}") <= 0 )); then
+            reason="a --timeout of ${value} means NO per-test timeout in pytest-timeout, and that timeout is one of this tier's substitutes for Go's -race and goleak (AAP §0.4.1.2)"
+          fi
+        fi
+        ;;
+    esac
+
+    if [[ -n "${reason}" ]]; then
+      kube::log::usage \
+        "ERROR: refusing the pytest argument '${arg}': ${reason}." \
+        "This gate exists to prove the Python tier RAN and PASSED, so an argument that can" \
+        "produce a zero exit status without that being true is rejected before pytest starts." \
+        "Nothing was run. Remove the argument, or use a target, -k or -m to narrow the run."
+      return 1
+    fi
+  done
+
+  if [[ -n "${expecting_plugin_value}" ]]; then
+    kube::log::usage \
+      "ERROR: the pytest argument '-p' expects a plugin name and none followed it." \
+      "It would consume whatever pytest saw next, which here is a test target. Nothing was run."
+    return 1
+  fi
+  return 0
+}
+
+# kube::test::python::reject_plugin_disable refuses `-p no:<plugin>` for the
+# plugins this tier's guarantees rest on. Others are permitted: disabling, say,
+# `cacheprovider` changes nothing about whether the tests ran or what they proved.
+kube::test::python::reject_plugin_disable() {
+  local spelling=${1} plugin=${2}
+  local reason=""
+  case "${plugin}" in
+    timeout)
+      reason="pytest-timeout is what turns a hung test into a reported FAILURE; without it a hang is a wedged job" ;;
+    randomly)
+      reason="pytest-randomly proves order independence, which AAP §0.4.1.2 names as one of this tier's deliberate substitutes for Go's -race" ;;
+    xdist)
+      reason="pytest-xdist proves parallel safety, the other named substitute for -race; disable it with KUBE_PYTHON_TEST_WORKERS=0, which keeps the plugin loaded and the run serial" ;;
+    subtests)
+      reason="pytest 9's subtests are how this suite reproduces Go's t.Errorf accumulate-and-continue semantics (AAP §0.4.1.2); without the plugin every accumulating assertion is lost" ;;
+  esac
+  if [[ -n "${reason}" ]]; then
+    kube::log::usage \
+      "ERROR: refusing the pytest argument '${spelling}': ${reason}." \
+      "Nothing was run. This gate may not be asked to prove less than the Go suite it replaces."
+    return 1
+  fi
+  return 0
+}
+
+# Validate BOTH sources of caller arguments together - KUBE_PYTEST_ARGS and the
+# positional ones are already merged into pytestargs above, so a forbidden flag
+# cannot be smuggled in through whichever channel was checked less carefully.
+if [[ ${#pytestargs[@]} -gt 0 ]]; then
+  kube::test::python::reject_forbidden_args "${pytestargs[@]}" || exit 1
+fi
+
 # kube::test::python::cover_report_dir echoes the directory the coverage report
 # belongs in, without creating it. On return a non-empty path has been printed.
 # An unset KUBE_PYTHON_COVER_REPORT_DIR yields a semi-predictable temporary
@@ -514,9 +666,6 @@ runTests() {
   # a plain pytest run. pytest-randomly stays enabled either way: with no -race
   # and no goleak analogue in Python, order randomisation and worker isolation
   # ARE the substitutes (AAP §0.4.1.2), so this script never disables them.
-  # pytest-timeout, configured in python/pyproject.toml, turns a hang into a
-  # failure - which is why no outer timeout(1) wrapper is used here: it would
-  # kill the run before that failure could be reported.
   local -a worker_args=()
   if [[ "${KUBE_PYTHON_TEST_WORKERS}" != "0" ]]; then
     worker_args+=("-n" "${KUBE_PYTHON_TEST_WORKERS}")
@@ -530,7 +679,64 @@ runTests() {
   # system install.
   kube::python::install
 
+  # THE OUTER CEILING, and it is a SECOND bound rather than a replacement for
+  # pytest-timeout. The two catch different things and neither subsumes the other:
+  #
+  #   * pytest-timeout (timeout = 300 in python/pyproject.toml) bounds ONE TEST and
+  #     reports the hang as a FAILURE with a traceback naming the test - by far the
+  #     more useful diagnostic, which is why it must always fire first.
+  #   * This ceiling bounds THE WHOLE INVOCATION, and exists only for the hangs
+  #     pytest-timeout structurally cannot see: a wedge during collection or plugin
+  #     load, before any test starts; a hang inside a session- or module-scoped
+  #     fixture, which is not "a test"; a subprocess a test spawned that outlived
+  #     it and still holds the output pipe (this tier spawns bash, and the
+  #     integration tier spawns etcd and an API server); and pytest itself failing
+  #     to enforce its own alarm.
+  #
+  # Sized generously - 3 times the per-test bound times the marker-independent
+  # worst case, floored at an hour - so that on any ordinary slow run the per-test
+  # timeout has long since reported the failure. Overridable for a genuinely
+  # slower machine; refused if set to something that is not a positive integer,
+  # because "0" would mean NO ceiling in timeout(1) and that is the one value a
+  # caller must not be able to smuggle in.
+  local ceiling=${KUBE_PYTHON_TEST_CEILING_SECONDS:-3600}
+  if [[ ! "${ceiling}" =~ ^[1-9][0-9]*$ ]]; then
+    kube::log::usage \
+      "ERROR: KUBE_PYTHON_TEST_CEILING_SECONDS='${ceiling}' is not a positive integer." \
+      "0 or empty would mean NO outer ceiling at all, which is exactly what this bound exists" \
+      "to prevent. Nothing was run. Pass a whole number of seconds."
+    return 1
+  fi
+
+  # timeout(1) is coreutils and is present wherever this repository's other
+  # make-rules run; if it genuinely is not, the run proceeds UNWRAPPED with a loud
+  # warning rather than failing, because losing the ceiling must not mean losing
+  # the gate. --kill-after escalates to SIGKILL for a pytest that ignores SIGTERM,
+  # and --signal=TERM is explicit so a future coreutils default cannot change it.
+  local -a ceiling_cmd=()
+  if command -v timeout >/dev/null 2>&1; then
+    ceiling_cmd=(timeout --signal=TERM --kill-after=30s "${ceiling}s")
+  else
+    kube::log::status \
+      "WARNING: timeout(1) was not found, so this run has NO outer ceiling." \
+      "A wedge during collection, in a session-scoped fixture, or in a subprocess that" \
+      "outlived its test would hang this gate rather than failing it. Install coreutils."
+  fi
+
+  # Wall-clock start, so that "the ceiling fired" is decided by ELAPSED TIME and
+  # not by an exit code alone. MEASURED REASON: timeout(1) is not one program.
+  # GNU coreutils returns 124 when it times out; the uutils Rust reimplementation
+  # shipped as coreutils-from-uutils on Ubuntu 25.10 - which is what /usr/bin/
+  # timeout is here - returns 124 for a plain invocation but 125 whenever
+  # --kill-after is given. 125 in GNU means "timeout itself could not run the
+  # command", so treating it as a ceiling hit unconditionally would misreport a
+  # genuine setup failure as a hang. Requiring the elapsed time to have reached the
+  # ceiling as well removes the ambiguity in both directions and needs no
+  # per-implementation special case.
+  local ceiling_started_at=${SECONDS}
+
   local -a pytest_cmd=(
+    "${ceiling_cmd[@]:+${ceiling_cmd[@]}}"
     "${KUBE_PYTHON_VENV_BIN}/python" -m pytest
     "${color_args[@]:+${color_args[@]}}"
     "${marker_args[@]:+${marker_args[@]}}"
@@ -552,6 +758,38 @@ runTests() {
   kube::util::run-in "${KUBE_PYTHON_DIR}" \
       kube::log::run "${pytest_cmd[@]}" \
     && rc=$? || rc=$?
+
+  # DID THE CEILING FIRE? Two conditions, both required. The exit status must be
+  # one timeout(1) uses for a termination - 124 (GNU), 125 (uutils with
+  # --kill-after) or 137 (128+SIGKILL, seen when the escalation runs) - AND the run
+  # must actually have lasted the ceiling. The elapsed check is what makes this
+  # correct on both implementations without special-casing either, and it is what
+  # keeps a genuine "timeout could not exec the command" (also 125 in GNU, and
+  # instantaneous) from being misreported as a hang.
+  #
+  # Named explicitly because "the Python tier exited 124" tells a CI reader nothing
+  # and the number is easily mistaken for a pytest status - pytest's own codes stop
+  # at 5. The message is the diagnostic that survives: this script returns ${rc},
+  # but hack/lib/logging.sh:46 installs a repository-wide `trap kube::log::errexit
+  # ERR` whose handler exits 1, so EVERY make-rule reports 1 to the caller
+  # regardless of the code it returned. That is the repository's convention and is
+  # not changed here - which is precisely why the reason has to be in the log rather
+  # than encoded in the status.
+  local elapsed=$(( SECONDS - ceiling_started_at ))
+  if [[ ${#ceiling_cmd[@]} -gt 0 ]] \
+      && { [[ "${rc}" -eq 124 ]] || [[ "${rc}" -eq 125 ]] || [[ "${rc}" -eq 137 ]]; } \
+      && [[ "${elapsed}" -ge "${ceiling}" ]]; then
+    kube::log::usage \
+      "ERROR: the Python tier exceeded its outer ceiling of ${ceiling}s (ran for ${elapsed}s)" \
+      "and was terminated by timeout(1), which exited ${rc}." \
+      "pytest-timeout bounds an individual TEST and should have failed first, so reaching this" \
+      "bound means the wedge is somewhere it cannot see: collection or plugin load, a session-" \
+      "or module-scoped fixture, or a subprocess that outlived the test that spawned it (this" \
+      "tier spawns bash, and the integration tier spawns etcd and an API server)." \
+      "Re-run the suspected module with -p no:xdist and --log-cli-level=DEBUG to locate it." \
+      "Raise KUBE_PYTHON_TEST_CEILING_SECONDS only once you are satisfied the run is merely slow."
+    return "${rc}"
+  fi
 
   # pytest exit code 5 is EXIT_NOTESTSCOLLECTED - "no tests ran".
   #
@@ -605,7 +843,7 @@ runTests() {
       elif [[ -n "${KUBE_PYTEST_ARGS:-}" ]]; then
         kube::log::usage \
           "KUBE_PYTEST_ARGS was set (${KUBE_PYTEST_ARGS}), so this run made a deliberate selection that matched nothing." \
-          "A -k expression or a --deselect that selects no test is the same class of mistake as a mistyped target," \
+          "A -k or -m expression that selects no test is the same class of mistake as a mistyped target," \
           "and the empty-tier exemption is deliberately withheld from it."
       else
         kube::log::usage \

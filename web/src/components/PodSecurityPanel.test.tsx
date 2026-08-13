@@ -54,6 +54,7 @@ import {
   MAX_SAFE_PROSE_INPUT_LENGTH,
   SAFE_OVERSIZED_TEXT,
   SAFE_REDACTED,
+  SAFE_UNRECOGNISED_REASON,
 } from '../domain/safeText';
 import type { ControlObservation, ControlStatus } from '../hooks/useControlStatus';
 import {
@@ -848,6 +849,38 @@ describe('external prose is bounded and redacted', () => {
     // `kind` and `httpStatus` are this tier's own typed values, so both still render.
     expect(alert).toHaveTextContent('Status endpoint failure kind: http');
     expect(alert).toHaveTextContent(`Status endpoint response code: ${String(FORBIDDEN_STATUS)}`);
+  });
+
+  it('allowlists the server reason, refusing one no shape rule could catch', () => {
+    // See RbacWildcardPanel for the reasoning: `reason` has a closed value space, so it is
+    // matched against apimachinery's nineteen constants rather than scanned for credential
+    // shapes. `hunter2` carries no shape at all and must still be refused.
+    renderWithProviders(
+      <PodSecurityPanel
+        result={{
+          status: 'error',
+          error: { kind: 'http', message: 'the request was refused', httpStatus: FORBIDDEN_STATUS, reason: 'hunter2' },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent ?? '').not.toContain('hunter2');
+    expect(alert).toHaveTextContent(SAFE_UNRECOGNISED_REASON);
+  });
+
+  it('renders a genuine Kubernetes reason unchanged', () => {
+    renderWithProviders(
+      <PodSecurityPanel
+        result={{
+          status: 'error',
+          error: { kind: 'http', message: 'the request was refused', httpStatus: FORBIDDEN_STATUS, reason: 'Forbidden' },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Status endpoint response reason: Forbidden');
   });
 
   it('bounds a requirement identifier supplied by the server', () => {

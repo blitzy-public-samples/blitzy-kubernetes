@@ -58,6 +58,7 @@ import {
   MAX_SAFE_PROSE_INPUT_LENGTH,
   SAFE_OVERSIZED_TEXT,
   SAFE_REDACTED,
+  SAFE_UNRECOGNISED_REASON,
 } from '../domain/safeText';
 import type { ControlObservation, ControlStatus } from '../hooks/useControlStatus';
 import {
@@ -1184,6 +1185,45 @@ describe('TokenHygienePanel — external prose is bounded, not only credential-r
     expect(container).toHaveTextContent('The token was rejected.');
   });
 
+  it('allowlists the server reason, refusing one no shape rule could catch', () => {
+    // `reason` has a CLOSED value space — apimachinery's nineteen `StatusReason`
+    // constants — so it is matched against that set rather than scanned for credential
+    // shapes. That is what catches `hunter2`: eight ordinary characters carry no PEM
+    // armour, no dotted JWT structure and no base64 padding, so every shape rule in the
+    // sanitizer passes them straight through. Note this also refuses the bidi-suffixed
+    // `InternalError\u202D` in the case above, which is a strictly stronger outcome than
+    // stripping the override and rendering the rest.
+    const { container } = renderWithProviders(
+      <TokenHygienePanel
+        result={{
+          status: 'error',
+          error: { ...SERVER_ERROR_CONTROL_STATUS_ERROR, reason: 'hunter2' },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(container.textContent ?? '').not.toContain('hunter2');
+    expect(container).toHaveTextContent(SAFE_UNRECOGNISED_REASON);
+  });
+
+  it('renders a genuine Kubernetes reason unchanged', () => {
+    // CONTROL: allowlisting must not blank the field for real values, or an operator
+    // loses the token that separates a deliberate refusal from a broken server.
+    const { container } = renderWithProviders(
+      <TokenHygienePanel
+        result={{
+          status: 'error',
+          error: { ...SERVER_ERROR_CONTROL_STATUS_ERROR, reason: 'InternalError' },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(container).toHaveTextContent('InternalError');
+    expect(container.textContent ?? '').not.toContain(SAFE_UNRECOGNISED_REASON);
+  });
+
   it('collapses control characters out of a summary and a detail', () => {
     const { container } = renderWithProviders(
       <TokenHygienePanel
@@ -1246,4 +1286,3 @@ describe('TokenHygienePanel — external prose is bounded, not only credential-r
     expect(container).toHaveTextContent(SAFE_OVERSIZED_TEXT);
   });
 });
-

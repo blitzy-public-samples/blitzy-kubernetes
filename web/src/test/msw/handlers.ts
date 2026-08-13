@@ -171,13 +171,56 @@ export type KubernetesStatusReason =
  * carries it -- an absent `group` and a core-group `group` are different
  * claims, so the empty string is preserved rather than omitted.
  */
+export interface KubernetesStatusCause {
+  /**
+   * The machine-readable cause, `StatusCause.Type` in Go.
+   *
+   * NAMED `reason` BECAUSE THAT IS THE WIRE NAME: the Go field is `Type` but its
+   * tag is `json:"reason,omitempty"`
+   * (`staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go`). Following the Go
+   * identifier here would produce a member no API server ever sends.
+   */
+  readonly reason?: string;
+  /** Human-readable description of this single cause. */
+  readonly message?: string;
+  /** The field path this cause is about, for validation failures. */
+  readonly field?: string;
+}
+
+/**
+ * `Status.details`, with the same optionality the wire has.
+ *
+ * EVERY MEMBER IS OPTIONAL, and that is transcribed rather than chosen: all six
+ * fields of Go's `StatusDetails` carry `omitempty`, so an empty `group` or `name`
+ * is ABSENT from the JSON rather than present as `""`. Declaring them required
+ * made this mock serialise `"group": "", "name": ""` on every 403 and 404 — a body
+ * the real API server never sends. A consumer could then pass against members that
+ * exist only here and lose them against a live server, which is the precise
+ * failure mode a contract mock exists to prevent.
+ *
+ * `uid` and `retryAfterSeconds` are declared for completeness of the contract even
+ * though no factory below sets them, so a future handler that needs one does not
+ * have to widen the type and can be checked against it.
+ */
 export interface KubernetesStatusDetails {
-  /** API group of the failing resource; `''` for the core group. */
-  readonly group: string;
+  /** Name of the failing object. Absent when the request addressed a collection. */
+  readonly name?: string;
+  /** API group of the failing resource. Absent for the core group. */
+  readonly group?: string;
   /** Plural resource name, e.g. `pods`, `nodes`, `secrets`. */
-  readonly kind: string;
-  /** Name of the failing object; `''` when the request addressed a collection. */
-  readonly name: string;
+  readonly kind?: string;
+  /** UID of the failing object, when the server identified one. */
+  readonly uid?: string;
+  /**
+   * The individual causes of the failure.
+   *
+   * This is how `apierrors.NewInternalError` records what went wrong — it sets
+   * `Causes: []StatusCause{{Message: err.Error()}}` and no resource triple at all —
+   * so a mock without this member cannot reproduce a 500 faithfully.
+   */
+  readonly causes?: readonly KubernetesStatusCause[];
+  /** Seconds the client should wait before retrying, when the server said so. */
+  readonly retryAfterSeconds?: number;
 }
 
 /**
@@ -238,10 +281,25 @@ function parseQualifiedResource(qualifiedResource: string): {
  * approximating the envelope a second time. The four callers below are the
  * only places this tier composes a message.
  *
+ * OMITTED AND EMPTY ARE DIFFERENT CLAIMS, and Go draws the line at the
+ * CONSTRUCTOR rather than at the resource. `NewBadRequest` and `NewUnauthorized`
+ * leave `Status.Details` nil, so `omitempty` on the pointer drops the key
+ * entirely - that is `qualifiedResource` OMITTED here. `NewForbidden` and
+ * `NewNotFound` set `Details` unconditionally, populating it from a possibly-empty
+ * `GroupResource`, so the key is always present even when every member inside it is
+ * empty - that is `qualifiedResource` passed as `''`, and what reaches the wire is
+ * `"details":{}`, because each member is itself tagged `omitempty`. Treating `''`
+ * as "no details" made a served resource-less 403 structurally unlike a real one;
+ * spreading `{group:'', name:''}` into the document made every other one unlike a
+ * real one. Both are avoided: the KEY follows the constructor, the MEMBERS follow
+ * `omitempty`.
+ *
  * @param reason - the `Status.reason`.
  * @param code - the numeric HTTP status, placed in `Status.code`.
  * @param message - the fully composed human-readable text.
- * @param qualifiedResource - rendered `GroupResource`; omit for no `details`.
+ * @param qualifiedResource - rendered `GroupResource`. OMIT for a constructor that
+ *   sets no details at all; pass `''` for one that sets details from an empty
+ *   `GroupResource`, which yields `details: {}`.
  * @param name - object name, or `''` for a collection-scoped failure.
  * @returns the document, ready for {@link HttpResponse.json}.
  */
@@ -252,7 +310,7 @@ export function kubernetesStatus(
   qualifiedResource?: string,
   name = '',
 ): KubernetesStatus {
-  if (qualifiedResource === undefined || qualifiedResource === '') {
+  if (qualifiedResource === undefined) {
     return {
       kind: 'Status',
       apiVersion: 'v1',
@@ -271,9 +329,57 @@ export function kubernetesStatus(
     status: 'Failure',
     message,
     reason,
-    details: { group, kind, name },
+    // OMITEMPTY, APPLIED RATHER THAN DESCRIBED. Every StatusDetails field is tagged
+    // `omitempty`, so Go emits no key at all for an empty string. This used to spread
+    // `{ group, kind, name }` unconditionally and therefore serialised
+    // `"group": "", "name": ""` for every core-group or collection-scoped failure —
+    // members the real API server never sends. `pods` with no name now yields
+    // exactly `{"kind":"pods"}`, which is what a client actually receives.
+    details: statusDetails({ group, kind, name }),
     code,
   };
+}
+
+/**
+ * Drops the members Go's `omitempty` tags would omit.
+ *
+ * Applied to the whole object rather than field by field at each call site, so a
+ * factory added later cannot forget it. An empty string, an empty `causes` array
+ * and `undefined` are all absent from the result; `0` is preserved for
+ * `retryAfterSeconds` only if a caller sets it explicitly, matching Go, where a
+ * zero `int32` with `omitempty` is likewise omitted — so it is dropped here too.
+ *
+ * @param details - the candidate members, any of which may be empty.
+ * @returns the details with empty members removed.
+ */
+function statusDetails(details: KubernetesStatusDetails): KubernetesStatusDetails {
+  const emitted: {
+    name?: string;
+    group?: string;
+    kind?: string;
+    uid?: string;
+    causes?: readonly KubernetesStatusCause[];
+    retryAfterSeconds?: number;
+  } = {};
+  if (details.name !== undefined && details.name !== '') {
+    emitted.name = details.name;
+  }
+  if (details.group !== undefined && details.group !== '') {
+    emitted.group = details.group;
+  }
+  if (details.kind !== undefined && details.kind !== '') {
+    emitted.kind = details.kind;
+  }
+  if (details.uid !== undefined && details.uid !== '') {
+    emitted.uid = details.uid;
+  }
+  if (details.causes !== undefined && details.causes.length > 0) {
+    emitted.causes = details.causes;
+  }
+  if (details.retryAfterSeconds !== undefined && details.retryAfterSeconds !== 0) {
+    emitted.retryAfterSeconds = details.retryAfterSeconds;
+  }
+  return emitted;
 }
 
 /**
@@ -350,25 +456,59 @@ export function notFoundStatus(
  * A `500 Internal Server Error` response, composed exactly as
  * `apierrors.NewInternalError`: the message is `Internal error occurred: <detail>`.
  *
- * `details` is deliberately ABSENT. The Go constructor records the cause under
- * `details.causes` rather than naming a resource, so fabricating a
- * `group`/`kind`/`name` triple here would be an invented shape. Recorded
- * alongside the 403 because the two must render identically -- as an error,
- * with no verdict -- for opposite reasons: 403 means the caller may not know,
- * 500 means nobody knows, and neither is evidence that a control holds.
+ * `details` CARRIES A CAUSE, and no resource triple. The Go constructor sets
+ * `Details: &metav1.StatusDetails{Causes: []metav1.StatusCause{{Message: err.Error()}}}`
+ * -- so `group`, `kind` and `name` are genuinely absent, but `causes` is genuinely
+ * PRESENT and holds the underlying error text. This factory previously omitted
+ * `details` altogether, which was half right: it correctly refused to invent a
+ * resource triple, but it also dropped the one member the real constructor does
+ * populate. A consumer written against that body would silently lose `causes`
+ * against a live API server.
+ *
+ * Note the cause carries `message` ALONE: `StatusCause.Type` (wire name `reason`)
+ * and `Field` are left unset by `NewInternalError`, and both are `omitempty`, so a
+ * faithful body has exactly one member in the cause object.
+ *
+ * Recorded alongside the 403 because the two must render identically -- as an
+ * error, with no verdict -- for opposite reasons: 403 means the caller may not
+ * know, 500 means nobody knows, and neither is evidence that a control holds.
  *
  * @param detail - the underlying error text, i.e. the `%v` of the format.
  * @returns the response, carrying `500` on the wire AND in `Status.code`.
  */
 export function internalErrorStatus(detail: string): HttpResponse<KubernetesStatus> {
-  return HttpResponse.json(
-    kubernetesStatus(
+  return HttpResponse.json(internalErrorStatusDocument(detail), {
+    status: INTERNAL_SERVER_ERROR_STATUS,
+  });
+}
+
+/**
+ * The `500` DOCUMENT, for the callers that must serve or assert it rather than
+ * return a response.
+ *
+ * Exported so that a spec building the expected body, and a handler that has to
+ * hand a document to its own `respondWith`, both compose it HERE. The alternative
+ * -- each caller spreading `kubernetesStatus` and attaching its own `details` --
+ * is how the cause came to be missing from a served 500 in the first place, and a
+ * second copy of the shape is a second place for it to drift.
+ *
+ * `detail` is the `err.Error()` of `apierrors.NewInternalError`, which interpolates
+ * it into the message AND records it verbatim as the single cause, so both members
+ * are derived from the one argument and cannot disagree.
+ *
+ * @param detail - the underlying error text, WITHOUT the `Internal error occurred: `
+ *   prefix.
+ * @returns the `Status` document, message prefixed and cause carried.
+ */
+export function internalErrorStatusDocument(detail: string): KubernetesStatus {
+  return {
+    ...kubernetesStatus(
       'InternalError',
       INTERNAL_SERVER_ERROR_STATUS,
       `Internal error occurred: ${detail}`,
     ),
-    { status: INTERNAL_SERVER_ERROR_STATUS },
-  );
+    details: statusDetails({ causes: [{ message: detail }] }),
+  };
 }
 
 /**
@@ -483,7 +623,7 @@ function warningHeaders(warnings: readonly string[]): Headers | undefined {
  * (`controls.posture.k8s.io is forbidden: ...`), lifted into a constant so the
  * `Status.details` this tier serves and that recorded message cannot disagree.
  */
-const POSTURE_CONTROLS_QUALIFIED_RESOURCE = 'controls.posture.k8s.io';
+export const POSTURE_CONTROLS_QUALIFIED_RESOURCE = 'controls.posture.k8s.io';
 
 /**
  * Serves ONE recorded control payload at that control's own endpoint.
@@ -666,7 +806,7 @@ export function internalErrorControlStatusHandler(controlId?: ControlId): Reques
  * {@link parseQualifiedResource} splits back into group `audit.k8s.io` and kind
  * `events`.
  */
-const AUDIT_EVENTS_QUALIFIED_RESOURCE = 'events.audit.k8s.io';
+export const AUDIT_EVENTS_QUALIFIED_RESOURCE = 'events.audit.k8s.io';
 
 /**
  * Reads a MANDATORY positive-integer query parameter, or reports why it is
@@ -2547,4 +2687,3 @@ export const handlers: readonly RequestHandler[] = Object.freeze([
   deploymentEncryptionConfigHandler(),
   integrationEncryptionConfigYamlHandler(),
 ]);
-
