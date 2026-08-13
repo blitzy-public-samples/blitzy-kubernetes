@@ -15,12 +15,31 @@ limitations under the License.
 */
 
 /**
- * Contract tests for `useAuditEvents`: validation without filtering, and pagination.
+ * Contract tests for `useAuditEvents`: pagination, filtering and the empty result.
  *
- * AAP §0.5.1 (the `web/src/hooks/useAuditEvents.test.ts` row) / §0.4.2.2 (the V6
- * blueprint, whose CONFIDENTIALITY GUARD this hook must keep assertable) / §0.10.2 (the
- * confidentiality boundary condition: no `secrets` event may carry a `responseObject`) /
- * §0.4.2.4 / tech-spec §6.6.3.4.
+ * AAP §0.5.1 (this file's row, whose purpose column reads exactly "Pagination, filtering,
+ * empty result") / §0.4.2.4 (the React blueprint, which restates the same three
+ * categories) / §0.4.1.2 (the assertion-semantics translation table: Go `t.Errorf`
+ * accumulate becomes `expect.soft`, `t.Fatalf` abort becomes a hard `expect`, and a
+ * `t.Run` table becomes `it.each`) / §0.4.2.2 (the V6 blueprint, whose CONFIDENTIALITY
+ * GUARD this hook must keep assertable) / §0.10.2 (the confidentiality boundary
+ * condition: no `secrets` event may carry a `responseObject`, while a `requestObject` on
+ * create and update is the explicitly accepted trade-off) / tech-spec §6.6.3.4 (the
+ * documentation convention this block and the per-test invariant comments satisfy).
+ *
+ * RULES POSITION. `review_rules` returns exactly one line: "No user rules provided." No
+ * rule is invented here and their absence is not treated as licence to lower the bar --
+ * AAP §0.11.1's enterprise-standard bar substitutes, and the items binding this file are
+ * named at each group below.
+ *
+ * THE THREE MANDATED CATEGORIES, and where each is discharged:
+ *   * pagination   -- "pagination", "advancing a page", "pagination metadata that
+ *                     contradicts itself is refused";
+ *   * filtering    -- "filtering" and "filtering over the recorded dimensions";
+ *   * empty result -- "an empty result is a result, not a silence".
+ * Two further groups exist because the three categories alone would leave the file's
+ * reason for being unguarded: "the recorded bodies are surfaced verbatim" and "an HTTP
+ * refusal is never an empty page".
  *
  * THE ONE PROPERTY EVERYTHING HERE PROTECTS. The V6 guard works by inspecting EVERY event
  * the server returned and failing if any `secrets` event carries a response body. That
@@ -56,7 +75,17 @@ import {
   resolveAuditResourceIdentity,
   useAuditEvents,
 } from './useAuditEvents';
-import type { AuditEvent } from './useAuditEvents';
+import type { AuditEvent, AuditEventFilter } from './useAuditEvents';
+import {
+  ALL_OBSERVED_AUDIT_EVENTS,
+  AUDIT_SECRET_NAME,
+  RBAC_AUDIT_RESPONSE_NAMESPACE,
+  RBAC_RESPONSE_AUDIT_EVENTS,
+  SECRETS_REQUEST_AUDIT_EVENTS,
+  SECRETS_REQUEST_UNASSERTED_AUDIT_EVENTS,
+  SECRET_AUDIT_REQUEST_NAMESPACE,
+  secretsRequestAuditEvents,
+} from '../test/fixtures/auditEvents';
 import { server } from '../test/msw/server';
 
 /** A conforming `audit.k8s.io/v1` event for a Secret create, with `overrides` applied. */
@@ -78,30 +107,180 @@ function auditEvent(overrides: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
-/** The captured query strings of every request the hook issued, newest last. */
-let requestedQueries: string[] = [];
+/**
+ * The query strings a per-test handler observed, newest last.
+ *
+ * DELIBERATELY NOT MODULE STATE. AAP §0.11.1's isolation item requires isolation to be
+ * structural rather than incidental, and a recorder shared between tests is exactly the
+ * incidental kind: it survives a `beforeEach` reset only for as long as nobody forgets to
+ * reset it, and under a randomised file order the forgetting is silent. Every `serve*`
+ * helper below therefore returns a FRESH array owned by the one test that asked for it, so
+ * no test can read another's requests even in principle.
+ */
+type IssuedQueries = string[];
 
-/** Serves `body` at `status`, recording each request's query string. */
-function respondWith(body: unknown, status = 200): void {
+/** Records one request's query string, minus the leading `?`. */
+function recordQuery(into: IssuedQueries, url: string): void {
+  into.push(new URL(url).search.replace(/^\?/, ''));
+}
+
+/**
+ * Serves `body` at `status`, and returns the recorder of the requests it answered.
+ *
+ * The return value is the whole reason this returns anything: a test that needs to assert
+ * on the query string keeps the array, and a test that does not simply ignores it.
+ */
+function respondWith(body: unknown, status = 200): IssuedQueries {
+  const issued: IssuedQueries = [];
   server.use(
     http.get(AUDIT_EVENTS_ENDPOINT, ({ request }) => {
-      requestedQueries.push(new URL(request.url).search.replace(/^\?/, ''));
+      recordQuery(issued, request.url);
       return HttpResponse.json(body as never, { status });
     }),
   );
+  return issued;
 }
 
 /** Serves raw text, so an invalid-JSON body can be expressed. */
-function respondWithText(text: string, status = 200): void {
+function respondWithText(text: string, status = 200): IssuedQueries {
+  const issued: IssuedQueries = [];
   server.use(
     http.get(AUDIT_EVENTS_ENDPOINT, ({ request }) => {
-      requestedQueries.push(new URL(request.url).search.replace(/^\?/, ''));
+      recordQuery(issued, request.url);
       return new HttpResponse(text, {
         status,
         headers: { 'Content-Type': 'application/json' },
       });
     }),
   );
+  return issued;
+}
+
+/**
+ * Refuses the listing with a realistic Kubernetes `Status` body at `status`.
+ *
+ * The body is the wire shape `apierrors` produces -- `kind`, `apiVersion`, `status`,
+ * `code` and `reason` -- rather than a bare string, because the hook reads `reason` and
+ * `code` out of it and a test that refused with an empty body would never exercise that
+ * path. The message names the requirement that goes unreported when the listing is
+ * refused, per AAP §0.7.2's failure-legibility criterion.
+ *
+ * @param status - the HTTP status to refuse with; 403 and 500 are the recorded cases.
+ * @returns the recorder, newest query last.
+ */
+function serveRefusal(status: number): IssuedQueries {
+  const reason = status === 403 ? 'Forbidden' : 'InternalError';
+  return respondWith(
+    {
+      kind: 'Status',
+      apiVersion: 'v1',
+      metadata: {},
+      status: 'Failure',
+      code: status,
+      reason,
+      message:
+        status === 403
+          ? 'events.audit.k8s.io is forbidden: sensitive-resource audit fidelity ' +
+            '(F-006-RQ-003) cannot be reported without the listing'
+          : 'audit event evaluation failed; sensitive-resource audit fidelity ' +
+            '(F-006-RQ-003) is unreported',
+    },
+    status,
+  );
+}
+
+/**
+ * Serves the RECORDED audit stream, filtered and paginated exactly as the endpoint's
+ * contract describes, and returns the recorder of the requests it answered.
+ *
+ * Events are served BY REFERENCE out of a `filter` and a `slice`, so each element handed
+ * to the hook is the very object `../test/fixtures/auditEvents` exported -- `requestObject`
+ * and `responseObject` included, untouched. Nothing is cloned field by field, re-ordered or
+ * re-serialised, because a handler that rebuilt its events could quietly drop the very
+ * member the confidentiality guard exists to find and every assertion downstream would
+ * still be green.
+ *
+ * @param events - the recorded events to serve; pass `[]` for the empty state.
+ * @returns the recorder, newest query last.
+ */
+function serveRecorded(events: readonly AuditEvent[] = ALL_OBSERVED_AUDIT_EVENTS): IssuedQueries {
+  const issued: IssuedQueries = [];
+  server.use(
+    http.get(AUDIT_EVENTS_ENDPOINT, ({ request }) => {
+      const url = new URL(request.url);
+      recordQuery(issued, request.url);
+      const query = url.searchParams;
+      const page = Number(query.get(AUDIT_EVENTS_QUERY_PARAMS.page));
+      const pageSize = Number(query.get(AUDIT_EVENTS_QUERY_PARAMS.pageSize));
+      const matched = events.filter((event) => matchesRecordedFilter(event, query));
+      const start = (page - 1) * pageSize;
+      const items = matched.slice(start, start + pageSize);
+      return HttpResponse.json({
+        items,
+        total: matched.length,
+        hasMore: start + items.length < matched.length,
+      });
+    }),
+  );
+  return issued;
+}
+
+/**
+ * Decides whether one recorded event satisfies the request's filter.
+ *
+ * EXACT comparisons only -- nothing is lower-cased, trimmed or prefix-matched. An audit
+ * view that quietly widened `resource=secrets` would report on events nobody asked about,
+ * and one that quietly narrowed it would hide events the confidentiality guard needs to
+ * see. An unrecognised value therefore matches nothing, which is a truthful empty result
+ * rather than a silent fallback to "everything".
+ */
+function matchesRecordedFilter(event: AuditEvent, query: URLSearchParams): boolean {
+  const wanted = (name: string): string | undefined => {
+    const raw = query.get(name);
+    return raw === null || raw === '' ? undefined : raw;
+  };
+  const level = wanted(AUDIT_EVENTS_QUERY_PARAMS.level);
+  if (level !== undefined && event.level !== level) {
+    return false;
+  }
+  const namespace = wanted(AUDIT_EVENTS_QUERY_PARAMS.namespace);
+  if (namespace !== undefined && event.objectRef?.namespace !== namespace) {
+    return false;
+  }
+  const resource = wanted(AUDIT_EVENTS_QUERY_PARAMS.resource);
+  if (resource !== undefined && event.objectRef?.resource !== resource) {
+    return false;
+  }
+  const verb = wanted(AUDIT_EVENTS_QUERY_PARAMS.verb);
+  return verb === undefined || event.verb === verb;
+}
+
+/** A response held open until the test decides to release it. */
+interface Gate {
+  /** Releases every awaiter. Safe to call once. */
+  readonly open: () => void;
+  /** Resolves when {@link Gate.open} is called. */
+  readonly passed: Promise<void>;
+}
+
+/**
+ * Creates a gate, so response ORDER can be chosen rather than timed.
+ *
+ * AAP §0.11.1's determinism item forbids a wall-clock sleep, and this is what replaces it.
+ * A `setTimeout` race is decided by whichever duration the machine happened to honour, so
+ * it passes on a fast runner and flakes on a loaded one; `web/vitest.config.ts` sets no
+ * `retry`, and `hack/jenkins/test-dockerized.sh` runs under `set -o errexit`, so a single
+ * flake fails the whole job. A gate removes the clock from the experiment entirely: the
+ * test states the order it wants and the order is what happens.
+ */
+function gate(): Gate {
+  let release: () => void = () => undefined;
+  const passed = new Promise<void>((resolve) => {
+    release = () => {
+      resolve();
+    };
+  });
+  return { open: release, passed };
 }
 
 /** Renders the hook and waits until it leaves `loading`. */
@@ -124,11 +303,20 @@ async function refusedMessage(): Promise<string> {
 }
 
 beforeEach(() => {
-  requestedQueries = [];
+  // A default one-event page, so a test whose subject is not the response body does not
+  // have to state one. The recorder this returns is deliberately DISCARDED: a test that
+  // asserts on the issued query installs its own handler and keeps that handler's
+  // recorder, which is what keeps every observation local to the test that made it.
   respondWith({ items: [auditEvent()] });
 });
 
 describe('the accepted envelope shapes', () => {
+  // INVARIANT LOCKED: exactly two response shapes are understood -- the `{items, total,
+  // hasMore}` envelope and a bare array -- and every other body is REFUSED rather than
+  // coerced. A body this client cannot read is a body it can make no claim about, so
+  // reporting it as a page (or as an empty page) would let the confidentiality guard clear
+  // events it never actually saw (F-006-RQ-002).
+
   it('reads the canonical items envelope', async () => {
     respondWith({ items: [auditEvent(), auditEvent({ verb: 'update' })], total: 2 });
 
@@ -161,13 +349,15 @@ describe('the accepted envelope shapes', () => {
   });
 
   it('stays idle and issues no request when disabled', async () => {
+    const issued = respondWith({ items: [auditEvent()] });
+
     const { result } = await settled({ enabled: false });
 
     expect(result.current.status).toBe('idle');
     // Idle is distinct from an empty success, and the distinction is what stops a
     // collapsed panel from claiming there were no audit events to report.
     expect(result.current.isEmpty).toBe(false);
-    expect(requestedQueries).toEqual([]);
+    expect(issued).toEqual([]);
   });
 
   it.each([
@@ -204,6 +394,17 @@ describe('the accepted envelope shapes', () => {
 });
 
 describe('every event is validated, and none is ever dropped', () => {
+  // INVARIANT LOCKED, and it is the pairing that matters rather than either half alone:
+  // every event is VALIDATED, and no event is ever DROPPED.
+  //
+  // Validated, because `body as AuditEvent[]` is a compile-time assertion with no runtime
+  // effect, so a page of strings or of objects missing every required member would become a
+  // "successful" page and the guard would run over values it cannot interpret. Never
+  // dropped, because the leaked response body might be carried by exactly the event a repair
+  // discarded -- silently removing an unreadable event is the one fix that could hide the
+  // disclosure the guard exists to find. The two combine into a single rule: a page holding
+  // one unreadable event is refused whole (F-006-RQ-002).
+
   it.each([
     ['a string', '"not an event"'],
     ['null', 'null'],
@@ -342,6 +543,16 @@ describe('every event is validated, and none is ever dropped', () => {
 });
 
 describe('the flattened body form must never be accepted', () => {
+  // INVARIANT LOCKED: `requestObject` and `responseObject` are OBJECTS on the wire, never
+  // presence booleans, and the boolean form is refused outright.
+  //
+  // `test/utils/audit.go` L151-156 does `if e.ResponseObject != nil { event.ResponseObject =
+  // true }`, flattening the payload for cheap Go-side struct comparison. That flattening is a
+  // Go-test convenience and must never reach this tier: `responseObject: true` satisfies every
+  // `!== undefined` presence check while carrying nothing an object-shaped redactor can
+  // recognise, so the guard would report a disclosure it cannot describe and the redaction
+  // would have nothing to redact (F-006-RQ-002).
+
   it.each([
     ['responseObject', true],
     ['responseObject', false],
@@ -657,6 +868,11 @@ describe('the two statements of identity must agree', () => {
 });
 
 describe('an HTTP refusal is never an empty page', () => {
+  // AAP §0.11.1's "no false passes", applied to the subtlest false pass in this tier: a
+  // refusal and an empty result both render as "nothing to show". The 403 and the 500 are
+  // the two recorded cases; 401 and 503 are carried alongside them because the property is
+  // about non-2xx generally, not about one status code.
+
   it.each([403, 401, 500, 503])('reports HTTP %i as an error carrying the status', async (status) => {
     respondWith(
       { kind: 'Status', apiVersion: 'v1', status: 'Failure', code: status, reason: 'Forbidden' },
@@ -666,12 +882,45 @@ describe('an HTTP refusal is never an empty page', () => {
     const { result } = await settled();
 
     expect(result.current.status).toBe('error');
-    expect(result.current.error?.httpStatus).toBe(status);
+    expect(
+      result.current.error?.httpStatus,
+      `F-006-RQ-003: HTTP ${String(status)} must be preserved on the error, because a reader ` +
+        'of a CI failure cannot tell a refusal from an outage without it',
+    ).toBe(status);
     expect(result.current.events).toEqual([]);
     // A UI showing "no audit events" after a refusal would assert a clean bill of health it
     // has no evidence for.
-    expect(result.current.isEmpty).toBe(false);
+    expect(
+      result.current.isEmpty,
+      `F-006-RQ-002: HTTP ${String(status)} must NOT set the empty-result flag; conflating ` +
+        '"the server refused" with "there are no audit events" reports a clean ' +
+        'confidentiality result on no evidence at all',
+    ).toBe(false);
   });
+
+  it.each([403, 500])(
+    'reports the recorded Kubernetes Status body for HTTP %i as an error, not as emptiness',
+    async (status) => {
+      // The realistic `Status` wire shape rather than a bare body, so the `reason`/`code`
+      // extraction path is genuinely exercised.
+      const issued = serveRefusal(status);
+
+      const { result } = await settled();
+
+      expect(issued).toHaveLength(1);
+      expect(result.current.status).toBe('error');
+      expect(result.current.error?.httpStatus).toBe(status);
+      expect(result.current.error?.code).toBe(status);
+      expect(result.current.error?.reason).toBe(status === 403 ? 'Forbidden' : 'InternalError');
+      expect(result.current.error?.message).toContain('F-006-RQ-003');
+      expect(result.current.isEmpty).toBe(false);
+      expect(result.current.hasNextPage).toBe(false);
+      expect(result.current.total).toBeUndefined();
+      // No page was ever loaded, which is what a traversal must see: a refusal is not a
+      // scanned page, and treating it as one would let a guard skip past it.
+      expect(result.current.loadedPage).toBeUndefined();
+    },
+  );
 
   it('preserves the Kubernetes Status reason and message', async () => {
     respondWith(
@@ -699,17 +948,32 @@ describe('an HTTP refusal is never an empty page', () => {
 
     expect(result.current.status).toBe('error');
     expect(result.current.error?.httpStatus).toBe(0);
+    expect(
+      result.current.isEmpty,
+      'F-006-RQ-002: a request that never reached the server is not an empty result either',
+    ).toBe(false);
   });
 });
 
 describe('pagination', () => {
+  // AAP §0.5.1 category 1 (pagination). Why a paging contract is a security property here
+  // rather than a convenience: the confidentiality guard only clears a Secret disclosure
+  // after traversing every page, so a page number that does not reach the server, or a
+  // has-more signal that lies in either direction, ends the traversal early and produces a
+  // clean verdict about events nobody looked at (F-006-RQ-002).
+
   it('sends page and pageSize, with the documented parameter names and order', async () => {
+    const issued = respondWith({ items: [auditEvent()] });
+
     await settled({ page: 3, pageSize: 20 });
 
-    expect(requestedQueries).toHaveLength(1);
-    expect(requestedQueries[0]).toBe(
-      `${AUDIT_EVENTS_QUERY_PARAMS.page}=3&${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=20`,
-    );
+    expect(issued).toHaveLength(1);
+    expect(
+      issued[0],
+      'F-006-RQ-003: the page and page size must reach the server under the documented ' +
+        'names and in the documented order, because the recorded handlers and the parity ' +
+        'map both describe that exact request',
+    ).toBe(`${AUDIT_EVENTS_QUERY_PARAMS.page}=3&${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=20`);
   });
 
   it('defaults the page size and starts at page 1', async () => {
@@ -817,11 +1081,17 @@ describe('pagination', () => {
   });
 
   it('reports no next page when the total is exhausted', async () => {
+    // The LAST page. Claiming a further page here would send a traversal after a page that
+    // does not exist; claiming none too early would end it before the page that does.
     respondWith({ items: [auditEvent(), auditEvent()], total: 2 });
 
     const { result } = await settled({ pageSize: 2 });
 
-    expect(result.current.hasNextPage).toBe(false);
+    expect(
+      result.current.hasNextPage,
+      'F-006-RQ-003: the last page must report no successor, or a traversal fetches past the ' +
+        'end and can read the resulting empty page as an empty RESULT',
+    ).toBe(false);
   });
 
   it('uses the full-page heuristic when neither hasMore nor total is reported', async () => {
@@ -903,6 +1173,133 @@ describe('pagination', () => {
     expect(result.current.page).toBe(1);
   });
 });
+
+describe('advancing a page re-asks the server, and only the latest answer counts', () => {
+  // AAP §0.5.1 category 1 (pagination). The invariants locked here are the two a paging
+  // control can get wrong without ever looking wrong: the SECOND request must carry the
+  // second page's parameters, and a response for a page the operator has already left must
+  // not be allowed to land. Both matter to F-006-RQ-002, because the confidentiality guard
+  // clears a Secret disclosure only after traversing every page -- a traversal that
+  // re-asked for page 1, or that displayed page 1's events under page 2's number, would
+  // report a clean result about events it never actually examined.
+
+  it('issues a second request carrying the next page, with the page size unchanged', async () => {
+    // The recorded stream, two events to a page: ten matches, so page 2 exists.
+    const issued = serveRecorded();
+
+    const { result } = await settled({ pageSize: 2 });
+    expect(issued).toHaveLength(1);
+    expect(issued[0]).toBe(
+      `${AUDIT_EVENTS_QUERY_PARAMS.page}=1&${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=2`,
+    );
+    expect(result.current.hasNextPage).toBe(true);
+    const firstPageIds = result.current.events.map((event) => event.auditID);
+
+    await act(async () => {
+      result.current.nextPage();
+    });
+    await waitFor(() => {
+      expect(result.current.loadedPage).toBe(2);
+    });
+
+    // The request itself, not merely the reported page number: a control that advanced its
+    // state without advancing its query would show page 1 twice and a traversal would never
+    // terminate.
+    expect(issued).toHaveLength(2);
+    expect(issued[1]).toBe(
+      `${AUDIT_EVENTS_QUERY_PARAMS.page}=2&${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=2`,
+    );
+    // REPLACED, not appended -- the hook's documented contract is that `events` is the
+    // CURRENT page. Asserting the identities differ is what distinguishes replacement from
+    // a page that silently re-served the first two events.
+    expect(result.current.events).toHaveLength(2);
+    expect(result.current.events.map((event) => event.auditID)).not.toEqual(firstPageIds);
+    expect(result.current.total).toBe(ALL_OBSERVED_AUDIT_EVENTS.length);
+  });
+
+  it('reports no further page once the recorded stream is exhausted', async () => {
+    // The LAST page specifically. Ten recorded events at five to a page means page 2 is the
+    // end, and the has-more signal must say so -- a traversal that believed one more page
+    // existed would fetch an empty page and could report it as an empty RESULT.
+    const issued = serveRecorded();
+
+    const { result } = await settled({ page: 2, pageSize: 5 });
+
+    expect(result.current.loadedPage).toBe(2);
+    expect(result.current.events).toHaveLength(5);
+    expect(result.current.total).toBe(ALL_OBSERVED_AUDIT_EVENTS.length);
+    expect(result.current.hasNextPage).toBe(false);
+    expect(result.current.hasPreviousPage).toBe(true);
+    expect(result.current.isEmpty).toBe(false);
+
+    // `nextPage` is a no-op at the end, so no third request is issued.
+    await act(async () => {
+      result.current.nextPage();
+    });
+    expect(result.current.page).toBe(2);
+    expect(issued).toHaveLength(1);
+  });
+
+  it('never lets a superseded page overwrite the page the operator moved to', async () => {
+    // THE STALE-RESPONSE RACE, driven by gates rather than by timing. Page 2's response is
+    // held open, the operator jumps to page 3, page 3 answers immediately, and only THEN is
+    // page 2 released. If the late answer could land, the panel would display page 2's
+    // events under page 3's number -- and the confidentiality guard would attribute one
+    // page's evidence to another, which is how a Secret disclosure gets counted as already
+    // cleared (F-006-RQ-002).
+    const pageTwo = gate();
+    const answeredPages: number[] = [];
+    server.use(
+      http.get(AUDIT_EVENTS_ENDPOINT, async ({ request }) => {
+        const requested = Number(
+          new URL(request.url).searchParams.get(AUDIT_EVENTS_QUERY_PARAMS.page),
+        );
+        if (requested === 2) {
+          await pageTwo.passed;
+        }
+        answeredPages.push(requested);
+        return HttpResponse.json({
+          items: [auditEvent({ auditID: `page-${String(requested)}` })],
+          total: 9,
+          hasMore: requested < 9,
+        } as never);
+      }),
+    );
+
+    // Rendered directly rather than through `settled`: page 2's answer is held, so a helper
+    // that waited for the query to leave `loading` would wait for something this test is
+    // deliberately preventing.
+    const { result } = renderHook(() => useAuditEvents({ page: 2, pageSize: 1 }));
+    // Page 2 is still held, so the hook is loading and holds NO events. That is the state a
+    // late arrival would corrupt.
+    expect(result.current.status).toBe('loading');
+    expect(result.current.loadedPage).toBeUndefined();
+
+    act(() => {
+      result.current.setPage(3);
+    });
+    await waitFor(() => {
+      expect(result.current.loadedPage).toBe(3);
+    });
+    expect(result.current.events[0]?.auditID).toBe('page-3');
+
+    // Only now is the superseded request allowed to answer.
+    pageTwo.open();
+    await waitFor(() => {
+      expect(answeredPages).toContain(2);
+    });
+
+    // The latest request still owns the state. Asserted on `loadedPage` AND on the event
+    // identity, because either alone could pass while the other had been overwritten.
+    expect(result.current.page).toBe(3);
+    expect(result.current.loadedPage).toBe(3);
+    expect(result.current.events).toHaveLength(1);
+    expect(result.current.events[0]?.auditID).toBe('page-3');
+    expect(result.current.status).toBe('success');
+    expect(result.current.error).toBeNull();
+  });
+});
+
 
 describe('pagination metadata that contradicts itself is refused', () => {
   // THE FAILURE THESE CLOSE. Metadata saying "this is the last page" while the page's
@@ -1068,32 +1465,54 @@ describe('refresh addresses fresh data rather than a cache', () => {
 });
 
 describe('filtering', () => {
+  // AAP §0.5.1 category 2 (filtering), at the encoding level. INVARIANT LOCKED: the filter
+  // the caller states is the filter the SERVER is asked for -- same fields, same names, same
+  // order, correctly escaped -- and the hook owns a private copy of it.
+  //
+  // Both halves are load-bearing. A filter that did not reach the request would be applied
+  // client-side, so a page boundary could hide events the operator asked to see; and a
+  // filter held by reference would let a caller mutate the hook's state without a render,
+  // leaving the returned `filter` describing one query while the issued request described
+  // another. Neither failure looks like a failure -- both render as data (F-006-RQ-003).
+
   it('encodes every filter field, alphabetically after the pagination pair', async () => {
+    const issued = respondWith({ items: [auditEvent()] });
+
     await settled({
       pageSize: 10,
-      filter: { level: 'Request', namespace: 'secret-audit-request', resource: 'secrets', verb: 'create' },
+      filter: {
+        level: 'Request',
+        namespace: SECRET_AUDIT_REQUEST_NAMESPACE,
+        resource: 'secrets',
+        verb: 'create',
+      },
     });
 
-    expect(requestedQueries[0]).toBe(
-      'page=1&pageSize=10&level=Request&namespace=secret-audit-request&resource=secrets&verb=create',
+    expect(issued[0]).toBe(
+      `page=1&pageSize=10&level=Request&namespace=${SECRET_AUDIT_REQUEST_NAMESPACE}` +
+        '&resource=secrets&verb=create',
     );
   });
 
   it('omits an empty filter field rather than sending a blank value', async () => {
+    const issued = respondWith({ items: [auditEvent()] });
+
     await settled({ filter: { resource: '', verb: 'create' } });
 
-    expect(requestedQueries[0]).not.toContain('resource=');
-    expect(requestedQueries[0]).toContain('verb=create');
+    expect(issued[0]).not.toContain('resource=');
+    expect(issued[0]).toContain('verb=create');
   });
 
   it('percent-encodes a value that needs it', async () => {
+    const issued = respondWith({ items: [auditEvent()] });
+
     await settled({ filter: { resource: 'serviceaccounts/token' } });
 
-    expect(requestedQueries[0]).toContain('resource=serviceaccounts%2Ftoken');
+    expect(issued[0]).toContain('resource=serviceaccounts%2Ftoken');
   });
 
   it('resets to page 1 when the filter changes', async () => {
-    respondWith({ items: [auditEvent()], hasMore: true });
+    const issued = respondWith({ items: [auditEvent()], hasMore: true });
 
     const { result } = await settled({ pageSize: 1, page: 3 });
     expect(result.current.page).toBe(3);
@@ -1107,24 +1526,25 @@ describe('filtering', () => {
     });
     // Not a convenience: a new filter combined with a stale offset shows the wrong slice
     // of the wrong result set, and it looks like data rather than like an error.
-    expect(requestedQueries.at(-1)).toContain('page=1');
-    expect(requestedQueries.at(-1)).toContain('resource=configmaps');
+    expect(issued.at(-1)).toContain('page=1');
+    expect(issued.at(-1)).toContain('resource=configmaps');
   });
 
   it('clones the caller\'s filter, so mutating it afterwards cannot change the query', async () => {
     // Storing the caller's object by reference made the hook's state reachable from
     // outside it: a later `filter.resource = ...` changed state with no re-render, so the
     // issued request and the returned `filter` disagreed silently.
+    const issued = respondWith({ items: [auditEvent()] });
     const mutable = { resource: 'secrets' };
 
     const { result } = await settled({ filter: mutable });
-    const issued = requestedQueries[0];
+    const firstQuery = issued[0];
 
     mutable.resource = 'configmaps';
 
     expect(result.current.filter.resource).toBe('secrets');
-    expect(issued).toContain('resource=secrets');
-    expect(requestedQueries).toHaveLength(1);
+    expect(firstQuery).toContain('resource=secrets');
+    expect(issued).toHaveLength(1);
   });
 
   it('clones a filter passed to setFilter as well', async () => {
@@ -1146,6 +1566,7 @@ describe('filtering', () => {
   it('does not refetch when an equivalent inline filter object is passed on re-render', async () => {
     // The effect keys on the deterministic query STRING rather than on object identity, so
     // a caller passing an inline literal cannot drive a refetch loop.
+    const issued = respondWith({ items: [auditEvent()] });
     const { result, rerender } = renderHook(
       ({ resource }: { resource: string }) => useAuditEvents({ filter: { resource } }),
       { initialProps: { resource: 'secrets' } },
@@ -1153,18 +1574,579 @@ describe('filtering', () => {
     await waitFor(() => {
       expect(result.current.isLoading).toBe(false);
     });
-    const afterFirst = requestedQueries.length;
+    const afterFirst = issued.length;
 
     rerender({ resource: 'secrets' });
     await waitFor(() => {
       expect(result.current.isLoading).toBe(false);
     });
 
-    expect(requestedQueries).toHaveLength(afterFirst);
+    expect(issued).toHaveLength(afterFirst);
   });
 });
 
+/**
+ * One recorded filter dimension, with the number of recorded events it selects.
+ *
+ * `expected` is a LITERAL rather than a count computed from the fixture, and that is
+ * deliberate. Deriving it from `ALL_OBSERVED_AUDIT_EVENTS` with the same predicate the
+ * handler applies would make the case compare an expression against itself and pass for any
+ * fixture whatsoever. Written out, the number is a claim about the RECORDED DATA -- so if
+ * the recorded stream ever changes, these cases fail loudly and a human decides whether the
+ * change was intended.
+ */
+interface RecordedFilterCase {
+  /** The stable case id, used verbatim as the `it.each` title. */
+  readonly id: string;
+  /** The filter to apply. */
+  readonly filter: Readonly<AuditEventFilter>;
+  /** The query-string fragment the filter must produce. */
+  readonly queryFragment: string;
+  /** How many of the ten recorded events the filter selects. */
+  readonly expected: number;
+}
+
+/**
+ * The recorded filter dimensions, measured from `../test/fixtures/auditEvents`.
+ *
+ * The dimensions are the ones the V6 integration test exercises -- resource, verb and
+ * namespace -- and the values are the recorded ones rather than invented ones. `clusterroles`
+ * is included precisely BECAUSE the recorded stream contains none: §0.10.2 pins
+ * `clusterroles` at exactly `RequestResponse`, so it is a resource an audit view must be
+ * able to ask about, and asking about it is what proves that "nothing matched" is reported
+ * as an empty result rather than as a failure.
+ *
+ * Composition of the ten recorded events, for anyone checking these numbers: four `secrets`
+ * events in `secret-audit-request` (create, get, update, delete) and six RBAC events in
+ * `rbac-audit-response` (three `roles`, three `rolebindings`, each create/update/delete).
+ */
+const RECORDED_FILTER_CASES: readonly RecordedFilterCase[] = [
+  {
+    id: 'resource=secrets',
+    filter: { resource: 'secrets' },
+    queryFragment: `${AUDIT_EVENTS_QUERY_PARAMS.resource}=secrets`,
+    expected: 4,
+  },
+  {
+    id: 'resource=clusterroles',
+    filter: { resource: 'clusterroles' },
+    queryFragment: `${AUDIT_EVENTS_QUERY_PARAMS.resource}=clusterroles`,
+    expected: 0,
+  },
+  {
+    id: 'verb=create',
+    filter: { verb: 'create' },
+    queryFragment: `${AUDIT_EVENTS_QUERY_PARAMS.verb}=create`,
+    expected: 3,
+  },
+  {
+    id: 'verb=update',
+    filter: { verb: 'update' },
+    queryFragment: `${AUDIT_EVENTS_QUERY_PARAMS.verb}=update`,
+    expected: 3,
+  },
+  {
+    id: 'verb=delete',
+    filter: { verb: 'delete' },
+    queryFragment: `${AUDIT_EVENTS_QUERY_PARAMS.verb}=delete`,
+    expected: 3,
+  },
+  {
+    id: `namespace=${SECRET_AUDIT_REQUEST_NAMESPACE}`,
+    filter: { namespace: SECRET_AUDIT_REQUEST_NAMESPACE },
+    queryFragment: `${AUDIT_EVENTS_QUERY_PARAMS.namespace}=${SECRET_AUDIT_REQUEST_NAMESPACE}`,
+    expected: 4,
+  },
+  {
+    id: `namespace=${RBAC_AUDIT_RESPONSE_NAMESPACE}`,
+    filter: { namespace: RBAC_AUDIT_RESPONSE_NAMESPACE },
+    queryFragment: `${AUDIT_EVENTS_QUERY_PARAMS.namespace}=${RBAC_AUDIT_RESPONSE_NAMESPACE}`,
+    expected: 6,
+  },
+];
+
+describe('filtering over the recorded dimensions', () => {
+  // AAP §0.5.1 category 2 (filtering), parametrised over the dimensions the V6 integration
+  // test exercises -- resource, verb and namespace -- against the RECORDED stream rather
+  // than against hand-rolled events, so the wire shapes have exactly one definition site
+  // (`../test/fixtures/auditEvents`).
+  //
+  // §0.4.1.2 translation in force here: the Go original drives its table with `t.Run`, which
+  // becomes `it.each` with an explicit, stable id per case; and within a case the per-event
+  // property check uses `expect.soft`, because the Go guard accumulates with `t.Errorf` and
+  // reports every offending event rather than stopping at the first.
+
+  it.each(RECORDED_FILTER_CASES)(
+    'sends $id and surfaces only the events it matches',
+    async ({ filter, queryFragment, expected }) => {
+      const issued = serveRecorded();
+
+      const { result } = await settled({ filter });
+
+      // 1. The filter REACHED the request. A view that filtered client-side would look
+      //    identical here while quietly fetching -- and, at a page boundary, hiding -- events
+      //    the operator never asked to see (F-006-RQ-003).
+      expect(issued).toHaveLength(1);
+      expect(issued[0]).toContain(queryFragment);
+
+      // 2. The page is a page, not a refusal. A hard expect, per §0.4.1.2: if the events
+      //    never loaded there is nothing for the per-event checks below to say.
+      expect(result.current.status).toBe('success');
+      expect(result.current.error).toBeNull();
+      expect(result.current.events).toHaveLength(expected);
+      expect(result.current.total).toBe(expected);
+
+      // 3. ONLY matching events are surfaced -- accumulated, so a page with several
+      //    non-matching events names all of them in one run.
+      for (const event of result.current.events) {
+        if (filter.resource !== undefined) {
+          expect
+            .soft(event.objectRef?.resource, `F-006-RQ-003: event ${event.auditID} was surfaced under resource=${filter.resource} but is a ${String(event.objectRef?.resource)} event, so the view is reporting on events the operator did not ask about`)
+            .toBe(filter.resource);
+        }
+        if (filter.verb !== undefined) {
+          expect
+            .soft(event.verb, `F-006-RQ-003: event ${event.auditID} was surfaced under verb=${filter.verb} but its verb is ${event.verb}`)
+            .toBe(filter.verb);
+        }
+        if (filter.namespace !== undefined) {
+          expect
+            .soft(event.objectRef?.namespace, `F-006-RQ-003: event ${event.auditID} was surfaced under namespace=${filter.namespace} but belongs to ${String(event.objectRef?.namespace)}`)
+            .toBe(filter.namespace);
+        }
+      }
+    },
+  );
+
+  it('reports a filter that matches nothing as EMPTY, never as an error', async () => {
+    // INVARIANT LOCKED: "nothing matched your filter" and "the query failed" are different
+    // answers and must stay different. `clusterroles` is the recorded resource the stream
+    // contains none of, so this is a genuine zero rather than a contrived one.
+    serveRecorded();
+
+    const { result } = await settled({ filter: { resource: 'clusterroles' } });
+
+    expect(result.current.status).toBe('success');
+    expect(result.current.events).toEqual([]);
+    expect(result.current.isEmpty).toBe(true);
+    expect(
+      result.current.error,
+      'F-006-RQ-003: a filter matching no recorded event must leave `error` null -- a ' +
+        'view that reported an empty match as a failure would send an operator hunting a ' +
+        'defect that does not exist',
+    ).toBeNull();
+    expect(result.current.total).toBe(0);
+    expect(result.current.hasNextPage).toBe(false);
+  });
+
+  it('resets to page 1 when the filter changes, so a stale offset cannot survive', async () => {
+    // The recorded-data twin of the unit-level reset case above. Starting on page 2 of the
+    // `secrets` slice and then switching to the RBAC namespace must not ask for page 2 of a
+    // result set the operator has never seen: at four `secrets` events and two to a page,
+    // page 2 exists; the RBAC slice has six, so page 2 exists there too and a surviving
+    // offset would silently show its second page as though it were the first.
+    const issued = serveRecorded();
+
+    const { result } = await settled({
+      page: 2,
+      pageSize: 2,
+      filter: { resource: 'secrets' },
+    });
+    expect(result.current.loadedPage).toBe(2);
+    expect(issued[0]).toContain(`${AUDIT_EVENTS_QUERY_PARAMS.page}=2`);
+
+    await act(async () => {
+      result.current.setFilter({ namespace: RBAC_AUDIT_RESPONSE_NAMESPACE });
+    });
+    await waitFor(() => {
+      expect(result.current.loadedPage).toBe(1);
+    });
+
+    expect(result.current.page).toBe(1);
+    expect(issued.at(-1)).toContain(`${AUDIT_EVENTS_QUERY_PARAMS.page}=1`);
+    expect(issued.at(-1)).toContain(
+      `${AUDIT_EVENTS_QUERY_PARAMS.namespace}=${RBAC_AUDIT_RESPONSE_NAMESPACE}`,
+    );
+    expect(issued.at(-1)).not.toContain(AUDIT_EVENTS_QUERY_PARAMS.resource);
+    // The first RBAC page, not the second: six matches, two to a page, so a further page
+    // remains.
+    expect(result.current.events).toHaveLength(2);
+    expect(result.current.total).toBe(RBAC_RESPONSE_AUDIT_EVENTS.length);
+    expect(result.current.hasNextPage).toBe(true);
+    for (const event of result.current.events) {
+      expect.soft(event.objectRef?.namespace).toBe(RBAC_AUDIT_RESPONSE_NAMESPACE);
+    }
+  });
+
+  it('combines the recorded dimensions rather than widening to either', async () => {
+    // Two dimensions at once. A view that OR-ed its filters would return more than asked
+    // for, and one that dropped the second would return the wrong slice; both look like data.
+    const issued = serveRecorded();
+
+    const { result } = await settled({
+      filter: { resource: 'secrets', verb: 'get' },
+    });
+
+    expect(issued[0]).toContain(`${AUDIT_EVENTS_QUERY_PARAMS.resource}=secrets`);
+    expect(issued[0]).toContain(`${AUDIT_EVENTS_QUERY_PARAMS.verb}=get`);
+    // Exactly the one recorded Secret READ -- the event the Go oracle logs but never
+    // asserts, which is what makes the observed stream a genuine superset of the
+    // expectations (F-006-RQ-002).
+    expect(result.current.events).toHaveLength(SECRETS_REQUEST_UNASSERTED_AUDIT_EVENTS.length);
+    expect(result.current.events[0]?.verb).toBe('get');
+    expect(result.current.events[0]?.objectRef?.resource).toBe('secrets');
+    expect(result.current.events[0]?.objectRef?.name).toBe(AUDIT_SECRET_NAME);
+  });
+});
+
+
+describe('an empty result is a result, not a silence', () => {
+  // AAP §0.5.1 category 3 (empty result). The invariant locked: an empty page is a
+  // SUCCESSFUL answer that happened to match nothing, and it must be observably different
+  // from all three of the other things that also render as "nothing to show" -- a query
+  // still in flight, a query that was refused, and a query that has not run.
+  //
+  // §0.11.1's "no false passes" is what makes this a security property rather than a
+  // presentation nicety. An audit panel that cannot tell an empty result from a refusal
+  // will eventually report "no Secret event carries a response body" on the strength of a
+  // 403, which is a clean bill of health with no evidence behind it (F-006-RQ-002).
+
+  it('reports an empty recorded page as empty, with no error and no pagination', async () => {
+    const issued = serveRecorded([]);
+
+    const { result } = await settled();
+
+    expect(issued).toHaveLength(1);
+    expect(result.current.status).toBe('success');
+    expect(result.current.events).toEqual([]);
+    expect(
+      result.current.isEmpty,
+      'F-006-RQ-003: a successful query that matched nothing must set `isEmpty`, because ' +
+        'that flag is the only thing a panel can distinguish an empty page by',
+    ).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.total).toBe(0);
+    expect(result.current.hasNextPage).toBe(false);
+    expect(result.current.hasPreviousPage).toBe(false);
+    // It genuinely LOADED, rather than never having asked: `loadedPage` is the difference
+    // between "page 1 came back empty" and "no page has come back".
+    expect(result.current.loadedPage).toBe(1);
+  });
+
+  it.each([
+    ['loading', { enabled: true } as const],
+    ['idle', { enabled: false } as const],
+  ])('is distinguishable from the %s state', async (expectedStatus, options) => {
+    // Gated so `loading` is a state the test can stand still in and inspect, rather than one
+    // it has to catch as it goes past.
+    const held = gate();
+    server.use(
+      http.get(AUDIT_EVENTS_ENDPOINT, async () => {
+        await held.passed;
+        return HttpResponse.json({ items: [], total: 0, hasMore: false } as never);
+      }),
+    );
+
+    const { result } = renderHook(() => useAuditEvents(options));
+
+    expect(result.current.status).toBe(expectedStatus);
+    expect(result.current.events).toEqual([]);
+    // The shared symptom -- an empty list -- with the distinguishing flag NOT set. This is
+    // the assertion that stops a panel keying off `events.length === 0`.
+    expect(
+      result.current.isEmpty,
+      `F-006-RQ-003: the ${expectedStatus} state holds no events, but it is not an empty ` +
+        'RESULT and must not be reported as one',
+    ).toBe(false);
+    expect(result.current.error).toBeNull();
+
+    held.open();
+    // Released so the worker leaves nothing in flight; the idle case never asked, so only
+    // the loading case has a transition to await.
+    if (expectedStatus === 'loading') {
+      await waitFor(() => {
+        expect(result.current.isEmpty).toBe(true);
+      });
+      // ...and having arrived, it now IS empty. The same hook, the same empty list, a
+      // different verdict -- which is exactly the distinction being locked.
+      expect(result.current.status).toBe('success');
+    }
+  });
+
+  it.each([403, 500])(
+    'is distinguishable from an HTTP %i refusal, which holds no verdict at all',
+    async (status) => {
+      serveRefusal(status);
+
+      const { result } = await settled();
+
+      expect(result.current.status).toBe('error');
+      expect(result.current.events).toEqual([]);
+      expect(
+        result.current.isEmpty,
+        `F-006-RQ-002: HTTP ${String(status)} left the event list empty, and reporting that ` +
+          'as an empty RESULT would assert that no Secret audit event carries a response ' +
+          'body on the strength of a request the server never answered',
+      ).toBe(false);
+      expect(result.current.error?.httpStatus).toBe(status);
+    },
+  );
+
+  it('carries no message of its own when the page is legitimately empty', async () => {
+    // A spurious message is how an empty result becomes an error in the reader's mind: a
+    // panel that renders `error.message` whenever it is truthy would show text here.
+    serveRecorded([]);
+
+    const { result } = await settled();
+
+    expect(result.current.error).toBeNull();
+    expect(result.current.error?.message).toBeUndefined();
+  });
+
+  it('returns to a genuinely empty page after a refusal, without stale events', async () => {
+    // The transition matters as much as the two states: a hook that kept the refused
+    // request's state would report the retry's honest zero as a continuing failure, and one
+    // that kept a previous page's events would report them under an empty result.
+    let attempt = 0;
+    server.use(
+      http.get(AUDIT_EVENTS_ENDPOINT, () => {
+        attempt += 1;
+        return attempt === 1
+          ? HttpResponse.json(
+              {
+                kind: 'Status',
+                apiVersion: 'v1',
+                status: 'Failure',
+                code: 403,
+                reason: 'Forbidden',
+                message: 'events.audit.k8s.io is forbidden',
+              } as never,
+              { status: 403 },
+            )
+          : HttpResponse.json({ items: [], total: 0, hasMore: false } as never);
+      }),
+    );
+
+    const { result } = await settled();
+    expect(result.current.status).toBe('error');
+    expect(result.current.isEmpty).toBe(false);
+
+    await act(async () => {
+      result.current.refresh();
+    });
+    await waitFor(() => {
+      expect(result.current.status).toBe('success');
+    });
+
+    expect(result.current.isEmpty).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.events).toEqual([]);
+  });
+});
+
+describe('the recorded bodies are surfaced verbatim, so the guard stays assertable', () => {
+  // AAP §0.10.2's confidentiality-guard row, mirrored at the data-access layer. THIS IS THE
+  // REASON THIS FILE EXISTS BEYOND ITS THREE MANDATED CATEGORIES.
+  //
+  // The guard downstream -- web/src/components/ConfidentialityRedaction.test.tsx -- asserts
+  // that no `secrets` audit event renders a `responseObject`. That assertion is only
+  // meaningful while the payload actually REACHES the presentation layer. A hook that
+  // helpfully deleted `responseObject` would leave every redaction spec green while proving
+  // nothing whatsoever, because there would be nothing left to redact. So the property
+  // locked here is pass-through, not redaction: `requestObject` and `responseObject` arrive
+  // exactly as the server sent them.
+  //
+  // §0.4.1.2 translation in force: the Go guard at
+  // test/integration/controlplane/audit/audit_test.go L1043-1047 uses `t.Errorf` and scans
+  // EVERY observed event -- a deliberate superset of the expectations, so that a regression
+  // is caught even if the expected-events table were edited to match. Its React counterpart
+  // therefore iterates every returned event with `expect.soft`, reporting all offenders in
+  // one run, and uses a hard `expect` only for the precondition that the events loaded.
+
+  it('hands back every recorded event, with both bodies untouched', async () => {
+    serveRecorded();
+
+    const { result } = await settled({ pageSize: ALL_OBSERVED_AUDIT_EVENTS.length });
+
+    // HARD expect: the precondition. If the page did not load there is nothing below to say,
+    // and a soft assertion here would let the whole guard report success on an empty list.
+    expect(result.current.status).toBe('success');
+    expect(result.current.events).toHaveLength(ALL_OBSERVED_AUDIT_EVENTS.length);
+
+    // Identity, member by member, against the recorded source. `toEqual` on the whole array
+    // would also pass for a hook that rebuilt each event field by field and dropped an
+    // unknown one, so the two payload members are named explicitly.
+    result.current.events.forEach((event, index) => {
+      const recorded = ALL_OBSERVED_AUDIT_EVENTS[index];
+      expect
+        .soft(event.auditID, `F-006-RQ-002: event ${String(index)} is out of recorded order`)
+        .toBe(recorded?.auditID);
+      expect
+        .soft(
+          event.requestObject,
+          `F-006-RQ-002: the requestObject of event ${event.auditID} was altered in transit; ` +
+            'the audited request body must arrive exactly as the API server recorded it',
+        )
+        .toEqual(recorded?.requestObject);
+      expect
+        .soft(
+          event.responseObject,
+          `F-006-RQ-002: the responseObject of event ${event.auditID} was altered in transit. ` +
+            'Stripping it here would make the confidentiality guard unassertable downstream: ' +
+            'every redaction spec would pass while there was nothing left to redact',
+        )
+        .toEqual(recorded?.responseObject);
+    });
+  });
+
+  it('preserves the responseObject of the NON-secrets events that legitimately carry one', async () => {
+    // The control group required by AAP §0.5.2.5. Without at least one event that DOES carry
+    // a response body, a component that blanket-hid every response body would satisfy the
+    // redaction test -- a different, and wrong, behaviour. The recorded RBAC events are that
+    // group: `roles` and `rolebindings` are audited at `RequestResponse` because they carry
+    // no secret material, so their bodies are supposed to survive.
+    serveRecorded();
+
+    const { result } = await settled({ pageSize: ALL_OBSERVED_AUDIT_EVENTS.length });
+
+    expect(result.current.status).toBe('success');
+    const carryingResponseBody = result.current.events.filter(
+      (event) => event.responseObject !== undefined,
+    );
+    expect(
+      carryingResponseBody,
+      'F-006-RQ-002: the recorded stream must still contain the non-secrets events that ' +
+        'carry a response body, or the redaction guard has no control group and a ' +
+        'blanket-hiding component would pass',
+    ).toHaveLength(RBAC_RESPONSE_AUDIT_EVENTS.length);
+
+    for (const event of carryingResponseBody) {
+      expect
+        .soft(
+          event.objectRef?.resource,
+          `F-006-RQ-002: event ${event.auditID} carries a responseObject, so it must NOT be a ` +
+            'secrets event -- a secrets event at RequestResponse is the exact regression V6 closed',
+        )
+        .not.toBe('secrets');
+      expect.soft(event.level).toBe('RequestResponse');
+      expect
+        .soft(typeof event.responseObject, `F-006-RQ-002: event ${event.auditID} lost its object shape`)
+        .toBe('object');
+    }
+  });
+
+  it('accepts a requestObject on a recorded secrets create and update as CORRECT', async () => {
+    // THE EXPLICITLY ACCEPTED TRADE-OFF, recorded at audit_test.go L1040-1042: `secrets` sit
+    // at `Request`, so the audited REQUEST body survives on a create and an update while the
+    // RESPONSE body never does. Asserted positively, because "tightening" the guard into
+    // failing on a `requestObject` would break a control that is passing today -- weakening
+    // by over-correction, which §0.11.1 forbids just as firmly as weakening by relaxation.
+    serveRecorded(SECRETS_REQUEST_AUDIT_EVENTS);
+
+    const { result } = await settled({ pageSize: SECRETS_REQUEST_AUDIT_EVENTS.length });
+
+    expect(result.current.status).toBe('success');
+    expect(result.current.events).toHaveLength(SECRETS_REQUEST_AUDIT_EVENTS.length);
+
+    for (const event of result.current.events) {
+      expect.soft(event.objectRef?.resource).toBe('secrets');
+      expect.soft(event.level).toBe('Request');
+      expect
+        .soft(
+          event.requestObject,
+          `F-006-RQ-002: the requestObject of the recorded ${event.verb} on a Secret is the ` +
+            'accepted Request-over-RequestResponse trade-off and must be present, not treated ' +
+            'as a violation',
+        )
+        .toBeDefined();
+      expect
+        .soft(
+          event.responseObject,
+          `F-006-RQ-002: the recorded ${event.verb} on a Secret must carry NO responseObject; ` +
+            'one appearing here means the audit level regressed to RequestResponse and Secret ' +
+            'response bodies are being written to the audit log',
+        )
+        .toBeUndefined();
+    }
+  });
+
+  it('scans the whole page and finds no secrets event carrying a responseObject', async () => {
+    // The Go guard's exact shape, at audit_test.go L1043-1047:
+    //   if e.Resource == "secrets" && e.ResponseObject { t.Errorf(...) }
+    // over `missingReport.AllEvents` -- every observed event, not only the expected ones.
+    // Accumulating, so a page with several offenders names all of them in one run.
+    serveRecorded();
+
+    const { result } = await settled({ pageSize: ALL_OBSERVED_AUDIT_EVENTS.length });
+
+    expect(result.current.status).toBe('success');
+    expect(result.current.events).toHaveLength(ALL_OBSERVED_AUDIT_EVENTS.length);
+
+    for (const event of result.current.events) {
+      const isSecretsEvent = event.objectRef?.resource === 'secrets';
+      expect
+        .soft(
+          isSecretsEvent && event.responseObject !== undefined,
+          `F-006-RQ-002: audit event ${event.auditID} (${event.verb} ${event.requestURI}) is a ` +
+            'secrets event carrying a responseObject; secrets are audited at exactly Request ' +
+            'and must never record a response body',
+        )
+        .toBe(false);
+    }
+  });
+
+  it('would surface a violating secrets event rather than hide it', async () => {
+    // The guard's own positive control, and the answer to "could that assertion ever fail?".
+    // `../test/fixtures/auditEvents` deliberately ships no violating event -- that is the
+    // failure state, not recorded data -- so the negative example is built here from the
+    // recorded create, exactly as the fixture module's own note prescribes.
+    //
+    // If the hook stripped `responseObject`, or dropped an event it found suspicious, this
+    // case would go green while asserting nothing. It is what proves the previous case is
+    // capable of failing.
+    const [recordedCreate] = secretsRequestAuditEvents(SECRET_AUDIT_REQUEST_NAMESPACE);
+    expect(recordedCreate).toBeDefined();
+    const violating: AuditEvent = {
+      ...(recordedCreate as AuditEvent),
+      level: 'RequestResponse',
+      // Obviously synthetic, and deliberately carrying nothing that resembles key material:
+      // §0.11.1's "no secrets, ever" applies with extra force to a body that stands in for a
+      // Secret's own.
+      responseObject: { kind: 'Secret', apiVersion: 'v1', data: {} },
+    };
+    serveRecorded([violating]);
+
+    const { result } = await settled();
+
+    expect(result.current.status).toBe('success');
+    expect(result.current.events).toHaveLength(1);
+    const [surfaced] = result.current.events;
+    expect(surfaced?.objectRef?.resource).toBe('secrets');
+    expect(
+      surfaced?.responseObject,
+      'F-006-RQ-002: a violating secrets event must reach the presentation layer intact. A ' +
+        'hook that dropped or blanked it would silence the very disclosure the guard exists ' +
+        'to find, and every downstream redaction spec would pass vacuously',
+    ).toEqual({ kind: 'Secret', apiVersion: 'v1', data: {} });
+    // ...and the guard, run over that page, finds it. Stated as an expectation so the
+    // detection itself is asserted rather than assumed.
+    const offenders = result.current.events.filter(
+      (event) => event.objectRef?.resource === 'secrets' && event.responseObject !== undefined,
+    );
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0]?.auditID).toBe(recordedCreate?.auditID);
+  });
+});
+
+
 describe('immutability of the returned data', () => {
+  // INVARIANT LOCKED: the returned page and filter are frozen at RUNTIME, not merely typed
+  // `readonly`. The confidentiality guard reads the event list to decide whether a Secret
+  // body was disclosed, so a consumer that sorted it in place or spliced an event out of it
+  // would change the evidence a later assertion examines -- and `readonly` alone is erased
+  // at compile time, so a single cast would be enough to do it (F-006-RQ-002).
+
   it('returns a frozen event list', async () => {
     respondWith({ items: [auditEvent()] });
 
@@ -1194,18 +2176,28 @@ describe('immutability of the returned data', () => {
 });
 
 describe('refresh', () => {
+  // INVARIANT LOCKED: refresh re-asks the SAME question and can recover from a refusal, and
+  // a request abandoned by unmounting is a cancellation rather than a failure.
+  //
+  // Re-asking the same question matters because a refresh that quietly changed page or filter
+  // would report on a different result set than the one on screen; recovering from a refusal
+  // matters because a panel stuck in its error state after a transient 503 would never
+  // observe the audit stream again (F-006-RQ-003).
+
   it('re-issues the same query', async () => {
+    const issued = respondWith({ items: [auditEvent()] });
+
     const { result } = await settled({ filter: { resource: 'secrets' } });
-    expect(requestedQueries).toHaveLength(1);
+    expect(issued).toHaveLength(1);
 
     await act(async () => {
       result.current.refresh();
     });
     await waitFor(() => {
-      expect(requestedQueries).toHaveLength(2);
+      expect(issued).toHaveLength(2);
     });
 
-    expect(requestedQueries[1]).toBe(requestedQueries[0]);
+    expect(issued[1]).toBe(issued[0]);
   });
 
   it('recovers from an error state', async () => {
@@ -1232,28 +2224,42 @@ describe('refresh', () => {
     expect(result.current.events).toHaveLength(1);
   });
 
-  it('does not report an error when a slow request is aborted by unmounting', async () => {
+  it('does not report an error when an in-flight request is aborted by unmounting', async () => {
+    // GATED, NOT TIMED. Holding the response open for a fixed number of milliseconds and
+    // then sleeping slightly longer, hoping the order comes out right, is decided by the
+    // machine rather than by the test; the order is stated outright here instead, so the
+    // property is proven with no clock in the experiment at all.
+    const held = gate();
+    let answered = false;
+    const observedStatuses: string[] = [];
     server.use(
       http.get(AUDIT_EVENTS_ENDPOINT, async () => {
-        await new Promise((resolve) => {
-          setTimeout(resolve, 100);
-        });
+        await held.passed;
+        answered = true;
         return HttpResponse.json({ items: [auditEvent()] } as never);
       }),
     );
 
     const { result, unmount } = renderHook(() => useAuditEvents());
     expect(result.current.status).toBe('loading');
+    observedStatuses.push(result.current.status);
 
     unmount();
-    await new Promise((resolve) => {
-      setTimeout(resolve, 150);
+    // Released only AFTER the unmount, so the response provably arrives at a hook that no
+    // longer exists -- which is the situation under test rather than an approximation of it.
+    held.open();
+    await waitFor(() => {
+      expect(answered).toBe(true);
     });
 
-    // Nothing to assert on the unmounted hook itself; the property under test is that no
-    // unhandled rejection or state-update-after-unmount warning escaped, which the
-    // setup file's console handling and Vitest's unhandled-error tracking would surface.
-    expect(true).toBe(true);
+    // The unmounted hook must not have been driven into an error state: the abort is a
+    // cancellation, not a failure. `result.current` still holds the last rendered value, so
+    // asserting on it is meaningful rather than vacuous -- the previous shape asserted
+    // `true === true`, which no defect could ever have falsified.
+    expect(result.current.status).toBe('loading');
+    expect(result.current.error).toBeNull();
+    expect(result.current.isEmpty).toBe(false);
+    expect(observedStatuses).toEqual(['loading']);
   });
 });
 

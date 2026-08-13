@@ -514,6 +514,33 @@ describe('ConfidentialityRedaction — an unestablished identity fails closed', 
 // ---------------------------------------------------------------------------
 
 describe('ConfidentialityRedaction — every page is scanned before a whole-set claim', () => {
+  /**
+   * How long to wait for a state that needs MORE THAN ONE sequential round trip.
+   *
+   * WHY THIS IS STATED RATHER THAN LEFT TO THE DEFAULT, AND WHY IT IS NOT A WEAKENED
+   * ASSERTION. `waitFor` defaults to a 1000 ms budget, which is a budget for ONE render, not
+   * for a traversal: the cases below deliberately serve more events than fit on a page, so the
+   * awaited state is only reachable after the panel has fetched page one, rendered it, and then
+   * fetched page two — and the refresh case does that twice over. MEASURED under the full tier
+   * running in parallel on a four-CPU machine, reaching page two took 284-658 ms across six
+   * attempts. A 1000 ms budget is therefore under 2x the observed worst case, and it was
+   * observed to LOSE: a full-suite run failed here with page one rendered and the summary still
+   * reading "Further pages are still being scanned", i.e. a traversal that was progressing
+   * normally and simply had not finished being waited for.
+   *
+   * Nothing is relaxed by naming a longer budget. The assertion is unchanged and still has to
+   * become true: a panel that genuinely never reads page two — the exact defect this whole group
+   * exists to catch — still fails, just at a later bound. What is removed is the dependence on
+   * how fast the machine is, which AAP §0.7.2 requires of this suite and which matters
+   * disproportionately here because `web/vitest.config.ts` configures no `retry` and
+   * `hack/jenkins/test-dockerized.sh` runs `make test-web` under `set -o errexit`, so a single
+   * load-sensitive spec takes the whole Prow job with it.
+   *
+   * Comfortably inside the 10 000 ms `testTimeout` that config pins, so a genuinely stuck
+   * traversal still surfaces as this assertion failing rather than as the test file timing out.
+   */
+  const TRAVERSAL_TIMEOUT_MS = 5000;
+
   /** Builds `count` distinct clean events, so the offender's page can be chosen. */
   function filler(count: number): AuditEvent[] {
     return Array.from({ length: count }, (_unused, index) => ({
@@ -531,9 +558,12 @@ describe('ConfidentialityRedaction — every page is scanned before a whole-set 
     server.use(auditEventsHandler([...filler(AUDIT_EVENTS_DEFAULT_PAGE_SIZE), offender]));
     const { container } = renderWithProviders(<ConfidentialityRedaction />);
 
-    await waitFor(() => {
-      expect(container).toHaveTextContent('Withheld 1 response body');
-    });
+    await waitFor(
+      () => {
+        expect(container).toHaveTextContent('Withheld 1 response body');
+      },
+      { timeout: TRAVERSAL_TIMEOUT_MS },
+    );
     expect(text(container)).not.toContain(RESPONSE_MARKER);
     expect(container).toHaveTextContent(
       `Scanned ${String(AUDIT_EVENTS_DEFAULT_PAGE_SIZE + 1)} audit events.`,
@@ -546,9 +576,12 @@ describe('ConfidentialityRedaction — every page is scanned before a whole-set 
     server.use(auditEventsHandler(events));
     const { container } = renderWithProviders(<ConfidentialityRedaction />);
 
-    await waitFor(() => {
-      expect(container).toHaveTextContent('no body was withheld');
-    });
+    await waitFor(
+      () => {
+        expect(container).toHaveTextContent('no body was withheld');
+      },
+      { timeout: TRAVERSAL_TIMEOUT_MS },
+    );
     // The count proves the claim is made over the UNION rather than over one page.
     expect(container).toHaveTextContent(`Scanned ${String(events.length)} audit events.`);
     expect(container).not.toHaveTextContent(SCAN_IN_PROGRESS_TEXT);
@@ -590,9 +623,12 @@ describe('ConfidentialityRedaction — every page is scanned before a whole-set 
 
     // A row from page one and the offender from page two are on screen together, so a
     // reader sees the whole population the summary counts.
-    await waitFor(() => {
-      expect(screen.getByRole('rowheader', { name: 'offender-page-two' })).toBeInTheDocument();
-    });
+    await waitFor(
+      () => {
+        expect(screen.getByRole('rowheader', { name: 'offender-page-two' })).toBeInTheDocument();
+      },
+      { timeout: TRAVERSAL_TIMEOUT_MS },
+    );
     expect(screen.getByRole('rowheader', { name: 'filler-0' })).toBeInTheDocument();
   });
 
@@ -602,18 +638,24 @@ describe('ConfidentialityRedaction — every page is scanned before a whole-set 
     const user = userEvent.setup();
     const { container } = renderWithProviders(<ConfidentialityRedaction />);
 
-    await waitFor(() => {
-      expect(container).toHaveTextContent(`Scanned ${String(events.length)} audit events.`);
-    });
+    await waitFor(
+      () => {
+        expect(container).toHaveTextContent(`Scanned ${String(events.length)} audit events.`);
+      },
+      { timeout: TRAVERSAL_TIMEOUT_MS },
+    );
 
     await user.click(screen.getByRole('button', { name: 'Refresh audit events' }));
 
     // Waited on the COMPLETED state rather than on the count. The pre-click text already
     // carried the same count, so waiting on that alone would be satisfied instantly by the
     // stale render and the assertion below would race the rescan.
-    await waitFor(() => {
-      expect(container).toHaveTextContent('no body was withheld');
-    });
+    await waitFor(
+      () => {
+        expect(container).toHaveTextContent('no body was withheld');
+      },
+      { timeout: TRAVERSAL_TIMEOUT_MS },
+    );
     // Discarding is not optional: keeping the previous pages would mix two reads of a
     // changing audit log into one population. The count returning to exactly its previous
     // value — rather than doubling — is the evidence that the traversal ran again from the

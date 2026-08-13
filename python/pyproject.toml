@@ -355,17 +355,42 @@ warn_no_return = true
 # hypothesis, pytest itself) IS typed, and mypy's `X.*` pattern already matches
 # both `X` and its submodules.
 #
-# PENDING ENTRY, deliberately absent until it is needed: PyYAML 6.0.3 is a pinned
-# dependency but ships no py.typed marker (verified in the installed
-# distribution), and nothing under python/ imports it yet - the config-schema tier
-# that will (AAP 0.4.2.3: test_encryption_provider_config.py,
-# test_namespace_pss_labels.py, test_admission_webhook_failclosed.py and the three
-# beside them) is not written. Add "yaml.*" to the list below IN THE SAME CHANGE as
-# the first module that imports yaml. Do NOT reach for types-PyYAML instead: AAP
-# 0.6.1.1 pins exactly eighteen direct Python distributions, so a nineteenth would
-# be a dependency-inventory change rather than a typing fix.
+# FORMERLY-PENDING ENTRY, NOW LIVE BECAUSE ITS CONSUMERS LANDED: PyYAML 6.0.3 is a
+# pinned dependency that ships no py.typed marker (verified in the installed
+# distribution), so mypy 2.3.0 reports `Library stubs not installed for "yaml"
+# [import-untyped]` for any module that imports it. The instruction that stood here
+# previously - add "yaml.*" IN THE SAME CHANGE as the first module that imports yaml,
+# never ahead of it - is honoured: the config-schema tier of AAP 0.4.2.3 has arrived,
+# and four of its six modules decode committed or generated YAML with
+# `yaml.safe_load`/`yaml.safe_load_all`:
+#
+#   tests/unit/config/test_encryption_provider_config.py
+#       cluster/gce/manifests/encryption-provider-config.yml            (V3)
+#   tests/unit/config/test_namespace_pss_labels.py
+#       cluster/manifests/namespace-pss-labels.yaml, a multi-document stream (V2)
+#   tests/unit/config/test_admission_webhook_failclosed.py
+#       cluster/gce/addons/cloud-pvl-admission/...-webhook-configuration.yaml (V5)
+#   tests/unit/config/test_generated_admission_config.py
+#       the admission_controller_config.yaml the shipped shell generator emits (V2)
+#
+# The tier's remaining two modules - test_admission_control_profiles.py and
+# test_audit_and_etcd_profile_defaults.py - parse the two GCE Bash profiles rather
+# than YAML, so they neither need nor are covered by this entry. No further entry is
+# needed for any of them either way: `yaml.*` already matches both `yaml` and its
+# submodules.
+#
+# types-PyYAML was deliberately NOT used instead: AAP 0.6.1.1 pins exactly eighteen
+# direct Python distributions, so a nineteenth would be a dependency-inventory
+# change rather than a typing fix.
+#
+# `warn_unused_configs = true` above still applies, which is why the timing rule
+# matters: an entry here with no matching import is reported as an unused section,
+# so nothing may be added to this list ahead of its first consumer. Both entries
+# below are consumed today - "kubernetes.*" by tests/fixtures/pss_pods.py and
+# tests/helpers/manifest.py, "yaml.*" by the four config-schema modules above.
 [[tool.mypy.overrides]]
 module = [
   "kubernetes.*",
+  "yaml.*",
 ]
 ignore_missing_imports = true
