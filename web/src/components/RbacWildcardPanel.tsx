@@ -137,8 +137,24 @@ import {
   REFRESH_UNAVAILABLE_TITLE as SHARED_REFRESH_UNAVAILABLE_TITLE,
   resolveRefreshHandler,
 } from './refreshContract';
-import { readBoolean, strictestVerdict } from '../domain/evidence';
+import {
+  type EffectiveVerdict,
+  type EvidenceAbsenceReason,
+  readBoolean,
+  readNumber,
+  readString,
+  strictestVerdict,
+} from '../domain/evidence';
 import { V1_OBSERVATIONS } from '../domain/observationIds';
+import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
+// `usePanelLabelId` is deliberately NOT imported here: this panel names its region with a
+// literal `aria-label` rather than by pointing at its heading, so the region keeps its
+// accessible name whether or not the heading is rendered.
+import {
+  useLiveRegionRole,
+  usePanelSubheading,
+  useRendersOwnHeading,
+} from './embeddedPanel';
 
 /**
  * The control this panel reports on.
@@ -340,6 +356,147 @@ export const SUBJECT_ACCESS_REVIEW_PROBES = [
 ] as const satisfies readonly SubjectAccessReviewProbe[];
 
 /**
+ * The only subject KIND a full-wildcard binding may name — `rbacapi.GroupKind`
+ * (`rbac_test.go` L1294), corroborated by `policy.go` L681.
+ *
+ * Both halves of that condition are load-bearing: a binding to a ServiceAccount or
+ * to a User *named* `system:masters` is still an offender, because the kind must be
+ * `Group`. Kept here as well as in the fixture because a component may not import a
+ * fixture, and the two are compared for equality by the paired spec.
+ */
+export const PERMITTED_WILDCARD_SUBJECT_KIND = 'Group';
+
+/**
+ * What a MEASURED mismatch on one evidence check means.
+ *
+ *   'finding'          — the measurement is a positive observation of a
+ *                        least-privilege defect. The oracle reports these with
+ *                        `t.Errorf` and continues, so they accumulate and each one
+ *                        is a `fail`.
+ *   'not-established'  — the measurement shows the check asked a DIFFERENT question
+ *                        from the one this control is about, so nothing is proven
+ *                        either way. That is `unknown`, never `fail`: claiming a
+ *                        defect from a measurement of something else would be as
+ *                        untruthful as claiming a pass.
+ */
+export type RbacEvidenceMismatchMeaning = 'finding' | 'not-established';
+
+/**
+ * One measured fact that must hold before V1 can be a pass, beyond the two
+ * SubjectAccessReview probes.
+ *
+ * WHY THIS EXISTS AT ALL. V1 is TWO strategies, not one
+ * (`rbac_test.go` L1170-1299): the SubjectAccessReview evaluation *and* the
+ * bootstrap-policy enumeration. The panel previously gated its verdict on the two
+ * SAR booleans alone, so a payload that recorded the wildcard rule escaping
+ * `cluster-admin`, or a binding naming a subject outside `system:masters`, or a
+ * SubjectAccessReview evaluated against something NARROWER than
+ * {@link FULL_WILDCARD_LABEL}, still rendered a clean pass — on half of the
+ * assertions the oracle makes. AAP §0.7.2 makes assertion density part of the
+ * contract, and AAP §0.11.1 forbids weakening a boundary condition, so both halves
+ * must be ESTABLISHED and both are rendered as first-class checks rather than left
+ * as decorative observations.
+ *
+ * The request identity is included here rather than beside the probes because it is
+ * the same kind of fact: something the report either measured or did not. A denial
+ * of `get`/`""`/`pods` is a true statement about a different question, and reading
+ * it as evidence about `*`/`*`/`*` is how a panel comes to certify authority it
+ * never probed.
+ */
+export interface RbacEvidenceCheck {
+  /** Stable identifier for consumers to key off; not a Go symbol. */
+  readonly id:
+    | 'request-identity'
+    | 'wildcard-role-is-cluster-admin'
+    | 'no-wildcard-role-outside-cluster-admin'
+    | 'no-wildcard-binding-outside-masters';
+  /** The row header, which is also how a spec addresses this row. */
+  readonly title: string;
+  /**
+   * The EXACT `ControlObservation.label` this fact is reported under, taken from
+   * {@link V1_OBSERVATIONS} so the recording fixture and this panel cannot name it
+   * differently. Compared with `===`, never with `includes`.
+   */
+  readonly observationLabel: string;
+  /** The requirement this check enforces. */
+  readonly requirementId: (typeof RBAC_WILDCARD_REQUIREMENT_IDS)[number];
+  /** Where in `test/integration/auth/rbac_test.go` the fact is recorded from. */
+  readonly goLines: string;
+  /** See {@link RbacEvidenceMismatchMeaning}. */
+  readonly mismatchMeaning: RbacEvidenceMismatchMeaning;
+  /** The requirement in words, for the table's "Required" cell. */
+  readonly requirement: string;
+  /**
+   * The value that must be measured, AT ITS WIRE TYPE.
+   *
+   * The type is part of the requirement, not an implementation detail: a count
+   * reported as the string `'0'` has not been counted, and reading it as zero would
+   * invent evidence. `readNumber` and `readString` refuse the other's type, so a
+   * type mismatch resolves to `unknown` rather than to a match.
+   */
+  readonly expected:
+    | { readonly kind: 'string'; readonly value: string }
+    | { readonly kind: 'number'; readonly value: number };
+}
+
+/**
+ * The four facts, in the order the oracle establishes them.
+ *
+ * ASSERTION DENSITY IS PART OF THE CONTRACT (AAP §0.7.2): there are exactly four and
+ * the panel renders all four rows always, so a report that measured none is visibly a
+ * report that measured none.
+ */
+export const RBAC_EVIDENCE_CHECKS = [
+  {
+    id: 'request-identity',
+    title: `SubjectAccessReview requested authority is ${FULL_WILDCARD_LABEL}`,
+    observationLabel: V1_OBSERVATIONS.requestedAttributes,
+    requirementId: 'F-001-RQ-001',
+    goLines: 'L1225, L1243',
+    // A narrower request is a true measurement of a different question.
+    mismatchMeaning: 'not-established',
+    requirement: `Exactly ${FULL_WILDCARD_LABEL}`,
+    expected: { kind: 'string', value: FULL_WILDCARD_LABEL },
+  },
+  {
+    id: 'wildcard-role-is-cluster-admin',
+    title: `ClusterRoles carrying a full wildcard rule`,
+    observationLabel: V1_OBSERVATIONS.wildcardClusterRoles,
+    requirementId: 'F-001-RQ-002',
+    goLines: 'L1270-L1278',
+    // Both directions are findings the oracle raises with `t.Errorf`: an EXTRA role
+    // carrying the wildcard (L1274-1278) and `cluster-admin` no longer carrying it
+    // (L1271-1273), the second of which would mean the enumeration is measuring a
+    // policy that is not the bootstrapped one.
+    mismatchMeaning: 'finding',
+    requirement: `Exactly ${CLUSTER_ADMIN_ROLE_NAME}`,
+    expected: { kind: 'string', value: CLUSTER_ADMIN_ROLE_NAME },
+  },
+  {
+    id: 'no-wildcard-role-outside-cluster-admin',
+    title: `ClusterRoles carrying a full wildcard rule outside ${CLUSTER_ADMIN_ROLE_NAME}`,
+    observationLabel: V1_OBSERVATIONS.wildcardClusterRolesOutsideClusterAdmin,
+    requirementId: 'F-001-RQ-002',
+    goLines: 'L1274-L1278',
+    mismatchMeaning: 'finding',
+    requirement: 'Exactly 0',
+    expected: { kind: 'number', value: 0 },
+  },
+  {
+    id: 'no-wildcard-binding-outside-masters',
+    title:
+      `Full-wildcard bindings with a subject outside ` +
+      `${PERMITTED_WILDCARD_SUBJECT_KIND}/${SYSTEM_PRIVILEGED_GROUP}`,
+    observationLabel: V1_OBSERVATIONS.wildcardBindingsOutsideMasters,
+    requirementId: 'F-001-RQ-002',
+    goLines: 'L1286-L1297',
+    mismatchMeaning: 'finding',
+    requirement: 'Exactly 0',
+    expected: { kind: 'number', value: 0 },
+  },
+] as const satisfies readonly RbacEvidenceCheck[];
+
+/**
  * What the server reported for one probe.
  *
  * `'unreported'` is a first-class outcome and is deliberately NOT folded into
@@ -416,6 +573,100 @@ export function readProbeDecision(
 }
 
 /**
+ * What the report said about one evidence check.
+ *
+ * A measured value is carried as text that is ALREADY safe to render
+ * (`safeObservationValue`), rather than as the raw wire value. Sanitizing at the
+ * boundary means every consumer of this model gets the bounded form, so a second
+ * render site cannot reintroduce the unbounded one — which is the whole point of
+ * having one sanitizer (AAP §0.11.1: no unbounded external text reaches the
+ * document).
+ *
+ * An absence keeps its REASON rather than being flattened to a string here, so the
+ * decision logic stays free of presentation and the row's wording lives with the
+ * rest of the rendered text.
+ */
+export type RbacEvidenceObservedValue =
+  | { readonly kind: 'measured'; readonly text: string }
+  | { readonly kind: 'absent'; readonly reason: EvidenceAbsenceReason };
+
+/** One evidence check, together with what the report said about it. */
+export interface RbacEvidenceMeasurement {
+  /** The check that was evaluated. */
+  readonly check: RbacEvidenceCheck;
+  /**
+   * The raw outcome of the comparison: `'pass'` when the required value was measured,
+   * `'fail'` when a different value was measured, `'unknown'` when nothing usable was.
+   * Never `'warn'` — a boundary condition either holds or it does not.
+   */
+  readonly verdict: EffectiveVerdict;
+  /**
+   * What this check contributes to the PANEL's verdict, which is
+   * {@link RbacEvidenceMeasurement.verdict} passed through
+   * {@link RbacEvidenceCheck.mismatchMeaning}: a mismatch on a `'not-established'`
+   * check contributes `'unknown'` rather than `'fail'`, because it is a measurement
+   * of a different question and proves nothing about this control.
+   */
+  readonly contributedVerdict: EffectiveVerdict;
+  /** What the report said. See {@link RbacEvidenceObservedValue}. */
+  readonly observed: RbacEvidenceObservedValue;
+}
+
+/**
+ * Evaluates one evidence check against the evidence bag.
+ *
+ * EXACTLY ONE OBSERVATION, MATCHED EXACTLY, AT THE REQUIRED WIRE TYPE — the same
+ * three conditions {@link readProbeDecision} enforces, for the same reasons. A
+ * duplicate is a conflict rather than "the first one"; a count reported as the string
+ * `'0'` has not been counted, and coercing it would invent the evidence the check
+ * exists to demand.
+ *
+ * @param check - the fact to evaluate.
+ * @param observations - the `evidence.observations` list, possibly empty.
+ * @returns the measurement. See {@link RbacEvidenceMeasurement}.
+ */
+export function measureRbacEvidenceCheck(
+  check: RbacEvidenceCheck,
+  observations: readonly ControlObservation[],
+): RbacEvidenceMeasurement {
+  const found =
+    check.expected.kind === 'string'
+      ? readString(observations, check.observationLabel)
+      : readNumber(observations, check.observationLabel);
+  if (found.state !== 'reported') {
+    return {
+      check,
+      verdict: 'unknown',
+      contributedVerdict: 'unknown',
+      observed: { kind: 'absent', reason: found.state },
+    };
+  }
+  const holds = found.value === check.expected.value;
+  return {
+    check,
+    verdict: holds ? 'pass' : 'fail',
+    contributedVerdict: holds ? 'pass' : check.mismatchMeaning === 'finding' ? 'fail' : 'unknown',
+    observed: { kind: 'measured', text: safeObservationValue(found.value) },
+  };
+}
+
+/**
+ * Evaluates all four evidence checks, in {@link RBAC_EVIDENCE_CHECKS} order.
+ *
+ * The whole list is always returned, including for an empty bag, so the table renders
+ * four rows whatever the report contained and "not measured" is visible rather than
+ * absent.
+ *
+ * @param observations - the `evidence.observations` list, possibly empty.
+ * @returns one measurement per check.
+ */
+export function measureRbacEvidence(
+  observations: readonly ControlObservation[],
+): readonly RbacEvidenceMeasurement[] {
+  return RBAC_EVIDENCE_CHECKS.map((check) => measureRbacEvidenceCheck(check, observations));
+}
+
+/**
  * Everything the panel needs to render, derived once from a payload.
  *
  * Separated from the markup so that the security-invariant decision logic is
@@ -454,6 +705,17 @@ export interface RbacWildcardAssessment {
    * which is why it is not folded into either of the others.
    */
   readonly controlConflicting: boolean;
+  /**
+   * The four bootstrap-enumeration and request-identity checks, in
+   * {@link RBAC_EVIDENCE_CHECKS} order, always all four.
+   */
+  readonly evidenceChecks: readonly RbacEvidenceMeasurement[];
+  /**
+   * The four checks combined through `strictestVerdict`: `'fail'` if any measured a
+   * least-privilege defect, `'unknown'` if any was not established, `'pass'` only when
+   * all four hold.
+   */
+  readonly evidenceVerdict: EffectiveVerdict;
   /** Every reported finding, in server order, complete and untruncated. */
   readonly findings: readonly ControlFinding[];
   /** Every server-emitted warning, in server order. */
@@ -471,7 +733,8 @@ export interface RbacWildcardAssessment {
  * `'warn'` or `'unknown'`. Precedence, highest first:
  *
  *   1. `'fail'` — a finding was reported, or the payload said `'fail'`, or the
- *      non-master identity resolved `*`/`*`/`*`. A detected escalation outranks
+ *      non-master identity resolved `*`/`*`/`*`, or an enumeration check MEASURED a
+ *      least-privilege defect. A detected escalation outranks
  *      a broken positive control: those two cannot both be true of one cluster
  *      (it cannot allow everything and deny everything at once), and of the two
  *      readings `'fail'` is the one that can never be mistaken for a clean bill
@@ -483,8 +746,11 @@ export interface RbacWildcardAssessment {
  *   3. `'unknown'` — the positive control is denied, unreported or conflicting. Zero
  *      findings is only meaningful once the check has proved it can say "allowed" at all
  *      (`rbac_test.go` L1252-1254).
- *   4. the reported verdict, for `'warn'` and `'pass'`.
- *   5. `'unknown'` — anything else, including a payload that reported
+ *   4. `'unknown'` — any of the four {@link RBAC_EVIDENCE_CHECKS} was not established:
+ *      the SubjectAccessReview asked about something other than
+ *      {@link FULL_WILDCARD_LABEL}, or the bootstrap enumeration was not reported.
+ *   5. the reported verdict, for `'warn'` and `'pass'`.
+ *   6. `'unknown'` — anything else, including a payload that reported
  *      `'unknown'` itself.
  *
  * WHY RULE 2 EXISTS. Both probes must be ESTABLISHED, not merely un-contradicted. The
@@ -492,6 +758,16 @@ export interface RbacWildcardAssessment {
  * a satisfied positive control and NO negative-assertion evidence at all rendered a
  * clean pass -- on half the assertions the oracle makes. AAP §0.7.2 makes assertion
  * density part of the contract: V1 keeps BOTH strategies, so both must be observed.
+ *
+ * WHY RULE 4 EXISTS, AND WHY IT IS THE SAME ARGUMENT ONE LEVEL UP. "Both strategies"
+ * means the SubjectAccessReview evaluation AND the bootstrap-policy enumeration
+ * (`rbac_test.go` L1170-1299). Gating on the two SAR booleans alone made the
+ * enumeration decorative: a payload recording the wildcard rule escaping
+ * `cluster-admin`, or a binding naming a subject outside `system:masters`, still
+ * rendered PASS, and so did a payload whose review had probed something narrower than
+ * `*`/`*`/`*`. Rule 1 now carries the measured defects and rule 4 carries the
+ * unmeasured ones, which is the same fail-versus-unknown split rules 1 and 2 already
+ * make for the probes. See {@link RbacEvidenceCheck}.
  *
  * @param reported - the verdict the payload carried.
  * @param evidence - the locally derived evidence.
@@ -504,15 +780,25 @@ export function resolveRbacWildcardVerdict(
     readonly findingCount: number;
     readonly nonMasterDecision: ProbeDecision;
     readonly systemMastersDecision: ProbeDecision;
+    /** The four checks combined. See {@link RbacWildcardAssessment.evidenceVerdict}. */
+    readonly evidenceVerdict: EffectiveVerdict;
   },
 ): ControlVerdict {
-  if (reported === 'fail' || evidence.escalated || evidence.findingCount > 0) {
+  if (
+    reported === 'fail' ||
+    evidence.escalated ||
+    evidence.findingCount > 0 ||
+    evidence.evidenceVerdict === 'fail'
+  ) {
     return 'fail';
   }
   if (evidence.nonMasterDecision !== 'denied') {
     return 'unknown';
   }
   if (evidence.systemMastersDecision !== 'allowed') {
+    return 'unknown';
+  }
+  if (evidence.evidenceVerdict !== 'pass') {
     return 'unknown';
   }
   if (reported === 'warn' || reported === 'pass') {
@@ -559,6 +845,10 @@ export function assessRbacWildcard(
   const findings = control?.findings ?? [];
   const warnings = control?.warnings ?? [];
   const escalated = nonMasterDecision === 'allowed';
+  const evidenceChecks = measureRbacEvidence(observations);
+  const evidenceVerdict = strictestVerdict(
+    evidenceChecks.map((measurement) => measurement.contributedVerdict),
+  );
 
   return {
     verdict: resolveRbacWildcardVerdict(control?.verdict ?? 'unknown', {
@@ -566,6 +856,7 @@ export function assessRbacWildcard(
       findingCount: findings.length,
       nonMasterDecision,
       systemMastersDecision,
+      evidenceVerdict,
     }),
     nonMasterDecision,
     systemMastersDecision,
@@ -573,6 +864,8 @@ export function assessRbacWildcard(
     controlBroken: systemMastersDecision === 'denied',
     controlUnconfirmed: systemMastersDecision === 'unreported',
     controlConflicting: systemMastersDecision === 'conflicting',
+    evidenceChecks,
+    evidenceVerdict,
     findings,
     warnings,
   };
@@ -679,6 +972,15 @@ export const PRIVILEGE_ESCALATION_TEXT =
 /** Accessible name of the probe table, supplied by its caption. */
 export const PROBE_TABLE_CAPTION =
   `SubjectAccessReview probes for full wildcard authority ${FULL_WILDCARD_LABEL}`;
+
+/**
+ * Accessible name of the evidence table, supplied by its caption.
+ *
+ * Deliberately unlike {@link PROBE_TABLE_CAPTION}, so both tables are addressable by
+ * name and a spec asserting on one cannot accidentally read the other.
+ */
+export const EVIDENCE_TABLE_CAPTION =
+  'Request identity and bootstrap policy enumeration';
 
 /** Accessible name of the re-request affordance. */
 export const REFRESH_BUTTON_LABEL = 'Re-run the RBAC least-privilege check';
@@ -809,6 +1111,107 @@ function describeProbeOutcome(probe: SubjectAccessReviewProbe, decision: ProbeDe
   return probe.severity === 'accumulate' ? PROBE_OUTCOME_FINDING : PROBE_OUTCOME_BROKEN;
 }
 
+/** Observed cell: the fact was never reported. */
+export const EVIDENCE_OBSERVED_UNREPORTED = 'Not reported';
+
+/** Observed cell: the fact was reported more than once, so none of them counts. */
+export const EVIDENCE_OBSERVED_CONFLICTING = 'Reported more than once';
+
+/** Observed cell: the fact was reported at a type it cannot be read at. */
+export const EVIDENCE_OBSERVED_WRONG_TYPE = 'Reported at an unusable type';
+
+/**
+ * What an unusable read shows in the Observed cell, per reason.
+ *
+ * A lookup rather than a conditional chain: exhaustive over
+ * {@link EvidenceAbsenceReason} by construction, so a fourth reason added upstream
+ * would be a `tsc --noEmit` error here rather than a silently blank cell. The three
+ * are kept apart because the remedies differ — a gap in the report, a broken report,
+ * and a contract mismatch — and because collapsing them would make all three read as
+ * "not measured".
+ */
+export const EVIDENCE_OBSERVED_ABSENCE_TEXT: Readonly<Record<EvidenceAbsenceReason, string>> =
+  Object.freeze({
+    unreported: EVIDENCE_OBSERVED_UNREPORTED,
+    conflict: EVIDENCE_OBSERVED_CONFLICTING,
+    'wrong-type': EVIDENCE_OBSERVED_WRONG_TYPE,
+  });
+
+/** Outcome cell: the required value was measured. */
+export const EVIDENCE_OUTCOME_HOLDS = PROBE_OUTCOME_HOLDS;
+
+/**
+ * Outcome cell: nothing usable was measured, so this half of the control is unproven.
+ *
+ * Worded so it cannot be mistaken for either a holding check or a finding: an absence
+ * of evidence is neither proof of a defect nor proof of correctness, and it is exactly
+ * what blocks a pass without inventing one.
+ */
+export const EVIDENCE_OUTCOME_NOT_ESTABLISHED =
+  'Not established — not counted as evidence';
+
+/**
+ * Outcome cell: a least-privilege defect was MEASURED.
+ *
+ * This is the enumeration half of the oracle's `t.Errorf` channel
+ * (`rbac_test.go` L1271-1297), so it is a security finding and it fails the control.
+ */
+export const EVIDENCE_OUTCOME_FINDING = 'Least-privilege finding';
+
+/**
+ * Outcome cell: the review measured a DIFFERENT request from the one this control is
+ * about.
+ *
+ * Not a finding, and deliberately not worded as one: a denial of a narrower request is
+ * a true statement about another question. Nothing about full wildcard authority is
+ * established either way, so the verdict is floored at unknown rather than failed.
+ */
+export const EVIDENCE_OUTCOME_WRONG_REQUEST =
+  `Measured a request other than ${FULL_WILDCARD_LABEL} — nothing is established`;
+
+/** Column headers of the evidence table, in render order. */
+const EVIDENCE_COLUMN_HEADERS: readonly string[] = Object.freeze([
+  'Measured fact',
+  'Requirement',
+  'Required',
+  'Observed',
+  'Outcome',
+]);
+
+/**
+ * The outcome cell's text for one evidence measurement.
+ *
+ * The `mismatchMeaning` split is what keeps the two readings of a mismatch visible in
+ * the table itself: a measured defect is a finding, whereas a measurement of a
+ * different question establishes nothing. See {@link RbacEvidenceMismatchMeaning}.
+ *
+ * @param measurement - the measurement to describe.
+ * @returns the cell text.
+ */
+export function describeEvidenceOutcome(measurement: RbacEvidenceMeasurement): string {
+  if (measurement.verdict === 'pass') {
+    return EVIDENCE_OUTCOME_HOLDS;
+  }
+  if (measurement.verdict === 'unknown') {
+    return EVIDENCE_OUTCOME_NOT_ESTABLISHED;
+  }
+  return measurement.check.mismatchMeaning === 'finding'
+    ? EVIDENCE_OUTCOME_FINDING
+    : EVIDENCE_OUTCOME_WRONG_REQUEST;
+}
+
+/**
+ * The observed cell's text for one evidence measurement.
+ *
+ * @param observed - what the report said.
+ * @returns the cell text, already bounded and safe to render.
+ */
+export function describeEvidenceObserved(observed: RbacEvidenceObservedValue): string {
+  return observed.kind === 'measured'
+    ? observed.text
+    : EVIDENCE_OBSERVED_ABSENCE_TEXT[observed.reason];
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * MARKUP
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -836,9 +1239,18 @@ function PanelFrame({
   readonly children: ReactNode;
   readonly onRefresh: (() => void) | undefined;
 }): ReactElement {
+  // EMBEDDED-AWARE OWN HEADING (m3), bound once for this component.
+  const rendersOwnHeading = useRendersOwnHeading();
   return (
     <section aria-label={RBAC_WILDCARD_PANEL_TITLE}>
-      <h2>{RBAC_WILDCARD_PANEL_TITLE}</h2>
+      {/*
+        EMBEDDED-AWARE OWN HEADING (m3). Standalone, this heading names the panel's region and
+        is the only title on screen. Embedded, the dashboard has already written an `h3` naming
+        this control, so rendering a second title here both DUPLICATED the name and restarted
+        the heading run at a shallower level than the one above it. The region keeps a name
+        either way: `aria-labelledby` points at whichever heading exists.
+      */}
+      {rendersOwnHeading ? <h2>{RBAC_WILDCARD_PANEL_TITLE}</h2> : null}
       {children}
       <button
         type="button"
@@ -862,8 +1274,10 @@ function PanelFrame({
  * finding softly, mirroring `t.Errorf`.
  */
 function PositiveControlNotice({ decision }: { readonly decision: ProbeDecision }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
   if (decision === 'denied') {
-    return <p role="alert">{POSITIVE_CONTROL_BROKEN_TEXT}</p>;
+    return <p role={liveAlertRole}>{POSITIVE_CONTROL_BROKEN_TEXT}</p>;
   }
   if (decision === 'unreported') {
     return <p>{POSITIVE_CONTROL_UNCONFIRMED_TEXT}</p>;
@@ -904,6 +1318,30 @@ function ProbeRow({
 }
 
 /**
+ * One row of the evidence table — a request-identity or bootstrap-enumeration check.
+ *
+ * A `th` with `scope="row"` carries the fact's title, so the row is addressable by the
+ * thing it measures rather than by index, exactly as {@link ProbeRow} is. The Observed
+ * cell holds text that was bounded and redacted when the measurement was taken, so no
+ * unbounded server value reaches the document from here.
+ */
+function EvidenceRow({
+  measurement,
+}: {
+  readonly measurement: RbacEvidenceMeasurement;
+}): ReactElement {
+  return (
+    <tr>
+      <th scope="row">{measurement.check.title}</th>
+      <td>{measurement.check.requirementId}</td>
+      <td>{measurement.check.requirement}</td>
+      <td>{describeEvidenceObserved(measurement.observed)}</td>
+      <td>{describeEvidenceOutcome(measurement)}</td>
+    </tr>
+  );
+}
+
+/**
  * One finding.
  *
  * The optional members are appended as sentences rather than rendered as empty
@@ -915,9 +1353,13 @@ function ProbeRow({
 function FindingItem({ finding }: { readonly finding: ControlFinding }): ReactElement {
   return (
     <li>
-      {finding.message}
-      {finding.subject === undefined ? null : ` Offending object: ${finding.subject}.`}
-      {finding.requirementId === undefined ? null : ` Requirement: ${finding.requirementId}.`}
+      {safeProse(finding.message)}
+      {finding.subject === undefined
+        ? null
+        : ` Offending object: ${safeLabel(finding.subject)}.`}
+      {finding.requirementId === undefined
+        ? null
+        : ` Requirement: ${safeLabel(finding.requirementId)}.`}
     </li>
   );
 }
@@ -928,9 +1370,13 @@ function RbacWildcardLoading({
 }: {
   readonly onRefresh: (() => void) | undefined;
 }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
     <PanelFrame onRefresh={onRefresh}>
-      <p role="status">{RBAC_WILDCARD_LOADING_TEXT}</p>
+      <p role={liveStatusRole}>{RBAC_WILDCARD_LOADING_TEXT}</p>
     </PanelFrame>
   );
 }
@@ -950,10 +1396,20 @@ function RbacWildcardError({
   readonly error: ControlStatusError;
   readonly onRefresh: (() => void) | undefined;
 }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
   return (
     <PanelFrame onRefresh={onRefresh}>
-      <p role="alert">{`${RBAC_WILDCARD_ERROR_PREFIX} ${error.message}`}</p>
+      <p role={liveAlertRole}>{`${RBAC_WILDCARD_ERROR_PREFIX} ${safeProse(error.message)}`}</p>
       <dl>
+        {/*
+          `kind` is a typed union of this tier's own tokens and `httpStatus` is a
+          number, so neither is external prose and neither is sanitized -- passing a
+          local token through a redactor would only make it possible for it to come
+          back changed. `message` and `reason` come from a Kubernetes `Status` body
+          and are the two channels a hostile or broken server controls, so both are
+          bounded and redacted (AAP §0.11.1).
+        */}
         <dt>Failure kind</dt>
         <dd>{error.kind}</dd>
         {error.httpStatus === undefined ? null : (
@@ -965,7 +1421,7 @@ function RbacWildcardError({
         {error.reason === undefined ? null : (
           <>
             <dt>Server reason</dt>
-            <dd>{error.reason}</dd>
+            <dd>{safeLabel(error.reason)}</dd>
           </>
         )}
       </dl>
@@ -988,9 +1444,13 @@ function RbacWildcardEmpty({
   readonly reason: RbacWildcardEmptyReason;
   readonly onRefresh: (() => void) | undefined;
 }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
     <PanelFrame onRefresh={onRefresh}>
-      <p role="status">{`Verdict: ${VERDICT_LABELS.unknown}`}</p>
+      <p role={liveStatusRole}>{`Verdict: ${VERDICT_LABELS.unknown}`}</p>
       <p>
         {reason === 'no-controls-reported'
           ? RBAC_WILDCARD_NO_CONTROLS_TEXT
@@ -1021,6 +1481,14 @@ function RbacWildcardReport({
   readonly control: ControlStatus;
   readonly onRefresh: (() => void) | undefined;
 }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const assessment = assessRbacWildcard(control);
   const requirementIds =
     control.requirementIds !== undefined && control.requirementIds.length > 0
@@ -1029,9 +1497,19 @@ function RbacWildcardReport({
 
   return (
     <PanelFrame onRefresh={onRefresh}>
-      <p role="status">{`Verdict: ${VERDICT_LABELS[assessment.verdict]} — ${control.summary}`}</p>
-      {control.detail === undefined ? null : <p>{control.detail}</p>}
-      <p>{`Requirements covered: ${requirementIds.join(', ')}`}</p>
+      {/*
+        THE VERDICT IS LOCAL, THE SUMMARY IS NOT. `VERDICT_LABELS[...]` is this file's
+        own word for a verdict this file computed, so a server cannot influence it; the
+        summary, detail, requirement identifiers, findings, warnings and timestamp are
+        all server-supplied and every one of them is bounded and redacted on the way in.
+        Prose goes through `safeProse` and identifiers through the harder `safeLabel`,
+        because an identifier that needs 2000 characters is not an identifier.
+      */}
+      <p role={liveStatusRole}>
+        {`Verdict: ${VERDICT_LABELS[assessment.verdict]} — ${safeProse(control.summary)}`}
+      </p>
+      {control.detail === undefined ? null : <p>{safeProse(control.detail)}</p>}
+      <p>{`Requirements covered: ${requirementIds.map(safeLabel).join(', ')}`}</p>
       <p>{RBAC_WILDCARD_INVARIANT_TEXT}</p>
 
       <PositiveControlNotice decision={assessment.systemMastersDecision} />
@@ -1057,7 +1535,31 @@ function RbacWildcardReport({
         </tbody>
       </table>
 
-      <h3>{findingsHeading(assessment.findings.length)}</h3>
+      {/*
+        The enumeration half of V1, rendered as first-class checks rather than left as
+        decorative observations. All four rows always render, so a report that measured
+        none of them is visibly a report that measured none -- which is the difference
+        between an unproven control and a clean one.
+      */}
+      <table>
+        <caption>{EVIDENCE_TABLE_CAPTION}</caption>
+        <thead>
+          <tr>
+            {EVIDENCE_COLUMN_HEADERS.map((header) => (
+              <th key={header} scope="col">
+                {header}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {assessment.evidenceChecks.map((measurement) => (
+            <EvidenceRow key={measurement.check.id} measurement={measurement} />
+          ))}
+        </tbody>
+      </table>
+
+      <Subheading>{findingsHeading(assessment.findings.length)}</Subheading>
       {assessment.findings.length === 0 ? (
         <p>{ABSENT_FINDINGS_TEXT[assessment.verdict]}</p>
       ) : (
@@ -1070,16 +1572,18 @@ function RbacWildcardReport({
 
       {assessment.warnings.length === 0 ? null : (
         <>
-          <h3>{warningsHeading(assessment.warnings.length)}</h3>
+          <Subheading>{warningsHeading(assessment.warnings.length)}</Subheading>
           <ul>
             {assessment.warnings.map((warning, index) => (
-              <li key={index}>{warning}</li>
+              <li key={index}>{safeProse(warning)}</li>
             ))}
           </ul>
         </>
       )}
 
-      {control.observedAt === undefined ? null : <p>{`Evaluated at ${control.observedAt}.`}</p>}
+      {control.observedAt === undefined ? null : (
+        <p>{`Evaluated at ${safeLabel(control.observedAt)}.`}</p>
+      )}
     </PanelFrame>
   );
 }

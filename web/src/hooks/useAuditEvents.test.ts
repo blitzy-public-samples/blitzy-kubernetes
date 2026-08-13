@@ -52,6 +52,8 @@ import {
   AUDIT_EVENTS_QUERY_PARAMS,
   AUDIT_LEVEL_ORDER,
   AUDIT_STAGES,
+  isConfidentialAuditIdentity,
+  resolveAuditResourceIdentity,
   useAuditEvents,
 } from './useAuditEvents';
 import type { AuditEvent } from './useAuditEvents';
@@ -415,6 +417,245 @@ describe('the flattened body form must never be accepted', () => {
   });
 });
 
+describe('nested members are validated to their leaves, not merely as objects', () => {
+  // THE CRITICAL DEFECT THESE CLOSE. `objectRef`, `responseStatus`, the two subjects and
+  // `annotations` were checked only with "is it an object". `objectRef: {}` therefore
+  // passed — and the confidentiality guard, which asks
+  // `event.objectRef?.resource === 'secrets'`, read `undefined` from it, concluded "not a
+  // Secret", and let the event's responseObject be serialized into the document. Every
+  // case below is a Secret event that could carry a body past that guard.
+
+  it.each([
+    ['an empty objectRef', {}],
+    ['a resource of the wrong type', { resource: 7, namespace: 'secret-audit-request' }],
+    ['an empty resource', { resource: '', namespace: 'secret-audit-request' }],
+    ['a null resource', { resource: null }],
+  ])('refuses %s, because an objectRef that exists must say what it refers to', async (
+    _label,
+    objectRef,
+  ) => {
+    respondWith({
+      items: [auditEvent({ objectRef, responseObject: { kind: 'Secret', data: {} } })],
+    });
+
+    const message = await refusedMessage();
+
+    expect(message).toContain('objectRef');
+    expect(message).toContain('resource');
+  });
+
+  it('still accepts an event with NO objectRef, which is a non-resource request', async () => {
+    // The distinction that keeps this strict rather than blunt: an absent objectRef is
+    // legitimate (`/healthz` has none), while a present-but-unreadable one is not.
+    respondWith({
+      items: [auditEvent({ objectRef: undefined, requestURI: '/healthz', verb: 'get' })],
+    });
+
+    const { result } = await settled();
+
+    expect(result.current.status).toBe('success');
+    expect(result.current.events).toHaveLength(1);
+  });
+
+  it('accepts the core API group written as the empty string', async () => {
+    // `apiGroup: ''` IS the core group, so this one member may be empty where the others
+    // may not. A blanket non-empty rule would refuse every core-group event.
+    respondWith({
+      items: [
+        auditEvent({
+          objectRef: { resource: 'secrets', namespace: 'secret-audit-request', apiGroup: '' },
+        }),
+      ],
+    });
+
+    const { result } = await settled();
+
+    expect(result.current.status).toBe('success');
+  });
+
+  it.each([
+    ['namespace', { resource: 'secrets', namespace: 7 }],
+    ['name', { resource: 'secrets', name: {} }],
+    ['subresource', { resource: 'secrets', subresource: 3 }],
+    ['apiVersion', { resource: 'secrets', apiVersion: false }],
+  ])('refuses an objectRef whose %s is not a string', async (member, objectRef) => {
+    respondWith({ items: [auditEvent({ objectRef })] });
+
+    expect(await refusedMessage()).toContain(`objectRef.${member}`);
+  });
+
+  it.each([
+    ['a missing code', { status: 'Success' }],
+    ['a string code', { code: '201' }],
+    ['a fractional code', { code: 201.5 }],
+    ['an out-of-range code', { code: 99 }],
+    ['a code above the range', { code: 600 }],
+  ])('refuses a responseStatus with %s', async (_label, responseStatus) => {
+    // The V2 and V7 controls are decided by EXACT status codes, and none of these can be
+    // compared against 403.
+    respondWith({ items: [auditEvent({ responseStatus })] });
+
+    expect(await refusedMessage()).toContain('responseStatus.code');
+  });
+
+  it('refuses a responseStatus whose reason is not a string', async () => {
+    respondWith({ items: [auditEvent({ responseStatus: { code: 403, reason: 7 } })] });
+
+    expect(await refusedMessage()).toContain('responseStatus.reason');
+  });
+
+  it.each([
+    ['a group of the wrong type', { username: 'u', groups: [7] }],
+    ['a group that is an object', { username: 'u', groups: [{}] }],
+    ['groups that are not a list', { username: 'u', groups: 'system:masters' }],
+    ['a uid of the wrong type', { username: 'u', uid: 7 }],
+  ])('refuses a user with %s rather than narrowing the identity', async (_label, user) => {
+    // Dropping an unreadable group would produce a DIFFERENT, narrower identity — and
+    // the identity of the principal is what makes an audit event evidence.
+    respondWith({ items: [auditEvent({ user })] });
+
+    expect(await refusedMessage()).toContain('user');
+  });
+
+  it('refuses an impersonatedUser that is malformed', async () => {
+    respondWith({ items: [auditEvent({ impersonatedUser: { username: '' } })] });
+
+    expect(await refusedMessage()).toContain('impersonatedUser');
+  });
+
+  it('validates user.extra to its leaves', async () => {
+    respondWith({
+      items: [auditEvent({ user: { username: 'u', extra: { 'scopes.authorization': [7] } } })],
+    });
+
+    expect(await refusedMessage()).toContain('user.extra');
+  });
+
+  it('refuses annotations whose value is not a string', async () => {
+    // The authorizer's verdict is read out of this map by key and rendered; a nested
+    // object reaches the decision column as `[object Object]`, which reads as a decision.
+    respondWith({ items: [auditEvent({ annotations: { 'authorization.k8s.io/decision': {} } })] });
+
+    expect(await refusedMessage()).toContain('annotations');
+  });
+
+  it.each([
+    ['sourceIPs', { sourceIPs: ['127.0.0.1', 7] }],
+    ['userAgent', { userAgent: 7 }],
+  ])('refuses a malformed %s', async (member, overrides) => {
+    respondWith({ items: [auditEvent(overrides)] });
+
+    expect(await refusedMessage()).toContain(member);
+  });
+
+  it('accepts a fully populated, well-formed event unchanged', async () => {
+    // The positive control for all of the above: strictness must not cost fidelity.
+    const complete = auditEvent({
+      sourceIPs: ['127.0.0.1'],
+      userAgent: 'kubectl/v1.34.0',
+      impersonatedUser: { username: 'system:serviceaccount:kube-system:default', groups: [] },
+      user: { username: 'system:admin', groups: ['system:masters'], uid: 'uid-1', extra: {} },
+      annotations: { 'authorization.k8s.io/decision': 'allow' },
+    });
+    respondWith({ items: [complete] });
+
+    const { result } = await settled();
+
+    expect(result.current.status).toBe('success');
+    expect(result.current.events[0]).toEqual(complete);
+  });
+});
+
+describe('the two statements of identity must agree', () => {
+  // A `requestURI` and an `objectRef` that name different things cannot both be
+  // believed. Choosing either one is unsound: believing the objectRef lets a crafted
+  // event have its Secret body classified as a ConfigMap's, and believing the URI makes
+  // the rendered table disagree with the verdict.
+
+  it('refuses an event whose requestURI and objectRef name different resources', async () => {
+    respondWith({
+      items: [
+        auditEvent({
+          requestURI: '/api/v1/namespaces/secret-audit-request/secrets/audited',
+          objectRef: { resource: 'configmaps', namespace: 'secret-audit-request' },
+          responseObject: { data: {} },
+        }),
+      ],
+    });
+
+    const message = await refusedMessage();
+
+    expect(message).toContain('secrets');
+    expect(message).toContain('configmaps');
+    expect(message).toContain('cannot both be believed');
+  });
+
+  it('refuses an event whose namespaces disagree', async () => {
+    respondWith({
+      items: [
+        auditEvent({
+          requestURI: '/api/v1/namespaces/secret-audit-request/secrets',
+          objectRef: { resource: 'secrets', namespace: 'kube-system' },
+        }),
+      ],
+    });
+
+    expect(await refusedMessage()).toContain('namespace');
+  });
+
+  it('refuses an event whose subresources disagree', async () => {
+    respondWith({
+      items: [
+        auditEvent({
+          requestURI: '/api/v1/namespaces/ns/serviceaccounts/sa/token',
+          objectRef: { resource: 'serviceaccounts', namespace: 'ns', subresource: 'status' },
+        }),
+      ],
+    });
+
+    expect(await refusedMessage()).toContain('subresource');
+  });
+
+  it.each([
+    ['a core-group collection', '/api/v1/namespaces/secret-audit-request/secrets', 'secrets'],
+    [
+      'a core-group object',
+      '/api/v1/namespaces/secret-audit-request/secrets/audited',
+      'secrets',
+    ],
+    [
+      'a named-group path',
+      '/apis/rbac.authorization.k8s.io/v1/namespaces/rbac-audit-response/roles/r',
+      'roles',
+    ],
+    ['a cluster-scoped path', '/apis/rbac.authorization.k8s.io/v1/clusterroles/edit', 'clusterroles'],
+    ['a subresource path', '/api/v1/namespaces/ns/serviceaccounts/sa/token', 'serviceaccounts'],
+    ['a query string', '/api/v1/namespaces/ns/secrets?watch=true', 'secrets'],
+  ])('reconciles %s against a matching objectRef', async (_label, requestURI, resource) => {
+    // Every recorded path shape must pass, or the guard would refuse real evidence.
+    respondWith({ items: [auditEvent({ requestURI, objectRef: { resource } })] });
+
+    const { result } = await settled();
+
+    expect(result.current.status).toBe('success');
+  });
+
+  it.each([
+    ['/healthz'],
+    ['/version'],
+    ['/metrics'],
+    ['/openapi/v2'],
+  ])('does not invent a contradiction for the non-resource path %s', async (requestURI) => {
+    // A non-resource path names no resource, so there is nothing to reconcile. Guessing
+    // "probably the last segment" would manufacture contradictions out of `/healthz`.
+    respondWith({ items: [auditEvent({ requestURI, objectRef: { resource: 'secrets' } })] });
+
+    const { result } = await settled();
+
+    expect(result.current.status).toBe('success');
+  });
+});
+
 describe('an HTTP refusal is never an empty page', () => {
   it.each([403, 401, 500, 503])('reports HTTP %i as an error carrying the status', async (status) => {
     respondWith(
@@ -479,6 +720,70 @@ describe('pagination', () => {
     expect(result.current.hasPreviousPage).toBe(false);
   });
 
+  it('reports which page the held events were fetched FOR', async () => {
+    // `loadedPage` exists so a consumer accumulating pages can key each batch by the page
+    // it actually came from. The confidentiality guard traverses every page before it will
+    // make a whole-set claim, and keying by `page` instead filed one page's events under
+    // another's number and then counted them twice.
+    const { result } = await settled({ page: 4 });
+
+    expect(result.current.loadedPage).toBe(4);
+    expect(result.current.page).toBe(4);
+  });
+
+  it('reports no loaded page while the query has never run', () => {
+    const { result } = renderHook(() => useAuditEvents({ enabled: false }));
+
+    // `undefined` rather than 1, so "no page has loaded" is distinguishable from "page 1
+    // has loaded". A consumer that treated the first as the second would record an empty
+    // batch as a scanned page.
+    expect(result.current.loadedPage).toBeUndefined();
+    expect(result.current.status).toBe('idle');
+  });
+
+  it('clears the loaded page while a new page is in flight, then reports the new one', async () => {
+    respondWith({ items: [auditEvent(), auditEvent()], total: 4 });
+    // Waited on `loadedPage` itself rather than on `settled`, which only waits for the
+    // hook to leave `loading` and can therefore return during the idle render before the
+    // first request has resolved.
+    const { result } = renderHook(() => useAuditEvents({ pageSize: 2 }));
+    await waitFor(() => {
+      expect(result.current.loadedPage).toBe(1);
+    });
+
+    expect(result.current.hasNextPage).toBe(true);
+
+    act(() => {
+      result.current.nextPage();
+    });
+
+    // `loadedPage` describes the events currently HELD, and a page change discards them —
+    // so it is `undefined` here, alongside an empty `events` and a `loading` status. That
+    // is the property an accumulating consumer relies on: there is no state in which a
+    // page NUMBER can be paired with another page's EVENTS, so a batch cannot be filed
+    // under the wrong key and counted twice.
+    expect(result.current.page).toBe(2);
+    expect(result.current.loadedPage).toBeUndefined();
+    expect(result.current.events).toEqual([]);
+    expect(result.current.status).toBe('loading');
+
+    await waitFor(() => {
+      expect(result.current.loadedPage).toBe(2);
+    });
+  });
+
+  it('resolves hasNextPage from the loaded page, not from a page still in flight', async () => {
+    // Two pages of two, four in total. On page 2 the arithmetic must say there is no
+    // further page. Resolving from the CURRENT page while page 1's events and total were
+    // still held would answer for the wrong page.
+    respondWith({ items: [auditEvent(), auditEvent()], total: 4 });
+    const { result } = await settled({ page: 2, pageSize: 2 });
+
+    expect(result.current.loadedPage).toBe(2);
+    expect(result.current.hasNextPage).toBe(false);
+    expect(result.current.hasPreviousPage).toBe(true);
+  });
+
   it.each([
     [0, 1],
     [-5, 1],
@@ -491,11 +796,12 @@ describe('pagination', () => {
     expect(result.current.page).toBe(expected);
   });
 
-  it('prefers an explicit hasMore over any inference', async () => {
+  it('prefers an explicit hasMore over the full-page heuristic', async () => {
     // A server that cannot count totals can still paginate correctly, so the explicit
     // signal must win — including when it CONTRADICTS the heuristic, which is the case
-    // that proves the precedence rather than merely exercising it.
-    respondWith({ items: [auditEvent()], total: 1000, hasMore: false });
+    // that proves the precedence rather than merely exercising it. A full page would
+    // otherwise be read as implying another.
+    respondWith({ items: [auditEvent()], hasMore: false });
 
     const { result } = await settled({ pageSize: 1 });
 
@@ -595,6 +901,169 @@ describe('pagination', () => {
     });
 
     expect(result.current.page).toBe(1);
+  });
+});
+
+describe('pagination metadata that contradicts itself is refused', () => {
+  // THE FAILURE THESE CLOSE. Metadata saying "this is the last page" while the page's
+  // own numbers say otherwise turns incomplete data into a successful final page — and
+  // a consumer that stops paging there reports a clean confidentiality result about
+  // events it never fetched. Every case below was previously accepted, and each one
+  // produced a confident answer from an impossible input.
+
+  it.each([
+    ['a negative total', { items: [], total: -3 }],
+    ['a fractional total', { items: [], total: 2.5 }],
+  ])('refuses %s rather than doing arithmetic with it', async (_label, body) => {
+    respondWith(body);
+
+    expect(await refusedMessage()).toContain('non-negative integer');
+  });
+
+  it('accepts a total of exactly zero, which is a real count', async () => {
+    respondWith({ items: [], total: 0 });
+
+    const { result } = await settled();
+
+    expect(result.current.status).toBe('success');
+    expect(result.current.total).toBe(0);
+  });
+
+  it('refuses a hasMore that contradicts the reported total', async () => {
+    // The review's own example: page 1 of 1 item out of a claimed 1000, reporting no
+    // further pages. Trusting `hasMore` here stops the traversal 999 events early
+    // while the panel reports a complete scan.
+    respondWith({ items: [auditEvent()], total: 1000, hasMore: false });
+
+    const message = await refusedMessage();
+
+    expect(message).toContain('hasMore: false');
+    expect(message).toContain('cannot both be believed');
+  });
+
+  it('refuses a hasMore: true that contradicts an exhausted total', async () => {
+    respondWith({ items: [auditEvent()], total: 1, hasMore: true });
+
+    expect(await refusedMessage()).toContain('cannot both be believed');
+  });
+
+  it('accepts a hasMore that agrees with the total', async () => {
+    respondWith({ items: [auditEvent()], total: 4, hasMore: true });
+
+    const { result } = await settled({ pageSize: 1 });
+
+    expect(result.current.status).toBe('success');
+    expect(result.current.hasNextPage).toBe(true);
+  });
+
+  it('refuses a page carrying more events than the requested pageSize', async () => {
+    respondWith({ items: [auditEvent(), auditEvent({ verb: 'update' })] });
+
+    const rendered = renderHook(() => useAuditEvents({ pageSize: 1 }));
+    await waitFor(() => {
+      expect(rendered.result.current.isLoading).toBe(false);
+    });
+
+    expect(rendered.result.current.status).toBe('error');
+    expect(rendered.result.current.error?.message).toContain('not honouring the page size');
+  });
+
+  it('refuses an empty page that promises another with no total to arbitrate', async () => {
+    // Untraversable: a consumer either loops forever or stops while claiming to have
+    // seen everything.
+    respondWith({ items: [], hasMore: true });
+
+    expect(await refusedMessage()).toContain('cannot be traversed');
+  });
+
+  it('refuses a total smaller than the events already returned', async () => {
+    respondWith({ items: [auditEvent(), auditEvent({ verb: 'update' })], total: 1 });
+
+    expect(await refusedMessage()).toContain('more events than it claims exist');
+  });
+
+  it('refuses events returned past the end of the reported total', async () => {
+    respondWith({ items: [auditEvent()], total: 2 });
+
+    // Page 5 of size 2 starts at offset 8, which is past a total of 2, so a page
+    // carrying an event there contradicts the total.
+    const rendered = renderHook(() => useAuditEvents({ page: 5, pageSize: 2 }));
+    await waitFor(() => {
+      expect(rendered.result.current.isLoading).toBe(false);
+    });
+
+    expect(rendered.result.current.status).toBe('error');
+    expect(rendered.result.current.error?.message).toContain('contradicts the events');
+  });
+
+  it('accepts an honestly empty page past the end of the total', async () => {
+    // The legitimate past-the-end request, and the reason the offset rule is
+    // conditional rather than absolute.
+    respondWith({ items: [], total: 2, hasMore: false });
+
+    const rendered = renderHook(() => useAuditEvents({ page: 9, pageSize: 4 }));
+    await waitFor(() => {
+      expect(rendered.result.current.isLoading).toBe(false);
+    });
+
+    expect(rendered.result.current.status).toBe('success');
+    expect(rendered.result.current.isEmpty).toBe(true);
+    expect(rendered.result.current.hasNextPage).toBe(false);
+  });
+
+  it('refuses a page past the end that still promises another', async () => {
+    respondWith({ items: [], total: 2, hasMore: true });
+
+    const rendered = renderHook(() => useAuditEvents({ page: 9, pageSize: 4 }));
+    await waitFor(() => {
+      expect(rendered.result.current.isLoading).toBe(false);
+    });
+
+    expect(rendered.result.current.error?.message).toContain('past the end');
+  });
+
+  it('refuses the page rather than reporting it as empty, so incompleteness is visible', async () => {
+    respondWith({ items: [auditEvent()], total: 1000, hasMore: false });
+
+    const { result } = await settled();
+
+    expect(result.current.isEmpty).toBe(false);
+    expect(result.current.events).toEqual([]);
+    expect(result.current.hasNextPage).toBe(false);
+  });
+});
+
+describe('refresh addresses fresh data rather than a cache', () => {
+  it('issues the audit query with cache: no-store and no-cache request headers', async () => {
+    // INVARIANT LOCKED (M11). Without this a refresh re-issues a byte-identical
+    // cache-eligible GET, so a page cached BEFORE a confidentiality violation can be
+    // replayed after it — and the panel then reports "no Secret event carries a
+    // response body" about events recorded before the one that did.
+    const observed: { cache: string; cacheControl: string | null; pragma: string | null }[] = [];
+    server.use(
+      http.get(AUDIT_EVENTS_ENDPOINT, ({ request }) => {
+        observed.push({
+          cache: request.cache,
+          cacheControl: request.headers.get('Cache-Control'),
+          pragma: request.headers.get('Pragma'),
+        });
+        return HttpResponse.json({ items: [auditEvent()] });
+      }),
+    );
+
+    const { result } = await settled();
+    await act(async () => {
+      result.current.refresh();
+    });
+    await waitFor(() => {
+      expect(observed).toHaveLength(2);
+    });
+
+    for (const request of observed) {
+      expect.soft(request.cache).toBe('no-store');
+      expect.soft(request.cacheControl).toContain('no-store');
+      expect.soft(request.pragma).toBe('no-cache');
+    }
   });
 });
 
@@ -785,5 +1254,146 @@ describe('refresh', () => {
     // unhandled rejection or state-update-after-unmount warning escaped, which the
     // setup file's console handling and Vitest's unhandled-error tracking would surface.
     expect(true).toBe(true);
+  });
+});
+
+describe('resolveAuditResourceIdentity — one validated identity, with uncertainty as an answer', () => {
+  // The model the panels consume instead of `event.objectRef?.resource === 'secrets'`.
+  // That expression had two outcomes, so "not a Secret" and "I cannot tell" produced the
+  // same answer — and the second is the dangerous one. Uncertainty is modelled here so
+  // every consumer can fail CLOSED on it.
+
+  /** A well-formed Secret event, as a typed value rather than a wire record. */
+  function secretsEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
+    return { ...(auditEvent() as unknown as AuditEvent), ...overrides };
+  }
+
+  it('resolves a recorded Secret event from its objectRef', () => {
+    const identity = resolveAuditResourceIdentity(secretsEvent());
+
+    expect(identity).toEqual({
+      kind: 'resource',
+      resource: 'secrets',
+      namespace: 'secret-audit-request',
+      source: 'objectRef',
+    });
+    expect(isConfidentialAuditIdentity(identity)).toBe(true);
+  });
+
+  it('resolves a non-resource request as non-resource, not as uncertain', () => {
+    const identity = resolveAuditResourceIdentity(
+      secretsEvent({ objectRef: undefined, requestURI: '/healthz' }),
+    );
+
+    expect(identity.kind).toBe('non-resource');
+    expect(isConfidentialAuditIdentity(identity)).toBe(false);
+  });
+
+  it('resolves a Secret path with NO objectRef from the requestURI, so it stays sensitive', () => {
+    // Fail-closed in the useful direction: the identity is knowable, just from the other
+    // field, so it is resolved rather than reported uncertain.
+    const identity = resolveAuditResourceIdentity(
+      secretsEvent({
+        objectRef: undefined,
+        requestURI: '/api/v1/namespaces/secret-audit-request/secrets/audited',
+      }),
+    );
+
+    expect(identity).toMatchObject({ kind: 'resource', resource: 'secrets', source: 'requestURI' });
+    expect(isConfidentialAuditIdentity(identity)).toBe(true);
+  });
+
+  it.each([
+    ['an empty objectRef', {} as AuditEvent['objectRef']],
+    ['a non-string resource', { resource: 7 } as unknown as AuditEvent['objectRef']],
+    ['an empty resource', { resource: '' } as AuditEvent['objectRef']],
+  ])('reports %s as UNCERTAIN and therefore confidential', (_label, objectRef) => {
+    // The exact shape that reached the non-sensitive branch before this fix.
+    const identity = resolveAuditResourceIdentity(secretsEvent({ objectRef }));
+
+    expect(identity.kind).toBe('uncertain');
+    expect(isConfidentialAuditIdentity(identity)).toBe(true);
+  });
+
+  it('reports a non-object objectRef as uncertain', () => {
+    const identity = resolveAuditResourceIdentity(
+      secretsEvent({ objectRef: 'secrets' as unknown as AuditEvent['objectRef'] }),
+    );
+
+    expect(identity.kind).toBe('uncertain');
+    expect(isConfidentialAuditIdentity(identity)).toBe(true);
+  });
+
+  it('reports a URI/objectRef contradiction as uncertain, whichever way it points', () => {
+    // Both directions, because the danger is symmetric: a Secret URI with a ConfigMap
+    // objectRef would smuggle a Secret body out, and a ConfigMap URI with a Secret
+    // objectRef would misattribute somebody else's body to Secrets.
+    const secretUriConfigMapRef = resolveAuditResourceIdentity(
+      secretsEvent({
+        requestURI: '/api/v1/namespaces/secret-audit-request/secrets/audited',
+        objectRef: { resource: 'configmaps', namespace: 'secret-audit-request' },
+      }),
+    );
+    const configMapUriSecretRef = resolveAuditResourceIdentity(
+      secretsEvent({
+        requestURI: '/api/v1/namespaces/secret-audit-request/configmaps/audited',
+        objectRef: { resource: 'secrets', namespace: 'secret-audit-request' },
+      }),
+    );
+
+    expect(secretUriConfigMapRef.kind).toBe('uncertain');
+    expect(configMapUriSecretRef.kind).toBe('uncertain');
+    expect(isConfidentialAuditIdentity(secretUriConfigMapRef)).toBe(true);
+    expect(isConfidentialAuditIdentity(configMapUriSecretRef)).toBe(true);
+  });
+
+  it('carries the subresource through when both halves agree', () => {
+    const identity = resolveAuditResourceIdentity(
+      secretsEvent({
+        requestURI: '/api/v1/namespaces/ns/serviceaccounts/sa/token',
+        objectRef: { resource: 'serviceaccounts', namespace: 'ns', subresource: 'token' },
+      }),
+    );
+
+    expect(identity).toEqual({
+      kind: 'resource',
+      resource: 'serviceaccounts',
+      namespace: 'ns',
+      subresource: 'token',
+      source: 'objectRef',
+    });
+    expect(isConfidentialAuditIdentity(identity)).toBe(false);
+  });
+
+  it('does not treat a non-Secret resource as confidential', () => {
+    const identity = resolveAuditResourceIdentity(
+      secretsEvent({
+        requestURI: '/apis/rbac.authorization.k8s.io/v1/namespaces/rbac-audit-response/roles/r',
+        objectRef: { resource: 'roles', namespace: 'rbac-audit-response' },
+      }),
+    );
+
+    expect(isConfidentialAuditIdentity(identity)).toBe(false);
+  });
+
+  it('treats a missing requestURI as a non-resource path rather than throwing', () => {
+    // Totality: the model must answer for every input, including one no server would
+    // send, because a controlled-mode caller can construct anything.
+    const identity = resolveAuditResourceIdentity(
+      secretsEvent({ requestURI: undefined as unknown as string, objectRef: undefined }),
+    );
+
+    expect(identity).toEqual({ kind: 'non-resource', requestURI: '' });
+  });
+
+  it('resolves a Namespace object path without inventing a namespace scope', () => {
+    const identity = resolveAuditResourceIdentity(
+      secretsEvent({
+        requestURI: '/api/v1/namespaces/psa-enforce-baseline',
+        objectRef: { resource: 'namespaces', name: 'psa-enforce-baseline' },
+      }),
+    );
+
+    expect(identity).toMatchObject({ kind: 'resource', resource: 'namespaces' });
   });
 });

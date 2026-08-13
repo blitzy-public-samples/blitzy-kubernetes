@@ -75,6 +75,7 @@ import {
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
 import type { EffectiveVerdict } from '../domain/evidence';
+import { safeProse } from '../domain/safeText';
 import AuditFidelityPanel from './AuditFidelityPanel';
 import EncryptionAtRestPanel from './EncryptionAtRestPanel';
 import EtcdTransportPanel from './EtcdTransportPanel';
@@ -84,10 +85,34 @@ import RbacWildcardPanel from './RbacWildcardPanel';
 import TokenHygienePanel from './TokenHygienePanel';
 import WebhookPosturePanel from './WebhookPosturePanel';
 import { resolveEffectiveControlVerdict } from './controlVerdicts';
+import { EmbeddedPanelProvider } from './embeddedPanel';
 import { REFRESH_UNAVAILABLE_TITLE as SHARED_REFRESH_UNAVAILABLE_TITLE } from './refreshContract';
 
 /** Block name shared by every class name in this module. */
 const BLOCK = 'posture-dashboard';
+
+/**
+ * The scoped overflow container each embedded control panel sits in (m5).
+ *
+ * `overflow-x: auto` rather than page-level scrolling, and the difference is what a reader
+ * experiences at a narrow viewport: when the PAGE scrolls, one wide table drags the toolbar,
+ * the verdict filter and the aggregate verdict off screen with it, and the operator loses the
+ * one summary the surface exists to give them. When the CARD scrolls, the wide table is the
+ * only thing that moves.
+ *
+ * `min-width: 0` is load-bearing and easy to omit: a flex or grid item's default minimum size
+ * is its content, so without it the container refuses to shrink below its widest table and
+ * `overflow-x` never engages. It is spelled out here rather than discovered later.
+ *
+ * Inline rather than a stylesheet because this repository ships no design system and no CSS
+ * build (AAP §0.8.2, and the review records the design-system item as not applicable), so
+ * there is no token to reference and no cascade to join.
+ */
+const CONTROL_SCROLL_STYLE = {
+  overflowX: 'auto',
+  maxWidth: '100%',
+  minWidth: 0,
+} as const;
 
 /**
  * Title of the whole surface, and the accessible name of its `<main>` landmark.
@@ -124,6 +149,23 @@ export const AGGREGATE_EMPTY_LABEL = 'No control posture reported';
 
 /** Visible name of the failure alert. */
 export const AGGREGATE_ERROR_LABEL = 'Control posture could not be read';
+
+/** Substituted for a failure message that sanitized away to nothing. */
+export const WITHHELD_AGGREGATE_ERROR_MESSAGE =
+  'The failure message could not be displayed.';
+
+/**
+ * Bounds the aggregate failure message, substituting local wording when nothing survives.
+ *
+ * The alert this feeds is the highest-priority text the dashboard can emit — it announces
+ * itself, and it is the first thing a screen-reader user hears when a collection read fails.
+ * An empty string there would leave the label over a blank line, indistinguishable from a
+ * server that failed without saying why, so the two cases are worded apart.
+ */
+function safeAggregateErrorMessage(message: string): string {
+  const bounded = safeProse(message);
+  return bounded === '' ? WITHHELD_AGGREGATE_ERROR_MESSAGE : bounded;
+}
 
 /** Accessible name of the refresh control. */
 export const REFRESH_ALL_LABEL = 'Refresh all eight controls';
@@ -577,13 +619,24 @@ function AggregateError({
       aria-labelledby={labelId}
       data-error-kind={error.kind}
     >
+      {/*
+        M18 — THE TWO EXTERNAL FIELDS ARE BOUNDED, the two local ones are not, and the split is
+        deliberate. `message` and `reason` are the server's or the parser's own words and were
+        rendered verbatim in an `alert` that fires without the operator asking for it — the most
+        prominent text on the surface, reached before anything else. `httpStatus` is a number
+        and `kind` is a typed union of this repository's own literals, so guarding either would
+        only obscure that it is not external text.
+
+        The label and the closing sentence are authored here and unconditional, so a reader is
+        never left with a redaction marker and no statement of what it means.
+      */}
       <strong id={labelId}>{AGGREGATE_ERROR_LABEL}</strong>{' '}
-      <span className={`${BLOCK}__error-message`}>{error.message}</span>
+      <span className={`${BLOCK}__error-message`}>{safeAggregateErrorMessage(error.message)}</span>
       {error.httpStatus === undefined ? null : (
         <span className={`${BLOCK}__error-status`}>{` HTTP status ${error.httpStatus}.`}</span>
       )}
       {error.reason === undefined ? null : (
-        <span className={`${BLOCK}__error-reason`}>{` Reason: ${error.reason}.`}</span>
+        <span className={`${BLOCK}__error-reason`}>{` Reason: ${safeProse(error.reason)}.`}</span>
       )}
       <span className={`${BLOCK}__error-kind`}>{` ${ERROR_KIND_DESCRIPTIONS[error.kind]}`}</span>
       <span className={`${BLOCK}__state-detail`}>
@@ -1069,13 +1122,42 @@ function PostureDashboardView({ resolution, onRefresh }: PostureDashboardViewPro
                   >
                     {CONTROL_SECTION_TITLES[controlId]}
                   </h3>
-                  <ControlPanel
-                    controlId={controlId}
-                    status={statuses[controlId]}
-                    result={panelResult}
-                    onRefresh={panelRefresh}
-                    canRefresh={canRefresh}
-                  />
+                  {/*
+                    EMBEDDED MODE (m3, m4). The provider tells the panel inside that this
+                    document already has a heading for the control and already has a live
+                    region for the collection transition:
+
+                      * the panel renders no title of its own and names its region with the
+                        `h3` above, so the run is h1 -> h2 -> h3 -> h4 instead of
+                        h1 -> h2 -> h3 -> h2 with the control's name written twice;
+                      * the panel's `status` and `alert` roles are dropped, so ONE aggregate
+                        announcement is made for a transition that changes all eight cards
+                        rather than nine competing ones.
+
+                    Nothing the panel SAYS changes: every verdict, sentence and observation is
+                    still rendered and still readable in place.
+                  */}
+                  <EmbeddedPanelProvider headingId={`${baseId}-${controlId}-heading`}>
+                    {/*
+                      m5 — THE SCOPED OVERFLOW LAYER. Each panel composes several wide tables,
+                      and eight of them side by side previously relied on the PAGE scrolling
+                      horizontally: at a narrow viewport the whole dashboard shifted, taking
+                      the toolbar and the aggregate verdict off screen with it. Scrolling the
+                      individual card instead keeps every other control, and the aggregate,
+                      exactly where they were. Inline rather than a stylesheet because this
+                      repository ships no design system and no CSS build (AAP §0.8.2), so the
+                      style lives beside the markup it governs.
+                    */}
+                    <div className={`${BLOCK}__control-scroll`} style={CONTROL_SCROLL_STYLE}>
+                      <ControlPanel
+                        controlId={controlId}
+                        status={statuses[controlId]}
+                        result={panelResult}
+                        onRefresh={panelRefresh}
+                        canRefresh={canRefresh}
+                      />
+                    </div>
+                  </EmbeddedPanelProvider>
                 </section>
               </li>
             ))}

@@ -88,8 +88,11 @@ limitations under the License.
 
 import { http, HttpResponse, type RequestHandler } from 'msw';
 
+// AUDIT_EVENTS_DEFAULT_PAGE_SIZE is deliberately NOT imported. It is the HOOK's
+// default, applied before a request is built; this handler defaults nothing, because
+// a page served from a server-side default is a different page from the one the
+// caller asked for and the response cannot be told from a correct one.
 import {
-  AUDIT_EVENTS_DEFAULT_PAGE_SIZE,
   AUDIT_EVENTS_ENDPOINT,
   AUDIT_EVENTS_QUERY_PARAMS,
   type AuditEvent,
@@ -120,6 +123,7 @@ import {
   V4_NAMESPACE,
   V4_OBSERVED_EXPIRY,
   V4_REQUESTED_TTL_SECONDS,
+  V4_REQUEST_TIME_SECONDS,
   V4_SERVICE_ACCOUNT_NAME,
   V7_PRINCIPALS,
   controlStatusFixture,
@@ -665,27 +669,78 @@ export function internalErrorControlStatusHandler(controlId?: ControlId): Reques
 const AUDIT_EVENTS_QUALIFIED_RESOURCE = 'events.audit.k8s.io';
 
 /**
- * Reads a positive-integer query parameter, falling back when it is absent or
+ * Reads a MANDATORY positive-integer query parameter, or reports why it is
  * unusable.
  *
- * Mirrors the hook's own `clampToPositiveInteger` guard against `NaN`,
- * `Infinity`, zero, negatives and fractions -- none of which a server could
- * honour. The hook's guard is module-private, so this is a deliberate local
- * re-statement of the same rule rather than an import; both exist so that a
- * hand-built URL in a spec behaves the way the hook's own URLs do.
+ * INVARIANT LOCKED: NOTHING IS DEFAULTED, and the parameter must appear EXACTLY
+ * ONCE. This replaced a reader that silently fell back to a default for an absent,
+ * duplicated, fractional, non-positive or non-numeric value and answered 200 — so
+ * a client that asked for page `0`, page `1.5`, page `many` or no page at all was
+ * told, with a successful status, that it had received the page it asked for. Every
+ * one of those is a different page from the one the caller believed it was reading,
+ * and a paginating consumer cannot detect the substitution: the response looks
+ * exactly like a correct answer to a different question.
+ *
+ * The hook itself always sends both parameters (`buildAuditEventsQuery` sets them
+ * unconditionally) and clamps them to positive integers before doing so, so this
+ * strictness cannot reject a request the production client makes. What it rejects
+ * is a hand-built URL — which is precisely the case a lenient reader made
+ * unfalsifiable.
+ *
+ * Duplication is rejected rather than resolved by first-or-last-wins, because
+ * `?page=1&page=9` states two intentions and answering either invents one. The
+ * real API server rejects a duplicated integer query parameter the same way.
  *
  * @param query - the request's search parameters.
  * @param name - the parameter name, from `AUDIT_EVENTS_QUERY_PARAMS`.
- * @param fallback - the value to use when the parameter is unusable.
- * @returns a positive integer.
+ * @returns the value, or the reason it is unusable.
  */
-function readPositiveInteger(query: URLSearchParams, name: string, fallback: number): number {
-  const raw = query.get(name);
-  if (raw === null) {
-    return fallback;
+function readMandatoryPositiveInteger(
+  query: URLSearchParams,
+  name: string,
+): FieldRead<number> {
+  const all = query.getAll(name);
+  if (all.length === 0) {
+    return {
+      ok: false,
+      problem:
+        `query parameter "${name}" is required and was not supplied; nothing is ` +
+        'defaulted, because a page served from a default is a different page from the ' +
+        'one the caller asked for and the response is indistinguishable from a correct ' +
+        'answer',
+    };
+  }
+  if (all.length > 1) {
+    return {
+      ok: false,
+      problem:
+        `query parameter "${name}" was supplied ${String(all.length)} times; a request ` +
+        'that states two intentions has no single recorded outcome, and answering either ' +
+        'one would invent it',
+    };
+  }
+  const raw = all[0] ?? '';
+  // `Number('')` is 0 and `Number(' 1 ')` is 1, so the text is required to be a
+  // bare run of digits before it is converted: whitespace and the empty string are
+  // malformed input rather than shorthand for a number.
+  if (!/^\d+$/.test(raw)) {
+    return {
+      ok: false,
+      problem:
+        `query parameter "${name}" must be a positive integer, got ` +
+        `${JSON.stringify(raw)}`,
+    };
   }
   const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed >= 1 ? parsed : fallback;
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    return {
+      ok: false,
+      problem:
+        `query parameter "${name}" must be a positive integer, got ` +
+        `${JSON.stringify(raw)}`,
+    };
+  }
+  return { ok: true, value: parsed };
 }
 
 /**
@@ -766,15 +821,20 @@ function matchesAuditFilter(event: AuditEvent, query: URLSearchParams): boolean 
 export function auditEventsHandler(events: readonly AuditEvent[]): RequestHandler {
   return http.get(AUDIT_EVENTS_ENDPOINT, ({ request }) => {
     const query = new URL(request.url).searchParams;
-    const page = readPositiveInteger(query, AUDIT_EVENTS_QUERY_PARAMS.page, 1);
-    const pageSize = readPositiveInteger(
-      query,
-      AUDIT_EVENTS_QUERY_PARAMS.pageSize,
-      AUDIT_EVENTS_DEFAULT_PAGE_SIZE,
-    );
+    const page = readMandatoryPositiveInteger(query, AUDIT_EVENTS_QUERY_PARAMS.page);
+    if (!page.ok) {
+      return badRequestStatus(`${page.problem} (F-006-RQ-003)`);
+    }
+    const pageSize = readMandatoryPositiveInteger(query, AUDIT_EVENTS_QUERY_PARAMS.pageSize);
+    if (!pageSize.ok) {
+      return badRequestStatus(`${pageSize.problem} (F-006-RQ-003)`);
+    }
     const matched = events.filter((event) => matchesAuditFilter(event, query));
-    const start = (page - 1) * pageSize;
-    const items = matched.slice(start, start + pageSize);
+    const start = (page.value - 1) * pageSize.value;
+    const items = matched.slice(start, start + pageSize.value);
+    // Coherent by construction, and the hook now refuses a page that is not:
+    // `total` counts every match across all pages, and `hasMore` is derived from the
+    // same offset arithmetic rather than asserted independently of it.
     return HttpResponse.json({
       items,
       total: matched.length,
@@ -1510,6 +1570,163 @@ function validatePodCreate(
 }
 
 /**
+ * Reads a boolean field that is absent unless `true`, the way Kubernetes writes
+ * these.
+ *
+ * `undefined` reads as `false` because that is the wire convention —
+ * `securityContext.privileged` and `spec.hostPID` are omitted when unset — but ANY
+ * other type is a problem rather than a falsy value. `"true"`, `1` and `null` are
+ * each a client that meant something and expressed it wrongly, and reading them as
+ * `false` would silently convert a privileged pod into a plain one.
+ */
+function readOptionalFlag(
+  container: JsonRecord,
+  key: string,
+  path: string,
+): FieldRead<boolean> {
+  const raw = container[key];
+  if (raw === undefined) {
+    return { ok: true, value: false };
+  }
+  if (typeof raw !== 'boolean') {
+    return {
+      ok: false,
+      problem:
+        `${path} expected a boolean or absence, got ${describeJsonType(raw)}; a ` +
+        'non-boolean read as false would turn a privileged pod into a plain one',
+    };
+  }
+  return { ok: true, value: raw };
+}
+
+/**
+ * Verifies that a posted Pod IS the recorded document whose admission outcome this
+ * endpoint replays.
+ *
+ * INVARIANT LOCKED (F-002-RQ-001, F-002-RQ-003): AN ADMISSION OUTCOME IS EVIDENCE
+ * ABOUT ONE DOCUMENT. The recorded 403 for `privileged-pod` names
+ * `securityContext.privileged=true`; the recorded 403 for `hostpid-pod` names
+ * `spec.hostPID=true`; the recorded 201-with-warning for `warn-pod` is the outcome
+ * of a pod that sets NEITHER. While the outcome was selected by name and namespace
+ * alone, this endpoint would serve the privileged pod's 403 to a document carrying
+ * no `securityContext` at all — an admission decision replayed for a document that
+ * could not have produced it. A spec asserting "the privileged pod is rejected"
+ * would then pass while posting a plain pod, which makes the assertion
+ * unfalsifiable: nothing about the pod's privilege was ever tested.
+ *
+ * `serviceAccountName` is required for the reason AAP §0.10.2 gives: the oracle
+ * sets it explicitly on all three pods so that a rejection is genuinely a
+ * PodSecurity `Forbidden` and not a ServiceAccount error, and a replay that
+ * accepted a pod without it would be replaying the outcome of a request whose
+ * PRECONDITION did not hold.
+ *
+ * The container name and image are checked too. They carry no security meaning on
+ * their own, but they are part of the document that was measured, and a replay
+ * endpoint whose match is looser than the recording is a replay of something else.
+ *
+ * @param spec - the posted `spec`.
+ * @param recorded - the recorded pod case, matched by name and namespace.
+ * @returns `undefined` when the document matches, or the mismatch.
+ */
+function describePodShapeMismatch(
+  spec: JsonRecord,
+  recorded: (typeof V2_PODS)[number],
+): string | undefined {
+  const serviceAccountName = readRequiredString(
+    spec,
+    'serviceAccountName',
+    'spec.serviceAccountName',
+  );
+  if (!serviceAccountName.ok) {
+    return (
+      `${serviceAccountName.problem}; the recorded pods run as ` +
+      `${JSON.stringify(recorded.serviceAccountName)}, set explicitly so that a ` +
+      'rejection is a PodSecurity Forbidden rather than a ServiceAccount error ' +
+      '(AAP §0.10.2)'
+    );
+  }
+  if (serviceAccountName.value !== recorded.serviceAccountName) {
+    return (
+      `spec.serviceAccountName must be ${JSON.stringify(recorded.serviceAccountName)} ` +
+      `for the recorded outcome of ${JSON.stringify(recorded.name)}, got ` +
+      `${JSON.stringify(serviceAccountName.value)}`
+    );
+  }
+
+  const hostPID = readOptionalFlag(spec, 'hostPID', 'spec.hostPID');
+  if (!hostPID.ok) {
+    return hostPID.problem;
+  }
+  if (hostPID.value !== recorded.hostPID) {
+    return (
+      `spec.hostPID must be ${String(recorded.hostPID)} for the recorded outcome of ` +
+      `${JSON.stringify(recorded.name)}, got ${String(hostPID.value)}; the recorded ` +
+      'decision is evidence about the pod-level host-namespace field and about no other ' +
+      'document'
+    );
+  }
+
+  const containers = spec['containers'] as readonly unknown[];
+  if (containers.length !== 1) {
+    return (
+      `spec.containers must carry exactly the one recorded container, got ` +
+      `${String(containers.length)}`
+    );
+  }
+  const container = asRecord(containers[0]);
+  if (container === undefined) {
+    return `spec.containers[0] expected a JSON object, got ${describeJsonType(containers[0])}`;
+  }
+  const containerName = readRequiredString(container, 'name', 'spec.containers[0].name');
+  if (!containerName.ok) {
+    return containerName.problem;
+  }
+  if (containerName.value !== recorded.containerName) {
+    return (
+      `spec.containers[0].name must be ${JSON.stringify(recorded.containerName)}, got ` +
+      `${JSON.stringify(containerName.value)}`
+    );
+  }
+  const image = readRequiredString(container, 'image', 'spec.containers[0].image');
+  if (!image.ok) {
+    return image.problem;
+  }
+  if (image.value !== recorded.containerImage) {
+    return (
+      `spec.containers[0].image must be ${JSON.stringify(recorded.containerImage)}, got ` +
+      `${JSON.stringify(image.value)}`
+    );
+  }
+
+  const securityContextRaw = container['securityContext'];
+  if (securityContextRaw !== undefined && asRecord(securityContextRaw) === undefined) {
+    return (
+      `spec.containers[0].securityContext expected a JSON object or absence, got ` +
+      `${describeJsonType(securityContextRaw)}`
+    );
+  }
+  const securityContext = asRecord(securityContextRaw) ?? {};
+  const privileged = readOptionalFlag(
+    securityContext,
+    'privileged',
+    'spec.containers[0].securityContext.privileged',
+  );
+  if (!privileged.ok) {
+    return privileged.problem;
+  }
+  if (privileged.value !== recorded.privileged) {
+    return (
+      `spec.containers[0].securityContext.privileged must be ` +
+      `${String(recorded.privileged)} for the recorded outcome of ` +
+      `${JSON.stringify(recorded.name)}, got ${String(privileged.value)}; a 403 naming ` +
+      '"securityContext.privileged=true" is evidence about a privileged pod and about ' +
+      'nothing else'
+    );
+  }
+  return undefined;
+}
+
+/**
  * Serves the recorded admission outcome for a Pod create.
  *
  * Invariant locked: the outcome comes from the recorded {@link V2_PODS} table,
@@ -1565,6 +1782,15 @@ function podAdmissionHandler(): RequestHandler {
             `${JSON.stringify(params.namespace)}; the recorded pods are ` +
             `${V2_PODS.map((pod) => `${pod.namespace}/${pod.name}`).join(', ')} ` +
             `(F-002-RQ-001)`,
+        );
+      }
+      // The document must BE the recorded document, not merely share its name. A
+      // recorded admission decision is evidence about one specific pod shape.
+      const spec = asRecord(body['spec']) ?? {};
+      const mismatch = describePodShapeMismatch(spec, recorded);
+      if (mismatch !== undefined) {
+        return badRequestStatus(
+          `Pod in version "v1" cannot be handled: ${mismatch} (F-002-RQ-001)`,
         );
       }
       if (!recorded.admitted) {
@@ -1630,6 +1856,46 @@ export const REDACTED_PROJECTED_TOKEN = 'REDACTED_PROJECTED_TOKEN';
 
 /** Qualified resource of a ServiceAccount: core group, so the bare plural. */
 const SERVICE_ACCOUNTS_QUALIFIED_RESOURCE = 'serviceaccounts';
+
+/**
+ * Renders an RFC 3339 instant at SECOND precision, the way the API server writes
+ * `status.expirationTimestamp`.
+ *
+ * `Date.prototype.toISOString` emits milliseconds (`...T01:00:00.000Z`), which the
+ * recorded timestamps do not carry. The recorded strings are the contract, so the
+ * derived ones are rendered to match them rather than the other way round.
+ */
+function rfc3339Seconds(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+/**
+ * Derives the expiry to serve for a requested TTL.
+ *
+ * INVARIANT LOCKED (F-004-RQ-002): THE RESPONSE MUST BE COHERENT WITH THE REQUEST.
+ * Previously any positive TTL was accepted and echoed into `spec.expirationSeconds`
+ * while `status.expirationTimestamp` stayed pinned to the recorded 3600-second
+ * expiry — so a request for 7200 seconds was answered with a document that said
+ * both "you asked for two hours" and "this expires in one", and the ±60 s window
+ * assertion was then measuring a timestamp that belonged to a different request.
+ * An incoherent double is worse than no double: it makes the boundary condition
+ * unfalsifiable while every spec stays green.
+ *
+ * The RECORDED TTL is answered with the RECORDED STRING, byte for byte, rather than
+ * with a recomputed one. `V4_REQUEST_TIME_SECONDS + V4_REQUESTED_TTL_SECONDS` is
+ * exactly the recorded expiry — the fixture asserts that arithmetic itself — so
+ * recomputing it would produce the same instant; serving the recorded literal keeps
+ * the recorded bytes authoritative and keeps this handler honest about which values
+ * are measured and which are derived.
+ *
+ * @param expirationSeconds - the TTL the client asked for.
+ * @returns the expiry to serve.
+ */
+function deriveExpirationTimestamp(expirationSeconds: number): string {
+  return expirationSeconds === V4_REQUESTED_TTL_SECONDS
+    ? V4_OBSERVED_EXPIRY.expirationTimestamp
+    : rfc3339Seconds(V4_REQUEST_TIME_SECONDS + expirationSeconds);
+}
 
 /**
  * Validates that a posted `TokenRequest` is the request whose outcome was
@@ -1734,13 +2000,28 @@ function validateTokenRequest(
  * token subresource is reached THROUGH an account: a request naming any other
  * account is answered `404 Not Found`, never a token.
  *
- * @param expirationTimestamp - the RFC 3339 expiry to serve. Defaults to the
- *   recorded compliant value; pass a recorded regression expiry to exercise the
- *   far side of the window.
+ * THE SERVED EXPIRY IS COHERENT WITH THE REQUESTED TTL (F-004-RQ-002). With no
+ * override, `status.expirationTimestamp` is {@link deriveExpirationTimestamp} of the
+ * TTL that was actually posted: the recorded 3600 yields the recorded string byte for
+ * byte, and any other supported TTL yields the matching instant. Previously the
+ * timestamp was pinned to the recorded expiry whatever was asked for, so a request
+ * for 7200 seconds was answered by a document that said both "you asked for two
+ * hours" and "this expires in one" — and the ±60 s window assertion was then
+ * measuring a timestamp belonging to a different request.
+ *
+ * AN EXPLICIT `expirationTimestamp` IS SERVED VERBATIM, and that is the deliberate
+ * exception rather than an oversight: it is the regression-injection channel. A
+ * long-lived expiry paired with a compliant TTL is exactly the defect the ±60 s
+ * window exists to catch (AAP §0.10.2), so a spec must be able to serve that
+ * incoherent pair on purpose. The difference is that it is now stated at the call
+ * site instead of being the default behaviour for every request.
+ *
+ * @param expirationTimestamp - the RFC 3339 expiry to serve, overriding derivation.
+ *   Pass a recorded regression expiry to exercise the far side of the window.
  * @returns the handler.
  */
 export function serviceAccountTokenHandler(
-  expirationTimestamp: string = V4_OBSERVED_EXPIRY.expirationTimestamp,
+  expirationTimestamp?: string,
 ): RequestHandler {
   return http.post<{ namespace: string; name: string }, JsonRecord>(
     SERVICE_ACCOUNT_TOKEN_PATH,
@@ -1780,7 +2061,12 @@ export function serviceAccountTokenHandler(
             expirationSeconds: validated.value.expirationSeconds,
             boundObjectRef: null,
           },
-          status: { token: REDACTED_PROJECTED_TOKEN, expirationTimestamp },
+          status: {
+            token: REDACTED_PROJECTED_TOKEN,
+            expirationTimestamp:
+              expirationTimestamp ??
+              deriveExpirationTimestamp(validated.value.expirationSeconds),
+          },
         },
         { status: 201 },
       );
@@ -1988,6 +2274,22 @@ export function crossNodeNotFoundHandler(): RequestHandler {
   return http.put<{ name: string }, JsonRecord>(
     NODE_STATUS_PATH,
     async ({ request, params }) => {
+      // THE TARGET IS PART OF THE RECORDED SCENARIO. This variant exists to serve
+      // ONE state: the cross-node update attempted before node2 was created. While
+      // it answered any node name, a request addressing node1's OWN status — the
+      // positive control, whose recorded outcome is "allowed" — was answered `404
+      // Not Found` for node2, a body naming an object the request never mentioned.
+      // A spec could then conclude that a NotFound is rendered as a failure while
+      // actually exercising the allowed path, and the panel's own distinction
+      // between 403 and 404 would be tested against fiction.
+      if (params.name !== V7_CROSS_NODE_TARGET_NAME) {
+        return badRequestStatus(
+          `Node in version "v1" cannot be handled: no recorded pre-creation outcome ` +
+            `exists for node ${JSON.stringify(params.name)}; this handler serves the ` +
+            `cross-node update against ${JSON.stringify(V7_CROSS_NODE_TARGET_NAME)} ` +
+            `only (F-007-RQ-002)`,
+        );
+      }
       const parsed = await readJsonObjectBody(request);
       if (!parsed.ok) {
         return badRequestStatus(

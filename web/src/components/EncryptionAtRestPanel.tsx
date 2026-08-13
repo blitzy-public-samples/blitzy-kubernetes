@@ -116,6 +116,13 @@ import {
   type EvidenceAbsenceReason,
 } from '../domain/evidence';
 import { V3_ASSERTION_TITLES, V3_OBSERVATIONS } from '../domain/observationIds';
+import { safeLabel, safeProse } from '../domain/safeText';
+import {
+  useLiveRegionRole,
+  usePanelLabelId,
+  usePanelSubheading,
+  useRendersOwnHeading,
+} from './embeddedPanel';
 
 /**
  * The control this panel reports on.
@@ -319,7 +326,7 @@ const CHECK_IDENTITY: Record<EvidenceCheckId, string> = {
 const RECOGNISED_IDENTITIES: readonly string[] = Object.values(CHECK_IDENTITY);
 
 /**
- * The four rows a PASS must rest on — the four assertions of
+ * The four rows that constitute the CIPHERTEXT PROOF — the four assertions of
  * `TestSecretsAreEncryptedAtRest`, and nothing less.
  *
  * The previous version required only the prefix and the canary, so a payload that
@@ -330,16 +337,65 @@ const RECOGNISED_IDENTITIES: readonly string[] = Object.values(CHECK_IDENTITY);
  * rather than merely prefixed, and the round trip proves the encryption is
  * transparent to clients.
  *
- * The manifest rows below them are NOT required for a pass: they are a
- * configuration audit rather than a measurement of the stored Secret, and a
- * payload that omits them has not failed to prove encryption. A CONTRADICTED
- * manifest row still fails the control, which is the asymmetry that matters.
+ * This set has a SECOND role that the two sets below deliberately do not share: it
+ * is what "partial proof" means. `summariseEvidence` reports `warn` when some but
+ * not all of THESE rows are satisfied, and nothing else may lift a payload out of
+ * `unknown` — see the reasoning recorded there.
  */
-const REQUIRED_CHECKS: readonly EvidenceCheckId[] = [
+const CIPHERTEXT_PROOF_CHECKS: readonly EvidenceCheckId[] = [
   'stored-entry-count',
   'ciphertext-prefix',
   'plaintext-canary',
   'plaintext-round-trip',
+];
+
+/**
+ * The PRECONDITION a pass additionally rests on: the etcd key was derived from the
+ * LIVE storage prefix (AAP §0.10.2).
+ *
+ * WHY THIS IS NOW REQUIRED. The live prefix embeds a per-run UUID, so a harness
+ * that hardcoded `registry` addresses a key that does not exist. While this row was
+ * merely rendered, its ABSENCE let all four proof rows pass on their own: the gate
+ * in {@link digestObservations} only closed when the observation was present AND
+ * reported `false`, so a payload that never measured it — or reported it twice, or
+ * at the wrong type — sailed through with a clean pass over four assertions about
+ * an object nobody had confirmed was the right one.
+ *
+ * It is kept OUT of {@link CIPHERTEXT_PROOF_CHECKS} rather than merged into it, and
+ * that separation is load-bearing: having read a storage prefix from the live
+ * configuration says nothing whatsoever about ciphertext, so it must not be able to
+ * lift a payload from `unknown` to "partly verified".
+ */
+const REQUIRED_PRECONDITION_CHECKS: readonly EvidenceCheckId[] = ['storage-prefix-live'];
+
+/**
+ * The COMMITTED MANIFEST rows a pass additionally rests on (F-003-RQ-001 and
+ * F-003-RQ-003).
+ *
+ * WHY THESE ARE NO LONGER OPTIONAL. This panel attributes itself to all three V3
+ * requirements, and while only the ciphertext proof could move the verdict, two of
+ * those three claims rested on measurements that could not fail them. The four
+ * runtime assertions prove that a Secret written through THE TEST'S OWN API server
+ * was ciphertext at rest; they say nothing about the document a real deployment
+ * loads, and the two most dangerous V3 regressions are invisible to them. Put
+ * `identity` first in the provider list and every new write is plaintext while a
+ * test server configured with `aesgcm` still passes all four. Add `cachesize` under
+ * a KMS v2 provider and the API server refuses to load the configuration at all.
+ *
+ * They are also kept out of {@link CIPHERTEXT_PROOF_CHECKS}, for the same reason
+ * the precondition is: a correct manifest is not partial evidence that a stored
+ * Secret is ciphertext.
+ *
+ * `kms-endpoint`, `storage-prefix-shape` and `canary-literal` are deliberately
+ * absent from every required set. All three are INFORMATIONAL by construction —
+ * they never return `satisfied` — so requiring one would make a pass unreachable
+ * rather than make it stricter.
+ */
+const REQUIRED_CONFIGURATION_CHECKS: readonly EvidenceCheckId[] = [
+  'encrypted-resources',
+  'provider-order',
+  'kms-timeout',
+  'cachesize-absent',
 ];
 
 /**
@@ -969,6 +1025,30 @@ function withheldBecause(reason: string): EvidenceReading {
 }
 
 /**
+ * Why the live-storage-prefix precondition closed the gate, per way of failing.
+ *
+ * Four cases and four sentences, because they send a reader to four different places:
+ * the harness reported the prefix was not read from the live configuration; nobody
+ * measured it; two observations disagree about it; or it arrived at a type that is not
+ * a boolean. Keyed on `readBoolean`'s own state plus `'reported'` for the `false` case,
+ * so the mapping is exhaustive by construction and a fifth state added upstream would
+ * be a `tsc --noEmit` error here rather than an empty explanation.
+ */
+const PREFIX_LIVE_GATE_REASON: Readonly<Record<EvidenceAbsenceReason | 'reported', string>> =
+  Object.freeze({
+    reported: 'the storage prefix was not read from the live configuration',
+    unreported:
+      'it was never reported whether the storage prefix was read from the live ' +
+      'configuration, so the raw read may have addressed a key that does not exist',
+    conflict:
+      'the storage prefix source was reported more than once, so whether the raw read ' +
+      'addressed the right key cannot be determined',
+    'wrong-type':
+      'the storage prefix source was reported at a type that is not a boolean, so ' +
+      'whether the raw read addressed the right key cannot be determined',
+  });
+
+/**
  * Reduces the reported observations to the twelve rows plus whatever did not
  * match, then derives the verdict the evidence alone supports.
  *
@@ -1011,12 +1091,23 @@ function digestObservations(
   const literal = readNullable(observations, CHECK_IDENTITY['canary-literal']);
   const literalIsRecorded = literal.state !== 'reported' || literal.value === PLAINTEXT_CANARY;
 
+  // THE PRECONDITION CLOSES THE GATE IN EVERY UNSATISFIED CASE, not only when it was
+  // reported `false`. The earlier condition additionally required the observation to be
+  // PRESENT, so three ways of failing to establish it left the gate open: never
+  // reporting it, reporting it twice, and reporting it at a type that is not a boolean.
+  // In all three the raw read may have addressed a key that does not exist, which is
+  // exactly the situation the four proof rows cannot be trusted through. The reason is
+  // worded per case, because "you did not measure this" and "you measured it and it was
+  // false" send a reader to different places.
+  const prefixLiveState = readBoolean(
+    observations,
+    CHECK_IDENTITY['storage-prefix-live'],
+  ).state;
   const gateReason =
     countReading.outcome !== 'satisfied'
       ? 'the raw read did not return exactly one entry for the Secret key'
-      : prefixLiveReading.outcome === 'indeterminate' &&
-          readBoolean(observations, CHECK_IDENTITY['storage-prefix-live']).state === 'reported'
-        ? 'the storage prefix was not read from the live configuration'
+      : prefixLiveReading.outcome !== 'satisfied'
+        ? PREFIX_LIVE_GATE_REASON[prefixLiveState]
         : undefined;
 
   const gated = (reading: EvidenceReading): EvidenceReading =>
@@ -1122,19 +1213,32 @@ function buildRow(
  * The order of these tests is the security boundary:
  *   1. ANY violated row is a `fail`. One violation is enough, and a satisfied
  *      row elsewhere never offsets it.
- *   2. ALL FOUR {@link REQUIRED_CHECKS} satisfied, and nothing violated, is a
- *      `pass`. The previous version required only two of them — the prefix and
- *      the canary — so a payload that reported neither a stored-entry count nor a
- *      round trip still reached a clean pass on half the proof.
+ *   2. A `pass` requires ALL THREE required sets, and nothing violated: the four
+ *      {@link CIPHERTEXT_PROOF_CHECKS}, the
+ *      {@link REQUIRED_PRECONDITION_CHECKS} that make them measurements of the
+ *      right object, and the {@link REQUIRED_CONFIGURATION_CHECKS} that are the
+ *      other two requirements this panel claims. The first version of this
+ *      function required only two proof rows; the second required all four but
+ *      left the precondition and the whole manifest posture unable to affect the
+ *      verdict, so a payload could earn a clean pass on four assertions about an
+ *      object nobody had confirmed was the right one, under a manifest nobody had
+ *      looked at.
  *   3. PART OF THE PROOF satisfied is a `warn` — reported as partial rather than
- *      promoted to a pass. "Part of the proof" means one of the four required rows
- *      and nothing else: a satisfied CONTEXT row is not partial evidence of
- *      encryption. Measured, not assumed — with the looser test, a payload whose
- *      raw read addressed the wrong key entirely still reported "partly verified"
- *      on the strength of having read its storage prefix from the live
- *      configuration, which says nothing whatsoever about ciphertext.
+ *      promoted to a pass. "Part of the proof" means one of the four CIPHERTEXT
+ *      rows and nothing else, which is why the precondition and the manifest rows
+ *      are separate sets rather than members of that one. Measured, not assumed —
+ *      with a looser test, a payload whose raw read addressed the wrong key
+ *      entirely still reported "partly verified" on the strength of having read
+ *      its storage prefix from the live configuration, which says nothing
+ *      whatsoever about ciphertext.
  *   4. Nothing proven is `unknown`. The informational rows are never `satisfied`,
  *      so they cannot lift this case either.
+ *
+ * A COMPLETE ciphertext proof under an unmeasured manifest lands on `warn` through
+ * rule 3, which is the honest reading: the thing the control is chiefly about was
+ * measured in full, and the caveat is that the shipped deployment posture was not.
+ * `warn` is not a pass, so nothing is over-claimed, and the evidence table names
+ * exactly which rows were not established.
  */
 function summariseEvidence(rows: readonly EvidenceRow[]): ControlVerdict {
   if (rows.some((row) => row.outcome === 'violated')) {
@@ -1142,10 +1246,15 @@ function summariseEvidence(rows: readonly EvidenceRow[]): ControlVerdict {
   }
   const outcomeOf = (id: EvidenceCheckId): EvidenceOutcome | undefined =>
     rows.find((row) => row.id === id)?.outcome;
-  if (REQUIRED_CHECKS.every((id) => outcomeOf(id) === 'satisfied')) {
+  const satisfied = (id: EvidenceCheckId): boolean => outcomeOf(id) === 'satisfied';
+  const proven =
+    CIPHERTEXT_PROOF_CHECKS.every(satisfied) &&
+    REQUIRED_PRECONDITION_CHECKS.every(satisfied) &&
+    REQUIRED_CONFIGURATION_CHECKS.every(satisfied);
+  if (proven) {
     return 'pass';
   }
-  return REQUIRED_CHECKS.some((id) => outcomeOf(id) === 'satisfied') ? 'warn' : 'unknown';
+  return CIPHERTEXT_PROOF_CHECKS.some(satisfied) ? 'warn' : 'unknown';
 }
 
 /**
@@ -1217,12 +1326,20 @@ export function resolveEncryptionAtRestEffectiveVerdict(
  * `Status` body's own field, e.g. `Forbidden` — is appended when the server sent
  * it. A `network` failure has no status because no response ever existed, and
  * that is said rather than papered over with a fabricated code.
+ *
+ * M18 — `reason` IS EXTERNAL TEXT AND IS BOUNDED HERE. It is short and
+ * well-known in practice, which is exactly why it was easy to overlook: nothing
+ * in the contract obliges a server to send `Forbidden` rather than a credential,
+ * a control character or eight kilobytes of prose, and this sentence is rendered
+ * on the panel's most prominent failure affordance. `httpStatus` and `kind`
+ * beside it are a number and one of this repository's own literals, so they are
+ * deliberately left unguarded.
  */
 function describeFailure(error: ControlStatusError): string {
   if (error.httpStatus === undefined) {
     return `No response was received (${error.kind}). No verdict is available, so nothing is reported as passing.`;
   }
-  const reason = error.reason === undefined ? '' : ` ${error.reason}`;
+  const reason = error.reason === undefined ? '' : ` ${safeProse(error.reason)}`;
   return `HTTP ${String(error.httpStatus)}${reason} (${error.kind}). No verdict is available, so nothing is reported as passing.`;
 }
 
@@ -1234,9 +1351,13 @@ function describeFailure(error: ControlStatusError): string {
  * absent rather than rendered as an empty prefix or a bare pair of brackets.
  */
 function formatFinding(finding: ControlStatus['findings'][number]): string {
-  const subject = finding.subject === undefined ? '' : `${finding.subject}: `;
-  const requirement = finding.requirementId === undefined ? '' : ` (${finding.requirementId})`;
-  return `${subject}${finding.message}${requirement}`;
+  // Every member is server-supplied. Prose goes through `safeProse` and the two
+  // identifier-shaped members through the harder `safeLabel`, because a subject or a
+  // requirement id that needs 2000 characters is not one (AAP §0.11.1).
+  const subject = finding.subject === undefined ? '' : `${safeLabel(finding.subject)}: `;
+  const requirement =
+    finding.requirementId === undefined ? '' : ` (${safeLabel(finding.requirementId)})`;
+  return `${subject}${safeProse(finding.message)}${requirement}`;
 }
 
 /** Props of the evidence table. */
@@ -1300,12 +1421,16 @@ interface TextListSectionProps {
  * there is no separator to leave dangling after the last one.
  */
 function TextListSection({ headingId, heading, items }: TextListSectionProps): ReactElement | null {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   if (items.length === 0) {
     return null;
   }
   return (
     <>
-      <h3 id={headingId}>{heading}</h3>
+      <Subheading id={headingId}>{heading}</Subheading>
       <ul aria-labelledby={headingId}>
         {items.map((item, position) => (
           <li key={`${headingId}-${String(position)}`}>{item}</li>
@@ -1392,11 +1517,28 @@ function EncryptionAtRestPanelView({
   onRefresh,
   canRefresh = true,
 }: EncryptionAtRestPanelViewProps): ReactElement {
+  // EMBEDDED-AWARE OWN HEADING (m3), bound once for this component.
+  const rendersOwnHeading = useRendersOwnHeading();
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   // One generated base id per instance, because the aggregate dashboard renders
   // eight panels into one document and duplicated ids would break every
   // aria-labelledby association at once.
   const baseId = useId();
   const headingId = `${baseId}-heading`;
+  // EMBEDDED-AWARE REGION NAME (m3). The region is named by whichever heading exists: this
+  // panel's own when standalone, the dashboard's control heading when embedded. Without this
+  // an embedded panel would point `aria-labelledby` at an id it no longer renders, leaving a
+  // region with no accessible name at all.
+  const panelLabelId = usePanelLabelId(headingId);
   const errorHeadingId = `${baseId}-error`;
   const evidenceHeadingId = `${baseId}-evidence`;
   const findingsHeadingId = `${baseId}-findings`;
@@ -1420,7 +1562,7 @@ function EncryptionAtRestPanelView({
 
   const reportedRequirements =
     control?.requirementIds !== undefined && control.requirementIds.length > 0
-      ? control.requirementIds.join(', ')
+      ? control.requirementIds.map(safeLabel).join(', ')
       : undefined;
 
   // The override REPLACES the result's own handler rather than joining it, so one
@@ -1429,8 +1571,17 @@ function EncryptionAtRestPanelView({
   const refresh = resolveRefreshHandler(onRefresh, result.refresh, canRefresh);
 
   return (
-    <section aria-labelledby={headingId} aria-busy={result.status === 'loading'}>
-      <h2 id={headingId}>Secrets encryption at rest (V3)</h2>
+    <section aria-labelledby={panelLabelId} aria-busy={result.status === 'loading'}>
+      {/*
+        EMBEDDED-AWARE OWN HEADING (m3). Standalone, this heading names the panel's region and
+        is the only title on screen. Embedded, the dashboard has already written an `h3` naming
+        this control, so rendering a second title here both DUPLICATED the name and restarted
+        the heading run at a shallower level than the one above it. The region keeps a name
+        either way: `aria-labelledby` points at whichever heading exists.
+      */}
+      {rendersOwnHeading ? (
+        <h2 id={headingId}>Secrets encryption at rest (V3)</h2>
+      ) : null}
       <p>Requirements covered: {REQUIREMENT_IDS.join(', ')}</p>
       <button
         type="button"
@@ -1442,38 +1593,52 @@ function EncryptionAtRestPanelView({
       </button>
 
       {result.status === 'loading' ? (
-        <p role="status" aria-label="Encryption at rest status: checking">
+        <p role={liveStatusRole} aria-label="Encryption at rest status: checking">
           Checking whether the stored Secret is ciphertext...
         </p>
       ) : null}
 
       {result.status === 'error' ? (
-        <div role="alert" aria-labelledby={errorHeadingId}>
-          <h3 id={errorHeadingId}>Encryption at rest could not be verified</h3>
-          <p>{result.error.message}</p>
+        <div role={liveAlertRole} aria-labelledby={errorHeadingId}>
+          <Subheading id={errorHeadingId}>Encryption at rest could not be verified</Subheading>
+          {/*
+            The server's own words, bounded and redacted. `describeFailure` composes
+            this tier's own typed tokens and the numeric status, so it is not an
+            external channel and is not sanitized.
+          */}
+          <p>{safeProse(result.error.message)}</p>
           <p>{describeFailure(result.error)}</p>
         </div>
       ) : null}
 
       {result.status === 'success' && control === undefined ? (
-        <p role="status" aria-label="Encryption at rest status: nothing reported">
+        <p role={liveStatusRole} aria-label="Encryption at rest status: nothing reported">
           The server reported no posture for this control, so encryption at rest is not verified.
         </p>
       ) : null}
 
       {control !== undefined && verdict !== undefined ? (
         <>
-          <p role="status" aria-label={`Encryption at rest verdict: ${verdict}`}>
+          <p role={liveStatusRole} aria-label={`Encryption at rest verdict: ${verdict}`}>
             {verdict.toUpperCase()} - {VERDICT_HEADLINE[verdict]}
           </p>
-          <p>{control.summary}</p>
-          {control.detail !== undefined ? <p>{control.detail}</p> : null}
+          {/*
+            THE VERDICT IS LOCAL, EVERYTHING BELOW IT IS NOT. `verdict` and
+            `VERDICT_HEADLINE` are this file's own words for a verdict this file
+            computed; the summary, detail, reported requirement identifiers and
+            timestamp are all server-supplied and every one is bounded and redacted on
+            the way in.
+          */}
+          <p>{safeProse(control.summary)}</p>
+          {control.detail !== undefined ? <p>{safeProse(control.detail)}</p> : null}
           {reportedRequirements !== undefined ? (
             <p>Reported requirements: {reportedRequirements}</p>
           ) : null}
-          {control.observedAt !== undefined ? <p>Observed at {control.observedAt}</p> : null}
+          {control.observedAt !== undefined ? (
+            <p>Observed at {safeLabel(control.observedAt)}</p>
+          ) : null}
 
-          <h3 id={evidenceHeadingId}>Evidence</h3>
+          <Subheading id={evidenceHeadingId}>Evidence</Subheading>
           <EvidenceTable labelledBy={evidenceHeadingId} rows={digest.rows} />
 
           <TextListSection
@@ -1484,12 +1649,15 @@ function EncryptionAtRestPanelView({
           <TextListSection
             headingId={warningsHeadingId}
             heading="Server warnings"
-            items={control.warnings}
+            items={control.warnings.map(safeProse)}
           />
           <TextListSection
             headingId={extrasHeadingId}
             heading="Other reported observations"
-            items={digest.extras.map((extra) => `${extra.label}: ${extra.shape}`)}
+            // An unrecognised observation's LABEL is server-supplied, so it is bounded;
+            // its value is already reduced to a shape and never rendered (see
+            // `describeShape`), which is what keeps a raw stored blob off the panel.
+            items={digest.extras.map((extra) => `${safeLabel(extra.label)}: ${extra.shape}`)}
           />
         </>
       ) : null}

@@ -46,6 +46,11 @@ limitations under the License.
 import { screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+  MAX_SAFE_PROSE_INPUT_LENGTH,
+  SAFE_OVERSIZED_TEXT,
+  SAFE_REDACTED,
+} from '../domain/safeText';
 import type { ControlId, ControlStatus, ControlVerdict } from '../hooks/useControlStatus';
 import { CONTROL_IDS } from '../hooks/useControlStatus';
 import {
@@ -60,6 +65,11 @@ import {
 } from '../test/fixtures/controlStatus';
 import { server } from '../test/msw/server';
 import { renderWithProviders } from '../test/utils/renderWithProviders';
+// Rendered standalone in the m3 and m4 blocks below, as the OTHER SIDE of the embedding
+// switch: suppressing a panel's heading and its live region is a property of being embedded,
+// so a spec that only ever renders through the dashboard cannot tell a correct switch from a
+// panel that lost its heading and its announcement everywhere.
+import EtcdTransportPanel from './EtcdTransportPanel';
 import PostureDashboard, {
   AGGREGATE_EMPTY_LABEL,
   AGGREGATE_ERROR_LABEL,
@@ -79,6 +89,7 @@ import PostureDashboard, {
   VERDICT_COUNTS_HEADING,
   VERDICT_FILTER_LABEL,
   VERDICT_PRECEDENCE,
+  WITHHELD_AGGREGATE_ERROR_MESSAGE,
   resolveEffectiveVerdicts,
   summarisePosture,
 } from './PostureDashboard';
@@ -179,6 +190,20 @@ function renderedCounts(container: HTMLElement): Record<string, number> {
 function visibleControlIds(container: HTMLElement): readonly string[] {
   return Array.from(container.querySelectorAll('li[data-control-id]')).map(
     (item) => item.getAttribute('data-control-id') ?? '',
+  );
+}
+
+/**
+ * `MIXED_CONTROL_STATUSES` keyed by control, which is the shape the `statuses` prop takes.
+ *
+ * The fixture is recorded as a LIST because that is the wire shape a collection response has;
+ * the prop is a map. Three specs above already did this reduction inline, and the blocks below
+ * need it three more times, so it is named once here.
+ */
+function mixedRoster(): Readonly<Partial<StatusMap>> {
+  return MIXED_CONTROL_STATUSES.reduce<Partial<StatusMap>>(
+    (accumulator, status) => ({ ...accumulator, [status.controlId]: status }),
+    {},
   );
 }
 
@@ -739,3 +764,456 @@ describe('PostureDashboard — structure and accessible naming', () => {
     expect(new Set(verdicts)).toEqual(new Set(['pass', 'fail', 'warn', 'unknown']));
   });
 });
+
+describe('PostureDashboard — m3: the heading run is monotonic and each name appears once', () => {
+  /** Every heading in document order, as `[level, text]`. */
+  function headingRun(container: HTMLElement): readonly (readonly [number, string])[] {
+    return Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6')).map(
+      (heading) => [Number(heading.tagName.slice(1)), heading.textContent ?? ''] as const,
+    );
+  }
+
+  it('never goes backwards and never skips a level', () => {
+    // THE m3 DEFECT, measured directly. The dashboard names each control with an `h3` and the
+    // panel inside restarted at `h2`, so the run read h1 -> h2 -> h3 -> h2: a reversal, which
+    // tells an assistive technology that the panel is a PEER of the per-control section rather
+    // than its content.
+    const { container } = renderWithProviders(
+      <PostureDashboard statuses={PASSING_CONTROL_STATUSES} />,
+    );
+    const run = headingRun(container);
+
+    expect(run.length).toBeGreaterThan(10);
+    let previous = run[0][0];
+    expect(previous).toBe(1);
+    for (const [level, text] of run.slice(1)) {
+      expect
+        .soft(level, `"${text}" jumps from h${String(previous)} to h${String(level)}`)
+        .toBeLessThanOrEqual(previous + 1);
+      previous = level;
+    }
+  });
+
+  it('renders no control panel heading at h2 inside a control card', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard statuses={PASSING_CONTROL_STATUSES} />,
+    );
+
+    for (const controlId of CONTROL_IDS) {
+      const section = controlSection(container, controlId);
+      expect.soft(section.querySelectorAll('h2')).toHaveLength(0);
+      // And the card DOES still have its heading — the dashboard's own.
+      expect.soft(section.querySelectorAll('h3').length).toBeGreaterThan(0);
+    }
+  });
+
+  it('names each control exactly once', () => {
+    renderWithProviders(<PostureDashboard statuses={PASSING_CONTROL_STATUSES} />);
+
+    for (const controlId of CONTROL_IDS) {
+      // The duplication half of the defect: the wrapper `h3` and the panel `h2` both named the
+      // control, under two different wordings, so a heading-navigation pass hit the same
+      // control twice and the two names disagreed.
+      expect
+        .soft(screen.getAllByRole('heading', { name: CONTROL_SECTION_TITLES[controlId] }))
+        .toHaveLength(1);
+    }
+  });
+
+  it('keeps every control card a NAMED region', () => {
+    renderWithProviders(<PostureDashboard statuses={PASSING_CONTROL_STATUSES} />);
+
+    for (const controlId of CONTROL_IDS) {
+      // Suppressing the panel's heading must not leave its `<section>` pointing at an id that
+      // no longer exists: an anonymous region is worse than a duplicated name, because it
+      // disappears from a landmark list entirely.
+      expect
+        .soft(screen.getAllByRole('region', { name: CONTROL_SECTION_TITLES[controlId] }).length)
+        .toBeGreaterThan(0);
+    }
+  });
+
+  it('renders panel subheadings one level below the control heading', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard statuses={PASSING_CONTROL_STATUSES} />,
+    );
+    const section = controlSection(container, 'V8');
+
+    // V8 renders three subheadings, and embedded they belong UNDER the control's `h3` rather
+    // than beside it — a subsection is not a peer of the thing it is part of.
+    expect(section.querySelectorAll('h4').length).toBeGreaterThan(0);
+  });
+
+  it('still renders its own h2 heading and h3 subheadings when standalone', () => {
+    // The other side of the switch. Suppression is a property of being EMBEDDED, not a global
+    // downgrade: a panel used on its own is the whole page and owns its title.
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={PASSING_CONTROL_STATUSES.V8} />,
+    );
+
+    expect(container.querySelectorAll('h2')).toHaveLength(1);
+    expect(container.querySelectorAll('h3').length).toBeGreaterThan(0);
+  });
+
+  it('shifts the whole nested run down a level when embedded, preserving the nesting', () => {
+    // V8 nests scenario articles beneath one of its own subheadings, so it has TWO levels to
+    // shift, and shifting only the outer one would flatten the inner into a sibling of its
+    // parent. Both levels are compared between the two modes on the same payload.
+    const standalone = renderWithProviders(
+      <EtcdTransportPanel status={PASSING_CONTROL_STATUSES.V8} />,
+    );
+    const outerStandalone = standalone.container.querySelectorAll('h3').length;
+    const innerStandalone = standalone.container.querySelectorAll('h4').length;
+    expect(outerStandalone).toBeGreaterThan(0);
+    expect(innerStandalone).toBeGreaterThan(0);
+    standalone.unmount();
+
+    const { container } = renderWithProviders(
+      <PostureDashboard statuses={PASSING_CONTROL_STATUSES} />,
+    );
+    const panel = controlSection(container, 'V8').querySelector(
+      '.posture-dashboard__control-scroll',
+    ) as HTMLElement;
+
+    // Inside the panel: nothing at the host's level or above, and each level moved down by
+    // exactly one, so the h3/h4 relationship standalone is the h4/h5 relationship embedded.
+    expect(panel.querySelectorAll('h2')).toHaveLength(0);
+    expect(panel.querySelectorAll('h3')).toHaveLength(0);
+    expect(panel.querySelectorAll('h4')).toHaveLength(outerStandalone);
+    expect(panel.querySelectorAll('h5')).toHaveLength(innerStandalone);
+  });
+});
+
+describe('PostureDashboard — m4: one transition is announced once', () => {
+  it('exposes exactly one live region when posture resolves', () => {
+    // THE m4 DEFECT. One collection response changes all eight cards, and each panel announced
+    // its own verdict, so a screen-reader user heard nine announcements for one event — with
+    // the aggregate, the only one that summarises, buried among the eight.
+    const { container } = renderWithProviders(
+      <PostureDashboard statuses={PASSING_CONTROL_STATUSES} />,
+    );
+
+    expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(screen.getByRole('status', { name: AGGREGATE_VERDICT_LABEL })).toBeInTheDocument();
+  });
+
+  it('exposes exactly one alert when the collection read fails', () => {
+    // The worst case of the storm: on an error EVERY panel renders its own error affordance
+    // from the shared result, so nine `alert` regions fired at once.
+    const { container } = renderWithProviders(
+      <PostureDashboard error={SERVER_ERROR_CONTROL_STATUS_ERROR} />,
+    );
+
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(screen.getByRole('alert', { name: AGGREGATE_ERROR_LABEL })).toBeInTheDocument();
+  });
+
+  it('exposes exactly one live region while the collection is loading', () => {
+    const { container } = renderWithProviders(<PostureDashboard isLoading />);
+
+    expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(screen.getByRole('status', { name: AGGREGATE_LOADING_LABEL })).toBeInTheDocument();
+  });
+
+  it('keeps the child’s announced text readable in place, having dropped only the role', () => {
+    // THE POINT OF THE FIX, and the thing that makes it safe: the child state is still THERE.
+    // Nothing was hidden and nothing was summarised away — a reader who reaches the card reads
+    // what they always did, they are simply not interrupted for it eight times.
+    //
+    // Measured against the SAME panel rendered standalone rather than against a guess at its
+    // wording: whatever text V8 announces on its own must still be present, verbatim, once the
+    // announcement is suppressed.
+    const errorResult = {
+      status: 'error' as const,
+      error: SERVER_ERROR_CONTROL_STATUS_ERROR,
+      refresh: vi.fn(),
+    };
+    const standalone = renderWithProviders(<EtcdTransportPanel result={errorResult} />);
+    const announced = Array.from(
+      standalone.container.querySelectorAll('[role="alert"],[role="status"]'),
+    ).map((element) => element.textContent ?? '');
+    expect(announced.length).toBeGreaterThan(0);
+    standalone.unmount();
+
+    const { container } = renderWithProviders(
+      <PostureDashboard error={SERVER_ERROR_CONTROL_STATUS_ERROR} />,
+    );
+    const section = controlSection(container, 'V8');
+
+    expect(section.querySelectorAll('[role="alert"],[role="status"]')).toHaveLength(0);
+    for (const text of announced) {
+      expect.soft(section.textContent ?? '').toContain(text);
+    }
+  });
+
+  it('leaves every control card carrying its own substantive text', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard statuses={FAILING_CONTROL_STATUSES} />,
+    );
+
+    for (const controlId of CONTROL_IDS) {
+      const section = controlSection(container, controlId);
+      // Four panels (V1, V2, V3, V7) expose no panel-level verdict marker at all, which is why
+      // this measures rendered TEXT rather than markers: the claim is that information
+      // survived, and for those four the information is prose.
+      expect
+        .soft((section.textContent ?? '').length, `${controlId} rendered almost nothing`)
+        .toBeGreaterThan(80);
+    }
+  });
+
+  it('still announces its own state when a panel stands alone', () => {
+    // V8 carries a live role on its loading, empty and error affordances rather than on a
+    // resolved verdict, so the state driven here is the one that announces: an error.
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel
+        result={{ status: 'error', error: SERVER_ERROR_CONTROL_STATUS_ERROR, refresh: vi.fn() }}
+      />,
+    );
+
+    expect(container.querySelectorAll('[role="alert"]').length).toBeGreaterThan(0);
+  });
+});
+
+describe('PostureDashboard — m5: each control scrolls inside its own card', () => {
+  it('wraps every control panel in a scoped horizontal-overflow container', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard statuses={PASSING_CONTROL_STATUSES} />,
+    );
+    const wrappers = container.querySelectorAll('.posture-dashboard__control-scroll');
+
+    expect(wrappers).toHaveLength(CONTROL_IDS.length);
+    for (const wrapper of Array.from(wrappers)) {
+      const style = (wrapper as HTMLElement).style;
+      // Page-level scrolling drags the toolbar, the filter and the aggregate verdict off
+      // screen with one wide table. Scrolling the card moves only the table.
+      expect.soft(style.overflowX).toBe('auto');
+      expect.soft(style.maxWidth).toBe('100%');
+      // Without `min-width: 0` a flex or grid item refuses to shrink below its content, so
+      // `overflow-x` never engages and the fix silently does nothing.
+      expect.soft(style.minWidth).toBe('0px');
+    }
+  });
+
+  it('puts the container INSIDE the control card, so the heading never scrolls away', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard statuses={PASSING_CONTROL_STATUSES} />,
+    );
+    const section = controlSection(container, 'V6');
+    const wrapper = section.querySelector('.posture-dashboard__control-scroll');
+
+    expect(wrapper).not.toBeNull();
+    expect(section.querySelector('h3')).not.toBeNull();
+    // The heading is a SIBLING of the scrolling region rather than inside it, so scrolling a
+    // wide table never takes the control's own title out of view.
+    expect(wrapper?.querySelector('h3')).toBeNull();
+  });
+});
+
+describe('PostureDashboard — M18: the aggregate failure text is bounded', () => {
+  /** A JWT-shaped value: three dot-separated runs of at least eight word characters. */
+  const TOKEN_SHAPED = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlLXZhbHVl';
+
+  /** A PEM block, which the shared guard treats as credential-shaped whole. */
+  const PEM_SHAPED = '-----BEGIN PRIVATE KEY----- abcd -----END PRIVATE KEY-----';
+
+  /**
+   * The aggregate failure affordance, which is what this finding is about.
+   *
+   * Scoped deliberately. The finding names the AGGREGATE error path, and the container also
+   * holds eight control panels rendering the same `ControlStatusError` through their own
+   * guards; asserting on the container would conflate this element's behaviour with theirs and
+   * report the wrong component when one of them regressed. The surface-wide property is
+   * asserted separately, and on purpose, in the last case of this block.
+   */
+  function aggregateError(container: HTMLElement): HTMLElement {
+    const element = container.querySelector('.posture-dashboard__state--error');
+    expect(element, 'no aggregate error affordance rendered').not.toBeNull();
+    return element as HTMLElement;
+  }
+
+  it('renders a recorded failure message unchanged — the control', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard error={SERVER_ERROR_CONTROL_STATUS_ERROR} />,
+    );
+
+    expect(container).toHaveTextContent(SERVER_ERROR_CONTROL_STATUS_ERROR.message);
+  });
+
+  it('withholds a credential in the failure message and in its reason', () => {
+    // This alert ANNOUNCES ITSELF and is the first thing a screen-reader user hears when a
+    // collection read fails, so it is the highest-priority text the surface can emit — and it
+    // rendered whatever the backend or the parser put in `message` verbatim.
+    const { container } = renderWithProviders(
+      <PostureDashboard
+        error={{
+          ...SERVER_ERROR_CONTROL_STATUS_ERROR,
+          message: `the collection endpoint reported ${TOKEN_SHAPED}`,
+          reason: `upstream said ${PEM_SHAPED}`,
+        }}
+      />,
+    );
+    const aggregate = aggregateError(container);
+    const text = aggregate.textContent ?? '';
+
+    expect(text).not.toContain(TOKEN_SHAPED);
+    expect(text).not.toContain('BEGIN PRIVATE KEY');
+    expect(aggregate).toHaveTextContent(SAFE_REDACTED);
+    // The locally authored label and closing sentence are unconditional, so a redaction
+    // marker never stands alone.
+    expect(aggregate).toHaveTextContent(AGGREGATE_ERROR_LABEL);
+    expect(aggregate).toHaveTextContent('this is not a pass');
+  });
+
+  it('bounds an oversized failure message rather than rendering any of it', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard
+        error={{
+          ...SERVER_ERROR_CONTROL_STATUS_ERROR,
+          message: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+        }}
+      />,
+    );
+
+    const aggregate = aggregateError(container);
+
+    expect(aggregate).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    expect(aggregate.textContent ?? '').not.toContain('xxxxxxxxxx');
+  });
+
+  it('collapses control characters and bidirectional overrides out of the message', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard
+        error={{
+          ...SERVER_ERROR_CONTROL_STATUS_ERROR,
+          message: 'The read failed.\n\u0007\u202ENothing was verified.',
+        }}
+      />,
+    );
+    const aggregate = aggregateError(container);
+    const text = aggregate.textContent ?? '';
+
+    expect(text).not.toContain('\u0007');
+    expect(text).not.toContain('\u202E');
+    expect(aggregate).toHaveTextContent('The read failed. Nothing was verified.');
+  });
+
+  it('substitutes local wording for a message that sanitized away to nothing', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard error={{ ...SERVER_ERROR_CONTROL_STATUS_ERROR, message: '\u0000\u0007' }} />,
+    );
+
+    expect(aggregateError(container)).toHaveTextContent(WITHHELD_AGGREGATE_ERROR_MESSAGE);
+    expect(screen.getByRole('alert', { name: AGGREGATE_ERROR_LABEL })).toBeInTheDocument();
+  });
+
+  it('renders the HTTP status and the failure kind unguarded, being local facts', () => {
+    const { container } = renderWithProviders(
+      <PostureDashboard error={SERVER_ERROR_CONTROL_STATUS_ERROR} />,
+    );
+
+    // A number and a typed union of this repository's own literals: guarding either would
+    // only obscure that neither is external text.
+    const aggregate = aggregateError(container);
+    expect(aggregate).toHaveTextContent('HTTP status 500');
+    expect(aggregate.getAttribute('data-error-kind')).toBe('http');
+  });
+
+  it('leaves no credential anywhere on the surface, aggregate or panel', () => {
+    // The surface-wide sweep, asserted separately from the aggregate cases above so that a
+    // failure names the right thing. The same `ControlStatusError` reaches all eight panels as
+    // well as the aggregate, and every one of them is a rendering path for it — so the property
+    // that actually protects an operator is that NO path emits the credential, not that the
+    // most prominent one does not.
+    const { container } = renderWithProviders(
+      <PostureDashboard
+        error={{
+          ...SERVER_ERROR_CONTROL_STATUS_ERROR,
+          message: `the collection endpoint reported ${TOKEN_SHAPED}`,
+          reason: `upstream said ${PEM_SHAPED}`,
+        }}
+      />,
+    );
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain(TOKEN_SHAPED);
+    expect(text).not.toContain('BEGIN PRIVATE KEY');
+    // And the sweep is not vacuous: the surface really did render all nine paths.
+    expect(container.querySelectorAll('li[data-control-id]')).toHaveLength(CONTROL_IDS.length);
+    expect(aggregateError(container)).toBeInTheDocument();
+  });
+});
+
+describe('PostureDashboard — the corrected per-control resolvers reach the aggregate', () => {
+  it('never counts a control as passing when its own panel withholds the pass', () => {
+    // THE INTEGRATION FINDING. The dashboard's arithmetic was already conservative; what it
+    // delegated to was not. Every resolver has since been tightened to require its control's
+    // full evidence, and this asserts the dashboard USES those verdicts rather than the
+    // server's claim — for all eight controls at once.
+    const claiming = claimingPassWithoutEvidence();
+    const { container } = renderWithProviders(<PostureDashboard statuses={claiming} />);
+
+    expect(renderedCounts(container).pass).toBe(0);
+    for (const controlId of CONTROL_IDS) {
+      expect.soft(sectionVerdict(container, controlId)).not.toBe('pass');
+    }
+  });
+
+  it('agrees with each panel resolver, control by control, on every recorded roster', () => {
+    // Typed as PARTIAL maps deliberately: `WARNING_CONTROL_STATUSES` records only V2 and V8,
+    // because only those two controls have a recorded warning state. A roster with holes in it
+    // is the realistic case — a collection response that described some controls and not
+    // others — and it is exactly where a resolver that defaults an absent control to `pass`
+    // would be caught.
+    const rosters: readonly Readonly<Partial<StatusMap>>[] = [
+      PASSING_CONTROL_STATUSES,
+      FAILING_CONTROL_STATUSES,
+      WARNING_CONTROL_STATUSES,
+      UNKNOWN_CONTROL_STATUSES,
+      mixedRoster(),
+    ];
+    for (const roster of rosters) {
+      const resolved = resolveEffectiveVerdicts(roster);
+      for (const controlId of CONTROL_IDS) {
+        expect
+          .soft(resolved[controlId])
+          .toBe(resolveEffectiveControlVerdict(controlId, roster[controlId]));
+      }
+    }
+  });
+
+  it('keeps the fail > unknown > warn > pass precedence after every resolver change', () => {
+    // The precedence the review asked to be PRESERVED. Asserted over a roster carrying one of
+    // each verdict, so no ordering accident can satisfy it.
+    const roster = mixedRoster();
+    const aggregate = summarisePosture(roster);
+    const verdicts = new Set(Object.values(resolveEffectiveVerdicts(roster)));
+
+    expect(verdicts.has('fail')).toBe(true);
+    expect(aggregate.verdict).toBe('fail');
+    expect(VERDICT_PRECEDENCE[0]).toBe('fail');
+  });
+
+  it('computes the aggregate from the whole roster even when a filter hides the failure', async () => {
+    const { container, user } = renderWithProviders(
+      <PostureDashboard statuses={mixedRoster()} />,
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText(VERDICT_FILTER_LABEL),
+      AGGREGATE_VERDICT_PRESENTATION.pass.label,
+    );
+
+    // The filter selects what is DISPLAYED and has no input into the aggregate, so no filter
+    // can hide a failing control from the verdict above it.
+    expect(screen.getByRole('status', { name: AGGREGATE_VERDICT_LABEL })).toHaveAttribute(
+      'data-verdict',
+      'fail',
+    );
+    // V3 is the failing control in the recorded mixed roster, so filtering to `pass` removes
+    // precisely the control the aggregate verdict is reporting on.
+    expect(visibleControlIds(container)).not.toContain('V3');
+    expect(visibleControlIds(container)).toContain('V1');
+  });
+});
+

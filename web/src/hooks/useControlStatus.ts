@@ -73,6 +73,8 @@ limitations under the License.
 // web/package-lock.json stays in step and `npm ci` keeps working.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { safeProse } from '../domain/safeText';
+
 /**
  * The eight security-hardening controls this posture surface reports on, in the
  * order the aggregate dashboard renders them (AAP §0.3.1.1):
@@ -765,6 +767,20 @@ function parseWarnings(value: unknown): readonly string[] {
  * member is not, because "reported as null" and "not reported" are different
  * claims and the V4 oracle depends on the difference
  * (`svcaccttoken_test.go` L1524-1525).
+ *
+ * INVARIANT LOCKED — EVERY DIAGNOSTIC RAISED HERE IS VALUE-FREE. A refusal names
+ * the POSITION it occurred at, the FIELD that was expected and the JSON TYPE that
+ * arrived, and nothing else. It never quotes the observation's own `label` and
+ * never quotes its `value`.
+ *
+ * That is a confidentiality rule, not a style preference. A refused payload is
+ * surfaced as {@link ControlStatusError.message}, which the aggregate dashboard
+ * and every panel render as document text — so a credential placed in a
+ * malformed payload's `label` used to travel, unaltered, from an untrusted
+ * response into the DOM by way of a parser diagnostic. Naming only the index and
+ * the expected shape loses nothing a reader needs: the position identifies the
+ * entry precisely, and the payload itself is refused rather than partially
+ * rendered, so there is no rendered value for the label to help locate.
  */
 function parseObservations(value: unknown): readonly ControlObservation[] | undefined {
   if (value === undefined || value === null) {
@@ -796,7 +812,7 @@ function parseObservations(value: unknown): readonly ControlObservation[] | unde
     }
     if (!('value' in item)) {
       throw new PayloadShapeError(
-        `${at} (labelled "${label}") carries no "value" member. "Reported as null" and ` +
+        `${at} carries no "value" member. "Reported as null" and ` +
           '"not reported" are different claims and the V4 control turns on the difference ' +
           `(svcaccttoken_test.go L1524-1525), so an observation with no value at all is ` +
           'rejected rather than being read as either one.',
@@ -810,7 +826,7 @@ function parseObservations(value: unknown): readonly ControlObservation[] | unde
       typeof measured !== 'boolean'
     ) {
       throw new PayloadShapeError(
-        `${at} (labelled "${label}") has a value of type ${describeJsonType(measured)}; ` +
+        `${at} has a value of type ${describeJsonType(measured)}; ` +
           'a measurement is a string, a finite number, a boolean or null. It is rejected ' +
           'rather than dropped because a MISSING observation reads as "the control did ' +
           'not measure this", which is a claim the server never made.',
@@ -818,7 +834,7 @@ function parseObservations(value: unknown): readonly ControlObservation[] | unde
     }
     if (typeof measured === 'number' && !Number.isFinite(measured)) {
       throw new PayloadShapeError(
-        `${at} (labelled "${label}") is a non-finite number, which compares absurdly ` +
+        `${at} is a non-finite number, which compares absurdly ` +
           'against every bound the panels assert.',
       );
     }
@@ -1069,7 +1085,18 @@ async function readStatusBody(response: Response): Promise<StatusBody> {
     if (!isRecord(parsed)) {
       return {};
     }
-    return { message: readString(parsed, 'message'), reason: readString(parsed, 'reason') };
+    // Both members are SERVER-SUPPLIED prose, so both are bounded and redacted
+    // here at the boundary they enter through rather than at each of the ten
+    // places they are eventually rendered. `safeProse` leaves ordinary wording
+    // untouched, so the server still gets to say what went wrong in its own
+    // words -- it simply cannot say it with a credential, a control character or
+    // an unbounded string (AAP §0.11.1).
+    const message = readString(parsed, 'message');
+    const reason = readString(parsed, 'reason');
+    return {
+      message: message === undefined ? undefined : safeProse(message),
+      reason: reason === undefined ? undefined : safeProse(reason),
+    };
   } catch {
     // Reaching here means the body was unreadable or was not JSON. The status
     // code has already been captured by the caller, and an abort that surfaces
@@ -1079,9 +1106,15 @@ async function readStatusBody(response: Response): Promise<StatusBody> {
   }
 }
 
-/** Fallback failure text for a non-2xx response with no `Status` message. */
+/**
+ * Fallback failure text for a non-2xx response with no `Status` message.
+ *
+ * `statusText` is chosen by the server, so it is sanitized before being
+ * composed in: it is the same class of external text as a `Status` message and
+ * reaches the same rendered error line.
+ */
 function describeHttpFailure(response: Response, path: string): string {
-  const statusText = response.statusText.trim();
+  const statusText = safeProse(response.statusText);
   return statusText === ''
     ? `Request to ${path} failed with HTTP ${response.status}.`
     : `Request to ${path} failed with HTTP ${response.status} ${statusText}.`;
@@ -1099,7 +1132,11 @@ function describeHttpFailure(response: Response, path: string): string {
  * genuinely absent one falls back.
  */
 function describeNetworkFailure(error: unknown, path: string): string {
-  const detail = error instanceof DOMException || error instanceof Error ? error.message : '';
+  // Bounded and redacted like every other message this hook did not author: a
+  // platform error message can carry the request URL, and a URL can carry a
+  // query parameter that carries a token.
+  const detail =
+    error instanceof DOMException || error instanceof Error ? safeProse(error.message) : '';
   return detail === ''
     ? `Request to ${path} could not be completed.`
     : `Request to ${path} could not be completed: ${detail}`;

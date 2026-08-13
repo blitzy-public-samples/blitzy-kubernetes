@@ -127,10 +127,32 @@ import {
   v2NamespaceLabelObservation,
   v6ResourceLevelObservation,
 } from '../../domain/observationIds';
-// The ONLY cross-fixture import permitted in this folder (AAP §0.5.5): the two
-// V3 constants have exactly one definition site, so an edit there propagates
-// here instead of diverging. They are deliberately NOT re-littered as literals.
-import { AESGCM_PREFIX, PLAINTEXT_CANARY } from './encryptionConfig';
+// The audit-level vocabulary, from the one place it is defined. A fixture that
+// declared its own copy could record a level the parser would refuse, or an order
+// the panels do not use, and typecheck either way.
+import {
+  AUDIT_LEVEL_ORDER,
+  AUDIT_LEVEL_RANK,
+  NODE_AUTHORIZATION_MODE,
+  NODE_RESTRICTION_PLUGIN,
+  compareAuditLevels,
+  type AuditLevel,
+} from '../../domain/securityConstants';
+// The ONE cross-fixture import this folder permits (AAP §0.5.5), and it reaches a
+// single sibling for a single control: the V3 constants and the V3 committed
+// manifest each have exactly one definition site, so an edit there propagates here
+// instead of diverging. They are deliberately NOT re-littered as literals.
+//
+// DEPLOYMENT_ENCRYPTION_CONFIG joins the two constants because the V3 passing
+// payload must carry the manifest's posture — provider order, encrypted resources,
+// KMS timeout, absent cachesize — and re-recording that document here would create
+// the second copy this rule exists to prevent. It is read, never rendered: the
+// observations below derive from it.
+import {
+  AESGCM_PREFIX,
+  DEPLOYMENT_ENCRYPTION_CONFIG,
+  PLAINTEXT_CANARY,
+} from './encryptionConfig';
 
 // ---------------------------------------------------------------------------
 // SECTION 0 -- Shared vocabulary.
@@ -677,12 +699,80 @@ export const V2_NAMESPACES = {
 } as const;
 
 /**
+ * The ServiceAccount all three recorded pods run as, from `podsecurity_test.go`
+ * L399, L414 and L444.
+ *
+ * `default`, and set EXPLICITLY by the oracle rather than left to be defaulted.
+ * AAP §0.10.2 records why: the namespace's `default` ServiceAccount must exist
+ * before the pod is created, or a ServiceAccount error masks the PodSecurity
+ * rejection and the 403 proves the wrong thing.
+ */
+export const V2_POD_SERVICE_ACCOUNT_NAME = 'default';
+
+/** The single container's name on all three recorded pods (L402, L417, L447). */
+export const V2_POD_CONTAINER_NAME = 'c';
+
+/** The container image on all three recorded pods (L403, L417, L447), verbatim. */
+export const V2_POD_CONTAINER_IMAGE = 'busybox';
+
+/**
+ * Whether `PodSecurity` appears in `ADMISSION_CONTROL`, recorded per GCE profile.
+ *
+ * INVARIANT LOCKED (F-002-RQ-002). Recorded from `cluster/gce/config-default.sh`
+ * L374 and `cluster/gce/config-test.sh` L418, each of which declares the plugin
+ * list independently of the other.
+ *
+ * TWO ENTRIES AND NOT ONE BOOLEAN, for the same reason the etcd insecure-fallback
+ * defaults are recorded per profile: a one-sided edit is the failure mode. Dropping
+ * `PodSecurity` from the test profile while the default profile still listed it
+ * would leave every test-profile deployment with no Pod Security admission at all,
+ * and a single combined flag would still read as green.
+ */
+export const V2_ADMISSION_CONTROL_PROFILES = {
+  'cluster/gce/config-default.sh': true,
+  'cluster/gce/config-test.sh': true,
+} as const satisfies Record<string, boolean>;
+
+/**
+ * The `PodSecurity`-in-both-profiles measurement, as panel observations.
+ *
+ * Derived from {@link V2_ADMISSION_CONTROL_PROFILES} rather than written out, so the
+ * evidence a panel gates on and the record above cannot diverge.
+ */
+export const V2_ADMISSION_CONTROL_OBSERVATIONS: readonly ControlObservation[] = [
+  {
+    label: V2_OBSERVATIONS.admissionControlDefaultProfile,
+    value: V2_ADMISSION_CONTROL_PROFILES['cluster/gce/config-default.sh'],
+  },
+  {
+    label: V2_OBSERVATIONS.admissionControlTestProfile,
+    value: V2_ADMISSION_CONTROL_PROFILES['cluster/gce/config-test.sh'],
+  },
+];
+
+/**
  * The three pods the oracle creates, recorded from `podsecurity_test.go`
  * L396-421 and L439-449.
  *
  * `expectedHttpStatus` is 403 for the two rejections and `null` for the admitted
  * pod -- `null` meaning "admitted, so no error status exists", which is a
  * measured outcome and not a missing value.
+ *
+ * THE POD DOCUMENT SHAPE IS RECORDED TOO, and it is not decoration. The recorded
+ * outcome of a pod creation is only the outcome OF THAT POD: a 403 that names
+ * `securityContext.privileged=true` is evidence about a privileged pod and about
+ * nothing else. While only the name and namespace were recorded, a replay handler
+ * could serve that 403 for a pod carrying no `securityContext` at all — an
+ * admission decision replayed for a document that could not have produced it,
+ * which makes the rejection unfalsifiable. `serviceAccountName` is included
+ * because AAP §0.10.2 makes the namespace's `default` ServiceAccount a
+ * PRECONDITION: the oracle sets it explicitly on all three pods (L399, L414,
+ * L444) so that a rejection is genuinely a PodSecurity Forbidden rather than a
+ * ServiceAccount error.
+ *
+ * `image: 'busybox'` is the oracle's own image string (L403, L417, L447), recorded
+ * verbatim rather than modernised: the field is part of the document whose
+ * admission outcome was measured.
  */
 export const V2_PODS = [
   {
@@ -692,6 +782,11 @@ export const V2_PODS = [
     admitted: false,
     expectedHttpStatus: FORBIDDEN_STATUS,
     severityWhenViolated: 'accumulate',
+    serviceAccountName: V2_POD_SERVICE_ACCOUNT_NAME,
+    containerName: V2_POD_CONTAINER_NAME,
+    containerImage: V2_POD_CONTAINER_IMAGE,
+    privileged: true,
+    hostPID: false,
     sourceReference: 'test/integration/auth/podsecurity_test.go L396-L409',
   },
   {
@@ -701,6 +796,11 @@ export const V2_PODS = [
     admitted: false,
     expectedHttpStatus: FORBIDDEN_STATUS,
     severityWhenViolated: 'accumulate',
+    serviceAccountName: V2_POD_SERVICE_ACCOUNT_NAME,
+    containerName: V2_POD_CONTAINER_NAME,
+    containerImage: V2_POD_CONTAINER_IMAGE,
+    privileged: false,
+    hostPID: true,
     sourceReference: 'test/integration/auth/podsecurity_test.go L411-L421',
   },
   {
@@ -713,6 +813,14 @@ export const V2_PODS = [
     admitted: true,
     expectedHttpStatus: null,
     severityWhenViolated: 'accumulate',
+    serviceAccountName: V2_POD_SERVICE_ACCOUNT_NAME,
+    containerName: V2_POD_CONTAINER_NAME,
+    containerImage: V2_POD_CONTAINER_IMAGE,
+    // NEITHER flag set, and that is the whole of this case: a plain pod violates
+    // `restricted` while complying with `baseline`, so it is ADMITTED under an
+    // enforce level left at the cluster default and still surfaces a warning.
+    privileged: false,
+    hostPID: false,
     sourceReference: 'test/integration/auth/podsecurity_test.go L439-L456',
   },
 ] as const satisfies readonly {
@@ -722,6 +830,14 @@ export const V2_PODS = [
   readonly admitted: boolean;
   readonly expectedHttpStatus: number | null;
   readonly severityWhenViolated: AssertionSeverity;
+  /** The ServiceAccount the pod runs as. The PRECONDITION of AAP §0.10.2. */
+  readonly serviceAccountName: string;
+  readonly containerName: string;
+  readonly containerImage: string;
+  /** `spec.containers[0].securityContext.privileged`, absent unless `true`. */
+  readonly privileged: boolean;
+  /** `spec.hostPID`, absent unless `true`. */
+  readonly hostPID: boolean;
   readonly sourceReference: string;
 }[];
 
@@ -834,6 +950,12 @@ export const V2_POD_SECURITY_PASSING = {
         label: V2_OBSERVATIONS.admissionExemptNamespaces,
         value: V2_GENERATED_ADMISSION_CONFIG.exemptions.namespaces.join(','),
       },
+      // F-002-RQ-002, measured per profile. This payload claims all three V2
+      // requirements, and until these two observations existed the third of them
+      // rested on nothing at all: the runtime behaviour above proves the plugin was
+      // enabled on the SERVER THE ORACLE STARTED, not that either shipped GCE
+      // profile enables it.
+      ...V2_ADMISSION_CONTROL_OBSERVATIONS,
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1076,6 +1198,51 @@ export const V3_EXAMPLE_STORAGE_PREFIX =
   '00000000-0000-0000-0000-000000000000/registry';
 
 /**
+ * The committed deployment manifest's posture, as panel observations.
+ *
+ * INVARIANT LOCKED (F-003-RQ-001 and F-003-RQ-003, AAP §0.10.2): the encrypted
+ * resource list, the provider ORDER with the strong provider first and `identity`
+ * last, the KMS envelope timeout, and the ABSENCE of `cachesize`.
+ *
+ * WHY THE PASSING PAYLOAD NEEDS THESE. The four runtime assertions above prove that
+ * a Secret written through THIS TEST'S API server was ciphertext at rest. They say
+ * nothing about the document a real deployment loads — and the two most dangerous
+ * V3 regressions are invisible to them. Put `identity` first in the provider list
+ * and every new write is plaintext while a test server configured with aesgcm still
+ * passes all four; add `cachesize` under a KMS v2 provider and the API server
+ * refuses to load the configuration at all. A payload claiming F-003-RQ-001 and
+ * F-003-RQ-003 from runtime evidence alone was attributing requirements to
+ * measurements that could not fail them.
+ *
+ * DERIVED FROM {@link DEPLOYMENT_ENCRYPTION_CONFIG} rather than written out, so the
+ * recorded document and the evidence gated on it cannot diverge. `cachesizeKey` is
+ * recorded as `null` — MEASURED ABSENCE, not a missing observation — because "the
+ * key is not present" is exactly the assertion, and an omitted observation would
+ * read as "nobody looked".
+ */
+export const V3_DEPLOYMENT_MANIFEST_OBSERVATIONS: readonly ControlObservation[] = [
+  {
+    label: V3_OBSERVATIONS.encryptedResources,
+    value: DEPLOYMENT_ENCRYPTION_CONFIG.resources[0].resources.join(','),
+  },
+  {
+    label: V3_OBSERVATIONS.providerOrder,
+    value: DEPLOYMENT_ENCRYPTION_CONFIG.resources[0].providers
+      .map((provider) => ('kms' in provider ? `kms:${provider.kms.apiVersion}` : 'identity'))
+      .join(','),
+  },
+  {
+    label: V3_OBSERVATIONS.kmsTimeout,
+    value: DEPLOYMENT_ENCRYPTION_CONFIG.resources[0].providers[0].kms.timeout,
+  },
+  {
+    label: V3_OBSERVATIONS.kmsEndpoint,
+    value: DEPLOYMENT_ENCRYPTION_CONFIG.resources[0].providers[0].kms.endpoint,
+  },
+  { label: V3_OBSERVATIONS.cachesizeKey, value: null },
+];
+
+/**
  * V3 passing payload: the Secret is ciphertext at rest.
  *
  * All four conditions hold. The prefix observation records the imported constant
@@ -1104,6 +1271,10 @@ export const V3_ENCRYPTION_PASSING = {
       { label: V3_OBSERVATIONS.plaintextRoundTrip, value: true },
       { label: V3_OBSERVATIONS.storagePrefixFromLiveConfig, value: true },
       { label: V3_OBSERVATIONS.storagePrefixShape, value: V3_EXAMPLE_STORAGE_PREFIX },
+      // The committed manifest's posture, WITHOUT which this payload's claim to
+      // F-003-RQ-001 and F-003-RQ-003 rests on runtime evidence that cannot fail
+      // either of them.
+      ...V3_DEPLOYMENT_MANIFEST_OBSERVATIONS,
     ],
   },
   observedAt: OBSERVED_AT,
@@ -1400,6 +1571,15 @@ export const V4_TOKEN_EVIDENCE = {
   requestedTtlSeconds: V4_REQUESTED_TTL_SECONDS,
   observedExpiry: V4_OBSERVED_EXPIRY,
   observations: [
+    // FIRST, because it is the precondition for every entry after it. The oracle
+    // aborts on an empty token before it asserts anything -- `token :=
+    // treq.Status.Token; if token == "" { t.Fatalf(...) }` at
+    // `svcaccttoken_test.go` L1484-L1487 -- so a recorded payload that carries
+    // claim values without recording that a token existed is describing claims it
+    // could not have read. Recorded here rather than implied by the presence of the
+    // other entries, because "implied by" is exactly the inference the panel must
+    // not make.
+    { label: V4_OBSERVATIONS.tokenIssued, value: true },
     { label: V4_OBSERVATIONS.issuer, value: V4_ISSUER },
     { label: V4_OBSERVATIONS.subject, value: V4_CLAIM_SHAPE.subject },
     {
@@ -1511,8 +1691,25 @@ export const V4_TOKEN_FAILING = {
     requestedTtlSeconds: V4_REQUESTED_TTL_SECONDS,
     observedExpiry: V4_LONG_LIVED_OBSERVED_EXPIRY,
     observations: [
+      // A token WAS issued here -- that is what makes this payload a failure rather
+      // than an indeterminate one. Its defects are in what the token contains, so
+      // the audience and lifetime rows must be evaluated and must fail, not withheld.
+      { label: V4_OBSERVATIONS.tokenIssued, value: true },
       { label: V4_OBSERVATIONS.issuer, value: V4_ISSUER },
+      // The claim shape is INTACT on this payload, and recording it in full is what
+      // makes that precise: all three findings below are about the audience and the
+      // lifetime, and none is about identity. Recording only `subject` would have
+      // left the two sub-claims reading "could not verify" and made the payload look
+      // as though it also failed to establish which account the token names.
       { label: V4_OBSERVATIONS.subject, value: V4_CLAIM_SHAPE.subject },
+      {
+        label: V4_OBSERVATIONS.kubernetesIoNamespace,
+        value: V4_CLAIM_SHAPE.kubernetesIoNamespace,
+      },
+      {
+        label: V4_OBSERVATIONS.kubernetesIoServiceAccountName,
+        value: V4_CLAIM_SHAPE.kubernetesIoServiceAccountName,
+      },
       { label: V4_OBSERVATIONS.kubernetesIoPod, value: V4_CLAIM_SHAPE.kubernetesIoPod },
       { label: V4_OBSERVATIONS.kubernetesIoSecret, value: V4_CLAIM_SHAPE.kubernetesIoSecret },
       { label: V4_OBSERVATIONS.expiryWindowEarliest, value: V4_EXPIRY_WINDOW.earliestSeconds },
@@ -1851,65 +2048,31 @@ export const V5_WEBHOOK_UNKNOWN = {
 /**
  * The four audit levels, in ascending order of detail.
  *
- * Recorded from `cluster/gce/gci/audit_policy_test.go` L120-125, whose aliases
- * are `none`, `metadata`, `request` and `response` for `audit.LevelNone`,
- * `LevelMetadata`, `LevelRequest` and `LevelRequestResponse`. The wire names are
- * used here because that is what an audit policy and an audit event carry.
+ * Recorded in `domain/securityConstants`, from `cluster/gce/gci/audit_policy_test.go`
+ * L120-125, whose aliases are `none`, `metadata`, `request` and `response` for
+ * `audit.LevelNone`, `LevelMetadata`, `LevelRequest` and `LevelRequestResponse`.
+ * The wire names are used because that is what an audit policy and an audit event
+ * carry.
  */
-export type AuditLevel = 'None' | 'Metadata' | 'Request' | 'RequestResponse';
+export type { AuditLevel };
 
 /**
- * The levels as an ordered tuple, least detailed first.
+ * The level vocabulary, its ORDER, its ranks and its comparison, all re-exported
+ * from `domain/securityConstants` rather than redeclared here.
  *
- * The `satisfies` target is a fixed four-element TUPLE of literals rather than
- * `readonly AuditLevel[]`, which matters: an array target would accept ANY
- * permutation, so the ordering claim would be a comment rather than a guarantee.
- * As written, reordering these four entries -- or adding, removing or renaming one
- * -- is a `tsc --noEmit` error. That is AAP §0.10.2's "never weaken a boundary
- * condition" enforced by the gate instead of by review.
+ * This fixture used to carry its own `AuditLevel` union, its own ordered tuple and
+ * its own rank table. They agreed with the parser's copy, and that was the
+ * problem: agreement by inspection is not agreement by construction. A recorded
+ * fixture whose level vocabulary can drift from the parser's is a fixture that can
+ * record a level the parser would refuse, or claim an order the panels do not use,
+ * and nothing in the gate would notice. Importing the one definition makes any
+ * such drift impossible rather than merely unlikely — there is no second copy left
+ * to drift from.
+ *
+ * The names stay exported here because this fixture is a published surface for the
+ * specs, and moving a definition must not move a consumer's import path.
  */
-export const AUDIT_LEVEL_ORDER = [
-  'None',
-  'Metadata',
-  'Request',
-  'RequestResponse',
-] as const satisfies readonly ['None', 'Metadata', 'Request', 'RequestResponse'];
-
-/**
- * Rank of each level, for comparison.
- *
- * INVARIANT LOCKED (F-006-RQ-001): `None < Metadata < Request < RequestResponse`
- * is a STRICT TOTAL ORDER. Every level has a distinct rank, so no two levels
- * compare equal unless they are the same level, and every pair is comparable.
- * That is what makes a silent downgrade detectable: an edit moving `secrets` from
- * `Request` to `Metadata` is not merely a different value, it is a strictly
- * SMALLER one, and a spec can say so.
- *
- * Declared as an exhaustive `Record<AuditLevel, number>`, so adding a level to the
- * union without ranking it is a compile error.
- */
-export const AUDIT_LEVEL_RANK = {
-  None: 0,
-  Metadata: 1,
-  Request: 2,
-  RequestResponse: 3,
-} as const satisfies Record<AuditLevel, number>;
-
-/**
- * Compares two audit levels by detail.
- *
- * Pure and total: every pair of levels is comparable, and the result is zero only
- * when the levels are identical, which is precisely the strict-total-order
- * property {@link AUDIT_LEVEL_RANK} encodes.
- *
- * @param left - the first level.
- * @param right - the second level.
- * @returns a negative number when `left` is less detailed than `right`, zero when
- *   they are the same level, and a positive number when `left` is more detailed.
- */
-export function compareAuditLevels(left: AuditLevel, right: AuditLevel): number {
-  return AUDIT_LEVEL_RANK[left] - AUDIT_LEVEL_RANK[right];
-}
+export { AUDIT_LEVEL_ORDER, AUDIT_LEVEL_RANK, compareAuditLevels };
 
 /** One rule of the recorded audit policy. */
 export interface AuditLevelRule {
@@ -2058,6 +2221,56 @@ export const V6_AUDIT_LEVEL_OBSERVATIONS: readonly ControlObservation[] =
     value: rule.level,
   }));
 
+/**
+ * How many audit events the oracle EXPECTS to observe: nine.
+ *
+ * Recorded from `audit_test.go`'s two measured operation sets — three `secrets`
+ * events (create, update, delete; L817-L850) and six RBAC events (roles and
+ * rolebindings, each created, updated and deleted; L864 and its five siblings).
+ *
+ * A LITERAL, NOT AN IMPORT, deliberately. The sibling `auditEvents.ts` records the
+ * events themselves and this file records the level table and the guard; AAP §0.5.5
+ * permits exactly one cross-fixture import in this folder (the two V3 constants),
+ * and widening that rule to reach a count would couple the two files in the
+ * direction the rule exists to prevent. The arithmetic is stated above so a reader
+ * can check it against either source.
+ */
+export const V6_EXPECTED_EVENT_COUNT = 9;
+
+/**
+ * How many audit events the oracle OBSERVES: ten.
+ *
+ * One more than it expects, and the extra one is load-bearing. `secretOperations`
+ * performs a Secret GET at `audit_test.go` L750-L751 that its own comment at
+ * L739-L741 records as "intentionally not asserted", so the observed stream is a
+ * genuine SUPERSET of the expectation table. That superset is what gives the
+ * confidentiality guard something the expectations cannot hide: L1041-L1043 records
+ * that a future regression to `RequestResponse` is caught "even if the
+ * expected-events table were changed to match".
+ */
+export const V6_OBSERVED_EVENT_COUNT = 10;
+
+/**
+ * The completeness measurement, as panel observations.
+ *
+ * WHY COMPLETENESS IS SEPARATE FROM THE OBSERVED COUNT, and why both are recorded.
+ * A count of observed events proves that auditing is on; it proves nothing about
+ * WHICH events arrived, so ten events that are all the wrong ten satisfy it. The Go
+ * oracle does not accept that: `test/utils/audit.go` L86 and L93 poll until every
+ * expected event has been seen and otherwise fail with a missing-events report
+ * naming each absent one. `expectedEventsObserved` is that report's verdict, and
+ * `expectedEventCount` is the denominator that makes the verdict auditable.
+ *
+ * Both are required for a V6 pass. Without them a panel could report "audited at
+ * the required levels" from a policy table alone, having never confirmed that a
+ * single one of those rules actually fired.
+ */
+export const V6_EVENT_COMPLETENESS_OBSERVATIONS: readonly ControlObservation[] = [
+  { label: V6_OBSERVATIONS.auditEventsObserved, value: V6_OBSERVED_EVENT_COUNT },
+  { label: V6_OBSERVATIONS.expectedEventCount, value: V6_EXPECTED_EVENT_COUNT },
+  { label: V6_OBSERVATIONS.expectedEventsObserved, value: true },
+];
+
 
 /**
  * V6 passing payload: every sensitive resource is audited at its recorded level
@@ -2077,8 +2290,23 @@ export const V6_AUDIT_PASSING = {
   evidence: {
     observations: [
       ...V6_AUDIT_LEVEL_OBSERVATIONS,
+      // The completeness pair, WITHOUT which the level table above is a policy
+      // document rather than a measurement: it says what the rules are and not
+      // that any of them fired.
+      ...V6_EVENT_COMPLETENESS_OBSERVATIONS,
       { label: V6_OBSERVATIONS.secretsAuditLevel, value: SECRETS_AUDIT_LEVEL },
+      // The required level, carried beside the observed one so a failure reads
+      // without external context and so the panel can render expected-versus-
+      // observed rather than a bare value.
+      { label: V6_OBSERVATIONS.secretsAuditLevelRequired, value: SECRETS_AUDIT_LEVEL },
       { label: V6_OBSERVATIONS.secretsResponseObjectCount, value: 0 },
+      // The accepted trade-off, recorded so its presence reads as a decision:
+      // `requestObject` surviving on create and update is what `Request` MEANS,
+      // and a reader who does not see it recorded may take it for a second defect.
+      {
+        label: V6_OBSERVATIONS.requestObjectTradeOff,
+        value: V6_CONFIDENTIALITY_GUARD.requestObjectPermitted,
+      },
       {
         label: V6_OBSERVATIONS.levelOrdering,
         value: AUDIT_LEVEL_ORDER.join(' < '),
@@ -2133,12 +2361,22 @@ export const V6_AUDIT_FAILING = {
   warnings: [],
   evidence: {
     observations: [
+      // The completeness pair is present here TOO, and that is the point of this
+      // payload: every expected event arrived and was measured, so the failure
+      // below is a genuine level regression rather than an incomplete scan. A
+      // failing payload that omitted completeness would be indistinguishable from
+      // one that simply had not finished looking.
+      ...V6_EVENT_COMPLETENESS_OBSERVATIONS,
       { label: V6_OBSERVATIONS.secretsAuditLevel, value: 'RequestResponse' },
       { label: V6_OBSERVATIONS.secretsAuditLevelRequired, value: SECRETS_AUDIT_LEVEL },
       { label: V6_OBSERVATIONS.secretsResponseObjectCount, value: 2 },
       {
         label: V6_OBSERVATIONS.requestObjectTradeOff,
         value: V6_CONFIDENTIALITY_GUARD.requestObjectPermitted,
+      },
+      {
+        label: V6_OBSERVATIONS.levelOrdering,
+        value: AUDIT_LEVEL_ORDER.join(' < '),
       },
     ],
   },
@@ -2169,6 +2407,12 @@ export const V6_AUDIT_UNKNOWN = {
   evidence: {
     observations: [
       { label: V6_OBSERVATIONS.auditEventsObserved, value: 0 },
+      // Completeness reported as FALSE against the same expected count the passing
+      // payload carries. This is the distinction the missing-events report exists
+      // to make: nine events were expected, none arrived, and "no Secret event
+      // carried a response object" is therefore not a finding about Secrets at all.
+      { label: V6_OBSERVATIONS.expectedEventCount, value: V6_EXPECTED_EVENT_COUNT },
+      { label: V6_OBSERVATIONS.expectedEventsObserved, value: false },
       { label: V6_OBSERVATIONS.secretsAuditLevel, value: null },
       { label: V6_OBSERVATIONS.secretsResponseObjectCount, value: null },
     ],
@@ -2222,8 +2466,11 @@ export const V7_PRINCIPALS = {
  * outcome without its precondition.
  */
 export const V7_ENABLING_POSTURE = {
-  authorizationMode: 'Node,RBAC',
-  enabledAdmissionPlugins: ['NodeRestriction'],
+  // FROM THE ONE DEFINITION SITE, not re-spelled. `NodeIsolationPanel` gates its pass on
+  // these exact values, and a panel cannot import from `src/test/`, so a literal here
+  // would be a second copy that typechecks while disagreeing with the gate.
+  authorizationMode: NODE_AUTHORIZATION_MODE,
+  enabledAdmissionPlugins: [NODE_RESTRICTION_PLUGIN],
   disabledAdmissionPlugins: ['ServiceAccount', 'TaintNodesByCondition'],
 } as const satisfies {
   readonly authorizationMode: string;
@@ -2776,6 +3023,54 @@ export const ETCD_INSECURE_FALLBACK_PROFILE_DEFAULTS = {
   'cluster/gce/config-test.sh': false,
 } as const satisfies Record<string, boolean>;
 
+/**
+ * The profile-default measurement, as panel observations.
+ *
+ * Derived from {@link ETCD_INSECURE_FALLBACK_PROFILE_DEFAULTS} so the record and the
+ * evidence gated on it cannot diverge. Required by every branch that reaches or
+ * permits plaintext: the reason an operator-chosen plaintext transport is a WARNING
+ * rather than a control failure is that no profile-driven deployment can reach it,
+ * and that claim is only true while both profiles default the opt-out to false.
+ */
+export const V8_PROFILE_DEFAULT_OBSERVATIONS: readonly ControlObservation[] = [
+  {
+    label: V8_OBSERVATIONS.insecureFallbackDefaultDefaultProfile,
+    value: ETCD_INSECURE_FALLBACK_PROFILE_DEFAULTS['cluster/gce/config-default.sh'],
+  },
+  {
+    label: V8_OBSERVATIONS.insecureFallbackDefaultTestProfile,
+    value: ETCD_INSECURE_FALLBACK_PROFILE_DEFAULTS['cluster/gce/config-test.sh'],
+  },
+];
+
+/**
+ * The credential FILE PATHS a profile-driven deployment renders into the flags.
+ *
+ * Recorded from `cluster/gce/gci/configure-helper.sh`, which writes the three
+ * artifacts under `auth_dir="/etc/srv/kubernetes/pki"` as
+ * `etcd-apiserver-ca.crt`, `etcd-apiserver-client.crt` and
+ * `etcd-apiserver-client.key`.
+ *
+ * WHY THESE AND NOT THE ORACLE'S PLACEHOLDERS. `apiserver_etcd_test.go` L169 and
+ * L175-L176 set the three environment variables to the bare words `CACertPath`,
+ * `APIServerCertPath` and `APIServerKeyPath`, and {@link V8_MUTUAL_TLS_FLAGS}
+ * records the rendered flags containing them VERBATIM, because that is what the
+ * shell test measured and parity depends on it. The OBSERVATIONS below are a
+ * different thing: they are this tier's evidence that each flag carries a
+ * credential path, and a bare word is not a path. Recording real absolute paths is
+ * what lets the panel demand a path SHAPE — before that, any non-empty string
+ * satisfied `--etcd-cafile is supplied`, so a PEM body or the word `no` earned a
+ * pass for the strongest posture V8 has, and was then rendered.
+ *
+ * PATHS ONLY. No certificate, no key and no CA bundle CONTENT appears anywhere in
+ * this file, and the panel renders only a basename or a fixed phrase.
+ */
+export const V8_CREDENTIAL_PATHS = {
+  caFile: '/etc/srv/kubernetes/pki/etcd-apiserver-ca.crt',
+  certFile: '/etc/srv/kubernetes/pki/etcd-apiserver-client.crt',
+  keyFile: '/etc/srv/kubernetes/pki/etcd-apiserver-client.key',
+} as const satisfies Record<string, string>;
+
 /** V8 passing payload: the transport is mutually authenticated. */
 export const V8_ETCD_TRANSPORT_PASSING = {
   controlId: 'V8',
@@ -2792,20 +3087,16 @@ export const V8_ETCD_TRANSPORT_PASSING = {
   evidence: {
     observations: [
       { label: V8_OBSERVATIONS.etcdServers, value: 'https://127.0.0.1:2379' },
-      { label: V8_OBSERVATIONS.etcdCaFile, value: 'CACertPath' },
-      { label: V8_OBSERVATIONS.etcdCertFile, value: 'APIServerCertPath' },
-      { label: V8_OBSERVATIONS.etcdKeyFile, value: 'APIServerKeyPath' },
+      { label: V8_OBSERVATIONS.etcdCaFile, value: V8_CREDENTIAL_PATHS.caFile },
+      { label: V8_OBSERVATIONS.etcdCertFile, value: V8_CREDENTIAL_PATHS.certFile },
+      { label: V8_OBSERVATIONS.etcdKeyFile, value: V8_CREDENTIAL_PATHS.keyFile },
       { label: V8_OBSERVATIONS.credentialsSupplied, value: 'all' },
+      { label: V8_OBSERVATIONS.outcome, value: 'mutual-tls' },
       { label: V8_OBSERVATIONS.exitCode, value: 0 },
-      {
-        label: V8_OBSERVATIONS.insecureFallbackDefaultDefaultProfile,
-        value:
-          ETCD_INSECURE_FALLBACK_PROFILE_DEFAULTS['cluster/gce/config-default.sh'],
-      },
-      {
-        label: V8_OBSERVATIONS.insecureFallbackDefaultTestProfile,
-        value: ETCD_INSECURE_FALLBACK_PROFILE_DEFAULTS['cluster/gce/config-test.sh'],
-      },
+      // No diagnostic: the mutual-TLS branch emits none, and `null` records that as
+      // a MEASURED absence rather than leaving it unobserved.
+      { label: V8_OBSERVATIONS.diagnostic, value: null },
+      ...V8_PROFILE_DEFAULT_OBSERVATIONS,
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2839,6 +3130,15 @@ export const V8_ETCD_TRANSPORT_FAIL_CLOSED = {
       { label: V8_OBSERVATIONS.outcome, value: 'fail-closed' },
       { label: V8_OBSERVATIONS.exitCode, value: 1 },
       { label: V8_OBSERVATIONS.etcdServers, value: null },
+      // THE DIAGNOSTIC IS EVIDENCE, not decoration. AAP §0.10.2 states this branch
+      // as stderr containing "refusing to fall back to plaintext etcd" AND exit 1:
+      // the exit code alone cannot distinguish an intentional fail-closed abort from
+      // a crash, and the message alone cannot prove the boot stopped.
+      {
+        label: V8_OBSERVATIONS.diagnostic,
+        value: ETCD_TRANSPORT_STATES[3].diagnostic,
+      },
+      ...V8_PROFILE_DEFAULT_OBSERVATIONS,
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2879,6 +3179,80 @@ export const V8_ETCD_TRANSPORT_WARNING = {
       { label: V8_OBSERVATIONS.outcome, value: 'plaintext-loopback' },
       { label: V8_OBSERVATIONS.exitCode, value: 0 },
       { label: V8_OBSERVATIONS.unitTestCompatibilityDefault, value: false },
+      // THE WARNING IS WHAT MAKES THIS A DECISION rather than a silent downgrade,
+      // and it is the observation that distinguishes this state from the
+      // compatibility default, which emits nothing at all.
+      {
+        label: V8_OBSERVATIONS.diagnostic,
+        value: ETCD_TRANSPORT_STATES[2].diagnostic,
+      },
+      // Required here in particular: "neither GCE profile enables it" is the entire
+      // reason this is a warning and not a failure, so the claim needs evidence.
+      ...V8_PROFILE_DEFAULT_OBSERVATIONS,
+    ],
+  },
+  observedAt: OBSERVED_AT,
+} as const satisfies ControlStatus;
+
+/**
+ * V8 unit-test compatibility payload: plaintext from an EMPTY environment.
+ *
+ * ===========================================================================
+ * THE SUBTLEST PAYLOAD IN THIS FILE, and the one most likely to be helpfully
+ * "fixed" into a broken state. AAP §0.10.4 names it the single subtlest parity
+ * requirement in the migration.
+ *
+ * `TestTLSFlags` "mTLS disabled" (`apiserver_etcd_test.go` L185-L188) invokes
+ * `configure-etcd-params` with an EMPTY environment and expects
+ * `--etcd-servers=http://127.0.0.1:2379`. That expectation is satisfiable only
+ * because of the function-local `":-true"` default at
+ * `configure-kubeapiserver.sh` L41, which the shell's own comment records as a
+ * backward-compatibility shim for direct-invocation contexts that never load the
+ * GCE profiles — explicitly the in-tree unit tests.
+ *
+ * Both truths hold at once:
+ *   * this state legitimately yields PLAINTEXT and exit 0, and the shell test
+ *     that asserts it must stay green;
+ *   * a profile-driven deployment missing credentials must FAIL CLOSED with
+ *     exit 1, because both profiles set the opt-out to false.
+ *
+ * Collapsing them breaks parity in one direction or the control in the other. The
+ * discriminator is `unit-test compatibility default`, recorded `true` here and
+ * `false` on {@link V8_ETCD_TRANSPORT_WARNING}, together with the diagnostic: the
+ * operator-chosen state emits a WARNING and this one emits NOTHING.
+ * ===========================================================================
+ *
+ * `warn` and not `fail`, because the transport genuinely is unauthenticated; and not
+ * `pass`, for the same reason. What distinguishes it from the operator-chosen state
+ * is the explanation, not the verdict.
+ */
+export const V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT = {
+  controlId: 'V8',
+  verdict: 'warn',
+  summary: 'etcd transport is plaintext under the unit-test compatibility default.',
+  detail:
+    'The environment supplied no etcd credentials and no explicit insecure ' +
+    'fallback setting, so the function-local backward-compatibility default ' +
+    'applied and configuration addressed the loopback etcd over http without ' +
+    'emitting a warning. This is the direct-invocation path the in-tree shell ' +
+    'unit tests take; it is NOT the profile-driven path, and both GCE profiles ' +
+    'set the insecure fallback to false so a real deployment fails closed instead.',
+  requirementIds: ['F-008-RQ-001', 'F-008-RQ-002'],
+  findings: [],
+  warnings: [],
+  evidence: {
+    observations: [
+      { label: V8_OBSERVATIONS.etcdServers, value: 'http://127.0.0.1:2379' },
+      { label: V8_OBSERVATIONS.credentialsSupplied, value: 'none' },
+      { label: V8_OBSERVATIONS.insecureFallbackPermitted, value: true },
+      { label: V8_OBSERVATIONS.outcome, value: 'plaintext-loopback' },
+      { label: V8_OBSERVATIONS.exitCode, value: 0 },
+      { label: V8_OBSERVATIONS.unitTestCompatibilityDefault, value: true },
+      // NO diagnostic, recorded as a measured `null`. The shell emits its WARNING
+      // only where the opt-out was consulted and found to be `true` explicitly; the
+      // shim path prints nothing, and that silence is how the two are told apart.
+      { label: V8_OBSERVATIONS.diagnostic, value: null },
+      ...V8_PROFILE_DEFAULT_OBSERVATIONS,
     ],
   },
   observedAt: OBSERVED_AT,
@@ -2929,6 +3303,11 @@ export const V8_ETCD_TRANSPORT_FAILING = {
       { label: V8_OBSERVATIONS.outcome, value: 'plaintext-loopback' },
       { label: V8_OBSERVATIONS.exitCode, value: 0 },
       { label: V8_OBSERVATIONS.exitCodeRequiredForPartial, value: 1 },
+      // No diagnostic was emitted, recorded as a measured absence. That is itself
+      // part of the regression: the partial branch must print its "Please provide
+      // all mTLS credential" ERROR and exit 1, and this deployment did neither.
+      { label: V8_OBSERVATIONS.diagnostic, value: null },
+      ...V8_PROFILE_DEFAULT_OBSERVATIONS,
     ],
   },
   observedAt: OBSERVED_AT,

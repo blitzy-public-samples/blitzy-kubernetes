@@ -50,9 +50,17 @@ import { screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { V2_OBSERVATIONS, v2NamespaceLabelObservation } from '../domain/observationIds';
+import {
+  MAX_SAFE_PROSE_INPUT_LENGTH,
+  SAFE_OVERSIZED_TEXT,
+  SAFE_REDACTED,
+} from '../domain/safeText';
 import type { ControlObservation, ControlStatus } from '../hooks/useControlStatus';
 import {
   FORBIDDEN_STATUS,
+  V2_ADMISSION_CONTROL_OBSERVATIONS,
+  V2_ADMISSION_CONTROL_PROFILES,
+  V2_GENERATED_ADMISSION_CONFIG,
   FORBIDDEN_CONTROL_STATUS_ERROR,
   NOT_FOUND_STATUS,
   SERVER_ERROR_CONTROL_STATUS_ERROR,
@@ -86,8 +94,30 @@ const WARN_LABEL_ID = v2NamespaceLabelObservation(
   V2_NAMESPACES.warnRestricted.labelKey,
 );
 
-/** The eight measurements a pass rests on, all of them proven. */
+/**
+ * The FOURTEEN measurements a pass rests on, all of them proven.
+ *
+ * WHY FOURTEEN AND NOT EIGHT. The panel attributes itself to all three V2 requirements,
+ * and for a while only eight measurements could move its verdict -- the namespace labels
+ * and the runtime behaviour. F-002-RQ-001's GENERATED admission configuration and
+ * F-002-RQ-002's `PodSecurity`-on-both-GCE-profiles were rendered as ordinary
+ * observations, so a payload measuring neither still produced a pass over all three.
+ * The six configuration measurements are therefore part of this list, and the first case
+ * of the next block is the two-sided control that proves the list is SUFFICIENT -- without
+ * it every `without()` case below would report `unknown` whatever the gate did.
+ */
 const ALL_PROVEN: readonly ControlObservation[] = [
+  // F-002-RQ-001, the generated admission configuration.
+  { label: V2_OBSERVATIONS.admissionEnforce, value: V2_GENERATED_ADMISSION_CONFIG.defaults.enforce },
+  { label: V2_OBSERVATIONS.admissionWarn, value: V2_GENERATED_ADMISSION_CONFIG.defaults.warn },
+  { label: V2_OBSERVATIONS.admissionAudit, value: V2_GENERATED_ADMISSION_CONFIG.defaults.audit },
+  {
+    label: V2_OBSERVATIONS.admissionExemptNamespaces,
+    value: V2_GENERATED_ADMISSION_CONFIG.exemptions.namespaces.join(','),
+  },
+  // F-002-RQ-002, measured per profile because the profiles are edited independently.
+  ...V2_ADMISSION_CONTROL_OBSERVATIONS,
+  // F-002-RQ-003 and the runtime half of F-002-RQ-001.
   { label: ENFORCE_LABEL_ID, value: V2_NAMESPACES.enforceBaseline.labelValue },
   { label: V2_OBSERVATIONS.defaultServiceAccountPrecondition, value: true },
   { label: V2_OBSERVATIONS.privilegedPodStatus, value: FORBIDDEN_STATUS },
@@ -203,6 +233,18 @@ describe('the recorded payloads', () => {
 });
 
 describe('a pass must be earned', () => {
+  it('renders a PASS when all fourteen measurements are proven, so the gate is two-sided', () => {
+    // THE CONTROL FOR EVERY CASE BELOW. Without it a gate that refused every payload
+    // would look correct, and each `withholds the pass when ... is not reported` case
+    // would be asserting `unknown` against a panel that never says anything else.
+    const status = claimingPass(ALL_PROVEN);
+    renderWithProviders(<PodSecurityPanel status={status} />);
+
+    expect(screen.getByRole('heading', { level: 3, name: HEADINGS.pass })).toBeInTheDocument();
+    expect(resolvePodSecurityEffectiveVerdict(status)).toBe('pass');
+    expect(ALL_PROVEN).toHaveLength(14);
+  });
+
   it.each([
     ['the enforce-namespace label', ENFORCE_LABEL_ID, 'enforce-namespace-label'],
     [
@@ -216,6 +258,32 @@ describe('a pass must be earned', () => {
     ['the warn-pod admission', V2_OBSERVATIONS.warnPodAdmitted, 'warn-pod-admitted'],
     ['the warn-pod status', V2_OBSERVATIONS.warnPodStatus, 'warn-pod-no-rejection-status'],
     ['the warning count', V2_OBSERVATIONS.warningsRecorded, 'warning-surfaced'],
+    // F-002-RQ-001's generated configuration. `audit` and the exemption list have no
+    // counterpart anywhere else on the panel, so these rows are the only place either
+    // is checked at all.
+    [
+      'the generated enforce default',
+      V2_OBSERVATIONS.admissionEnforce,
+      'admission-config-enforce',
+    ],
+    ['the generated warn default', V2_OBSERVATIONS.admissionWarn, 'admission-config-warn'],
+    ['the generated audit default', V2_OBSERVATIONS.admissionAudit, 'admission-config-audit'],
+    [
+      'the generated exemption list',
+      V2_OBSERVATIONS.admissionExemptNamespaces,
+      'admission-config-exempt-namespaces',
+    ],
+    // F-002-RQ-002, per profile: a one-sided edit is the failure mode.
+    [
+      'the default GCE profile',
+      V2_OBSERVATIONS.admissionControlDefaultProfile,
+      'admission-control-default-profile',
+    ],
+    [
+      'the test GCE profile',
+      V2_OBSERVATIONS.admissionControlTestProfile,
+      'admission-control-test-profile',
+    ],
   ])('withholds the pass when %s is not reported', (_name, label, measurementId) => {
     const status = claimingPass(without(label));
     renderWithProviders(<PodSecurityPanel status={status} />);
@@ -347,6 +415,151 @@ describe('a contradicted measurement fails the control', () => {
     // No findings and no empty warn channel, so the reader is sent to the one place
     // that does substantiate the failure rather than being told there is no detail.
     expect(screen.getByRole('status').textContent).toContain('required measurements');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE REQUIREMENT ATTRIBUTION MUST MATCH THE GATED EVIDENCE (M14).
+//
+// The panel says "Requirements covered: F-002-RQ-001, F-002-RQ-002, F-002-RQ-003". Until
+// the six configuration measurements gated the verdict, two of those three claims rested
+// on nothing: the runtime rejections prove Pod Security admission worked on the server
+// `startPodSecurityServer` launched -- which passes no `--admission-control-config-file`
+// at all -- and say nothing about the configuration `configure-helper.sh` generates or
+// about either shipped GCE profile.
+// ---------------------------------------------------------------------------
+
+describe('the generated configuration and both GCE profiles gate the verdict', () => {
+  it('attributes every measurement to the requirement it serves', () => {
+    renderWithProviders(<PodSecurityPanel status={V2_POD_SECURITY_PASSING} />);
+
+    // Every requirement the panel CLAIMS is also a requirement it MEASURES, which is
+    // the whole substance of the finding.
+    const attributed = new Set(
+      [...document.querySelectorAll('tr[data-requirement]')].map((row) =>
+        row.getAttribute('data-requirement'),
+      ),
+    );
+    for (const requirementId of ['F-002-RQ-001', 'F-002-RQ-002', 'F-002-RQ-003']) {
+      expect.soft(attributed).toContain(requirementId);
+    }
+    expect(screen.getByRole('table', { name: /Required measurements/ })).toHaveTextContent(
+      'F-002-RQ-002',
+    );
+  });
+
+  it('proves all six configuration measurements on the recorded passing payload', () => {
+    renderWithProviders(<PodSecurityPanel status={V2_POD_SECURITY_PASSING} />);
+
+    for (const measurementId of [
+      'admission-config-enforce',
+      'admission-config-warn',
+      'admission-config-audit',
+      'admission-config-exempt-namespaces',
+      'admission-control-default-profile',
+      'admission-control-test-profile',
+    ]) {
+      expect.soft(measurementResult(measurementId)).toBe('pass');
+    }
+  });
+
+  it.each([
+    [
+      'the generated enforce default is privileged',
+      V2_OBSERVATIONS.admissionEnforce,
+      'privileged',
+      'admission-config-enforce',
+    ],
+    [
+      'the generated warn default is baseline',
+      V2_OBSERVATIONS.admissionWarn,
+      'baseline',
+      'admission-config-warn',
+    ],
+    [
+      'the generated audit default is baseline',
+      V2_OBSERVATIONS.admissionAudit,
+      'baseline',
+      'admission-config-audit',
+    ],
+    [
+      'the exemption list gained a namespace',
+      V2_OBSERVATIONS.admissionExemptNamespaces,
+      'kube-system,kube-public',
+      'admission-config-exempt-namespaces',
+    ],
+  ])('fails a payload claiming pass when %s', (_name, label, value, measurementId) => {
+    const status = claimingPass(replacing(label, value));
+    expect(status.verdict).toBe('pass');
+    renderWithProviders(<PodSecurityPanel status={status} />);
+
+    expect(screen.getByRole('heading', { level: 3, name: HEADINGS.fail })).toBeInTheDocument();
+    expect(measurementResult(measurementId)).toBe('fail');
+  });
+
+  it.each([
+    [
+      'the default profile',
+      V2_OBSERVATIONS.admissionControlDefaultProfile,
+      'admission-control-default-profile',
+    ],
+    [
+      'the test profile',
+      V2_OBSERVATIONS.admissionControlTestProfile,
+      'admission-control-test-profile',
+    ],
+  ])('fails a one-sided ADMISSION_CONTROL edit that drops the plugin from %s', (
+    _name,
+    label,
+    measurementId,
+  ) => {
+    // A one-sided edit is the failure mode F-002-RQ-002 exists to catch, and a single
+    // combined flag would still read as green. Both profiles are recorded as `true`,
+    // so each direction is checked on its own.
+    const status = claimingPass(replacing(label, false));
+    renderWithProviders(<PodSecurityPanel status={status} />);
+
+    expect(screen.getByRole('heading', { level: 3, name: HEADINGS.fail })).toBeInTheDocument();
+    expect(measurementResult(measurementId)).toBe('fail');
+    expect(screen.getByRole('table', { name: /Required measurements/ })).toHaveTextContent(
+      'no Pod Security admission at all',
+    );
+  });
+
+  it('names the profile FILE in each row, so a reader knows which one to edit', () => {
+    renderWithProviders(<PodSecurityPanel status={V2_POD_SECURITY_PASSING} />);
+
+    const table = screen.getByRole('table', { name: /Required measurements/ });
+    for (const path of Object.keys(V2_ADMISSION_CONTROL_PROFILES)) {
+      expect.soft(table).toHaveTextContent(path);
+    }
+  });
+
+  it.each([
+    ['a profile flag reported as a string', V2_OBSERVATIONS.admissionControlDefaultProfile, 'true'],
+    ['a profile flag reported as null', V2_OBSERVATIONS.admissionControlTestProfile, null],
+    ['a level reported as a number', V2_OBSERVATIONS.admissionEnforce, 1],
+  ])('withholds rather than fails on %s', (_name, label, value) => {
+    // "The profile was not read" and "the plugin is absent" are different claims: the
+    // first withholds the pass, the second fails the control. Coercing either into the
+    // other is how a report that measured nothing becomes a verdict.
+    const status = claimingPass(replacing(label, value));
+    renderWithProviders(<PodSecurityPanel status={status} />);
+
+    expect(screen.getByRole('heading', { level: 3, name: HEADINGS.unknown })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: HEADINGS.fail })).toBeNull();
+  });
+
+  it('leaves the recorded WARN payload a warning, not a failure, despite the new rows', () => {
+    // The warn scenario is a narrower one that never claimed either configuration
+    // requirement -- its own `requirementIds` list is `['F-002-RQ-003']` -- so its
+    // unmeasured configuration rows must withhold nothing it did not claim.
+    renderWithProviders(<PodSecurityPanel status={V2_POD_SECURITY_WARNING} />);
+
+    expect(screen.getByRole('heading', { level: 3, name: HEADINGS.warn })).toBeInTheDocument();
+    expect(resolvePodSecurityEffectiveVerdict(V2_POD_SECURITY_WARNING)).toBe('warn');
+    expect(measurementResult('admission-config-audit')).toBe('unknown');
+    expect(measurementResult('admission-control-test-profile')).toBe('unknown');
   });
 });
 
@@ -522,5 +735,126 @@ describe('the interaction case', () => {
     expect(onRefresh).toHaveBeenCalledTimes(1);
     // REPLACES rather than runs alongside, so one click is never two requests.
     expect(ownRefresh).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EXTERNAL TEXT IS BOUNDED AND REDACTED (M18, AAP §0.11.1).
+//
+// The summary, detail, timestamp, requirement identifiers, findings, warnings, every
+// observation label and value, and the error message and reason are all server-supplied,
+// so every one passes through the shared sanitizer in `../domain/safeText`. These cases
+// are two-sided on purpose: dangerous text is withheld AND the recorded text survives
+// unchanged, because a sanitizer that mangled ordinary prose would push the panel back to
+// inventing its own wording, and an invented message cannot say what actually went wrong.
+// ---------------------------------------------------------------------------
+
+describe('external prose is bounded and redacted', () => {
+  /** A JWT-shaped value: three dot-separated runs of at least eight word characters. */
+  const TOKEN_SHAPED = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlLXZhbHVl';
+
+  it('renders the recorded summary, detail and warnings verbatim', () => {
+    const { container } = renderWithProviders(
+      <PodSecurityPanel status={V2_POD_SECURITY_PASSING} />,
+    );
+
+    expect(container).toHaveTextContent(V2_POD_SECURITY_PASSING.summary);
+    expect(container).toHaveTextContent(V2_POD_SECURITY_PASSING.detail);
+    for (const warning of V2_RESTRICTED_WARNINGS) {
+      expect.soft(container).toHaveTextContent(warning);
+    }
+  });
+
+  it('bounds an oversized summary rather than rendering it', () => {
+    const status: ControlStatus = {
+      ...V2_POD_SECURITY_PASSING,
+      summary: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+    };
+    const { container } = renderWithProviders(<PodSecurityPanel status={status} />);
+
+    expect(container).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    expect(container.textContent).not.toContain('xxxxxxxxxx');
+  });
+
+  it('redacts a credential shape out of a finding, a warning and the timestamp', () => {
+    const status: ControlStatus = {
+      ...V2_POD_SECURITY_PASSING,
+      observedAt: TOKEN_SHAPED,
+      warnings: [`admission webhook replied with ${TOKEN_SHAPED}`],
+      findings: [
+        {
+          message: `the pod presented ${TOKEN_SHAPED} at admission.`,
+          subject: TOKEN_SHAPED,
+          requirementId: 'F-002-RQ-001',
+        },
+      ],
+    };
+    const { container } = renderWithProviders(<PodSecurityPanel status={status} />);
+
+    expect(container.textContent).not.toContain(TOKEN_SHAPED);
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+    // The surrounding explanation survives: only the shape is removed.
+    expect(container).toHaveTextContent('at admission');
+    expect(container).toHaveTextContent('admission webhook replied with');
+  });
+
+  it('collapses control characters out of server prose', () => {
+    const status: ControlStatus = {
+      ...V2_POD_SECURITY_PASSING,
+      detail: 'Rejected.\n\u0007\u202EAdmitted for nobody.',
+    };
+    const { container } = renderWithProviders(<PodSecurityPanel status={status} />);
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain('\u0007');
+    expect(text).not.toContain('\u202E');
+    expect(container).toHaveTextContent('Rejected. Admitted for nobody.');
+  });
+
+  it('bounds an observation label and value in the evidence table', () => {
+    // The evidence table renders whatever the payload reported, label included, so it
+    // is an external prose channel and not merely a display of local constants.
+    const status = claimingPass([
+      ...ALL_PROVEN,
+      { label: `leaked ${TOKEN_SHAPED}`, value: TOKEN_SHAPED },
+    ]);
+    const { container } = renderWithProviders(<PodSecurityPanel status={status} />);
+
+    expect(container.textContent).not.toContain(TOKEN_SHAPED);
+    expect(screen.getByRole('table', { name: 'Evidence reported for this control' })).toHaveTextContent(
+      SAFE_REDACTED,
+    );
+  });
+
+  it('bounds the status-endpoint failure message and reason', () => {
+    renderWithProviders(
+      <PodSecurityPanel
+        result={{
+          status: 'error',
+          error: {
+            kind: 'http',
+            message: `controls.posture.k8s.io is forbidden: ${TOKEN_SHAPED}`,
+            httpStatus: FORBIDDEN_STATUS,
+            reason: TOKEN_SHAPED,
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    expect(alert).toHaveTextContent('controls.posture.k8s.io is forbidden');
+    // `kind` and `httpStatus` are this tier's own typed values, so both still render.
+    expect(alert).toHaveTextContent('Status endpoint failure kind: http');
+    expect(alert).toHaveTextContent(`Status endpoint response code: ${String(FORBIDDEN_STATUS)}`);
+  });
+
+  it('bounds a requirement identifier supplied by the server', () => {
+    const status: ControlStatus = { ...V2_POD_SECURITY_PASSING, requirementIds: [TOKEN_SHAPED] };
+    const { container } = renderWithProviders(<PodSecurityPanel status={status} />);
+
+    expect(container.textContent).not.toContain(TOKEN_SHAPED);
+    expect(container).toHaveTextContent(`Requirements covered: ${SAFE_REDACTED}`);
   });
 });

@@ -41,36 +41,31 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AUDIT_API_VERSION,
   AUDIT_EVENT_KIND,
+  AUDIT_LEVEL_ORDER,
   AUDIT_REQUEST_BODY_KEY,
   AUDIT_RESPONSE_BODY_KEY,
+  CONFIDENTIAL_AUDIT_RESOURCE,
+  type AuditLevel,
 } from '../domain/securityConstants';
 
 /**
- * The four audit levels of the `audit.k8s.io/v1` API, spelled exactly as they
- * appear on the wire.
+ * The audit-level vocabulary, RE-EXPORTED rather than redeclared.
  *
- * These are the only four levels; none is invented. The ordering that matters
- * is documented by {@link AUDIT_LEVEL_ORDER} rather than by this union, because
- * a union is unordered.
- */
-export type AuditLevel = 'None' | 'Metadata' | 'Request' | 'RequestResponse';
-
-/**
- * The audit levels in their strict ascending order of verbosity:
- * `None < Metadata < Request < RequestResponse`.
+ * `domain/securityConstants` is the one definition site: it depends on nothing,
+ * so the parser, the panels and the recorded fixtures can all reach the same
+ * tuple and the same union without a cycle. This hook re-exports both because
+ * they are part of the audit contract its consumers already import from here —
+ * the re-export keeps those import paths working while leaving exactly ONE place
+ * where the order `None < Metadata < Request < RequestResponse` is written down.
  *
- * This constant exists to make that ordering expressible in the presentation
- * layer without re-deriving it. It is load-bearing for F-006-RQ-002: `secrets`
- * and `serviceaccounts/token` sit at exactly `Request`, and a regression that
- * silently promoted them to `RequestResponse` would begin writing Secret
- * payloads into the audit log. Index order is the invariant -- do not reorder.
+ * Load-bearing for F-006-RQ-002: `secrets` and `serviceaccounts/token` sit at
+ * exactly `Request`, and a regression that silently promoted them to
+ * `RequestResponse` would begin writing Secret payloads into the audit log. Index
+ * order is the invariant — reordering the tuple is now a compile error at its
+ * definition site rather than a divergence between three copies.
  */
-export const AUDIT_LEVEL_ORDER: readonly AuditLevel[] = [
-  'None',
-  'Metadata',
-  'Request',
-  'RequestResponse',
-];
+export type { AuditLevel };
+export { AUDIT_LEVEL_ORDER };
 
 /**
  * The audit stages of the `audit.k8s.io/v1` API, spelled exactly as they appear
@@ -431,6 +426,19 @@ export interface UseAuditEventsResult {
   error: AuditEventsError | null;
   /** The current 1-based page. */
   page: number;
+  /**
+   * The 1-based page the current {@link UseAuditEventsResult.events} were fetched for, or
+   * `undefined` before any page has loaded.
+   *
+   * DIFFERENT FROM {@link UseAuditEventsResult.page} for exactly one render after a page
+   * change, and that difference is why this member exists. Changing the page schedules a
+   * request, so until the response arrives the hook holds the new page NUMBER beside the
+   * previous page's EVENTS. A consumer that accumulates pages — the confidentiality guard
+   * traverses every page before it will make a whole-set claim — must key each batch by
+   * the page it actually came from, or it records one page's events under another's
+   * number and then double-counts them.
+   */
+  loadedPage?: number;
   /** The current page size. */
   pageSize: number;
   /** Total matches across all pages, when the server reported it. */
@@ -468,6 +476,17 @@ interface AuditEventsQueryState {
   error: AuditEventsError | null;
   total?: number;
   hasMore?: boolean;
+  /**
+   * The 1-based page {@link AuditEventsQueryState.events} was fetched for.
+   *
+   * Recorded at the moment of the response rather than read back from the `page` state,
+   * because the two are legitimately out of step for one render: changing the page
+   * schedules a request, so between the change and its response the hook holds the NEW
+   * page number alongside the PREVIOUS page's events. A consumer accumulating pages must
+   * be able to tell which page it is looking at, and inferring it from `page` attributes
+   * one page's events to another's number.
+   */
+  loadedPage?: number;
 }
 
 /** The pagination-bearing shape recovered from a successful response body. */
@@ -601,19 +620,474 @@ function optionalPayload(
   return { ok: true };
 }
 
-/** Validates an optional nested object member, e.g. `objectRef` or `responseStatus`. */
-function optionalRecord(
-  event: Record<string, unknown>,
+// A generic "is it an object" check for `objectRef`, `responseStatus`,
+// `impersonatedUser` and `annotations` used to live here, and it was the C1 defect:
+// each of those four is consumed to its LEAVES downstream, so validating only the
+// container accepted `objectRef: {}` and let the confidentiality guard read
+// `undefined` from it. The four now have purpose-built validators —
+// describeInvalidObjectRef, describeInvalidResponseStatus, describeInvalidSubject
+// and describeInvalidAnnotations — and the shallow helper is deliberately gone
+// rather than left available for a fifth field to be checked half-way.
+
+/**
+ * Validates an optional string member of a nested object.
+ *
+ * `allowEmpty` distinguishes the two cases the wire genuinely has: an
+ * `objectRef.apiGroup` of `""` IS the core API group and is meaningful, while an
+ * `objectRef.resource` of `""` names nothing at all.
+ */
+function optionalNestedString(
+  container: Record<string, unknown>,
+  containerName: string,
   key: string,
+  allowEmpty: boolean,
 ): { readonly ok: true } | { readonly problem: string } {
-  const raw = event[key];
+  const raw = container[key];
   if (raw === undefined) {
     return { ok: true };
   }
-  if (!isRecord(raw)) {
-    return { problem: `"${key}" is ${describeJsonType(raw)}, not an object` };
+  if (typeof raw !== 'string') {
+    return {
+      problem: `has a "${containerName}.${key}" of ${describeJsonType(raw)}, not a string`,
+    };
+  }
+  if (!allowEmpty && raw.length === 0) {
+    return { problem: `has an empty "${containerName}.${key}"` };
   }
   return { ok: true };
+}
+
+/** Validates an optional array-of-strings member of a nested object. */
+function optionalNestedStringList(
+  container: Record<string, unknown>,
+  containerName: string,
+  key: string,
+): { readonly ok: true } | { readonly problem: string } {
+  const raw = container[key];
+  if (raw === undefined) {
+    return { ok: true };
+  }
+  if (!Array.isArray(raw)) {
+    return {
+      problem: `has a "${containerName}.${key}" of ${describeJsonType(raw)}, not a list`,
+    };
+  }
+  for (const [index, member] of raw.entries()) {
+    if (typeof member !== 'string') {
+      return {
+        problem:
+          `has a "${containerName}.${key}[${String(index)}]" of ` +
+          `${describeJsonType(member)}, not a string. A malformed member is REFUSED ` +
+          'rather than dropped, because filtering one out silently narrows an identity',
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Validates a subject: `user` or `impersonatedUser`.
+ *
+ * The identity of the principal is what makes an audit event evidence rather than
+ * a log line, so every member it carries is checked rather than only its
+ * presence. `groups` in particular is validated member-by-member: a group list
+ * with an unreadable entry is a DIFFERENT identity from the list without it, and
+ * dropping the entry would quietly produce the narrower one.
+ */
+function describeInvalidSubject(
+  raw: unknown,
+  containerName: string,
+): string | null {
+  if (!isRecord(raw)) {
+    return `has a "${containerName}" of ${describeJsonType(raw)}, not an object`;
+  }
+  const username = requiredString(raw, 'username');
+  if ('problem' in username) {
+    return `has a "${containerName}" whose ${username.problem}`;
+  }
+  const uid = optionalNestedString(raw, containerName, 'uid', false);
+  if ('problem' in uid) {
+    return uid.problem;
+  }
+  const groups = optionalNestedStringList(raw, containerName, 'groups');
+  if ('problem' in groups) {
+    return groups.problem;
+  }
+  const extra = raw['extra'];
+  if (extra !== undefined) {
+    if (!isRecord(extra)) {
+      return `has a "${containerName}.extra" of ${describeJsonType(extra)}, not an object`;
+    }
+    for (const key of Object.keys(extra)) {
+      const values = optionalNestedStringList(extra, `${containerName}.extra`, key);
+      if ('problem' in values) {
+        return values.problem;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Validates `objectRef`, the field the whole confidentiality guard keys on.
+ *
+ * INVARIANT LOCKED (F-006-RQ-003, AAP §0.10.2): when `objectRef` is present its
+ * `resource` MUST be a non-empty string. Before this check the member was
+ * validated only as "an object", so `objectRef: {}` and
+ * `objectRef: { resource: 7 }` were both accepted — and the redaction test
+ * `event.objectRef?.resource === 'secrets'` then evaluated FALSE for them, which
+ * put a malformed Secret event carrying a `responseObject` on the NON-sensitive
+ * branch and serialized the body into the document. An absent `objectRef` is a
+ * different and legitimate thing (a non-resource request has none); an objectRef
+ * that exists and cannot say what it refers to is a contradiction.
+ *
+ * Every other member is validated too, because each is rendered: `apiGroup` may
+ * be the empty string (that IS the core group) while the rest may not.
+ */
+function describeInvalidObjectRef(raw: unknown): string | null {
+  if (!isRecord(raw)) {
+    return `has an "objectRef" of ${describeJsonType(raw)}, not an object`;
+  }
+  const resource = raw['resource'];
+  if (typeof resource !== 'string' || resource.length === 0) {
+    return (
+      `has an "objectRef" whose "resource" is ${describeJsonType(resource)}` +
+      `${typeof resource === 'string' ? ' and empty' : ''}. An objectRef that exists ` +
+      'must say what it refers to: the confidentiality guard keys on this exact field, ' +
+      'so an unreadable one would put a Secret event on the non-sensitive branch and ' +
+      'render its response body'
+    );
+  }
+  for (const key of ['namespace', 'name', 'uid', 'apiVersion', 'resourceVersion', 'subresource']) {
+    const member = optionalNestedString(raw, 'objectRef', key, false);
+    if ('problem' in member) {
+      return member.problem;
+    }
+  }
+  // The core API group IS the empty string, so this one member may be empty.
+  const apiGroup = optionalNestedString(raw, 'objectRef', 'apiGroup', true);
+  if ('problem' in apiGroup) {
+    return apiGroup.problem;
+  }
+  return null;
+}
+
+/**
+ * Validates `responseStatus`.
+ *
+ * `code` is required and must be a plausible HTTP status, because the V2 and V7
+ * controls are decided by exact status codes and a `code` of `"403"`, `403.5` or
+ * `99` cannot be compared against one. The three text members are validated as
+ * strings for the same reason every rendered field is: a non-string reaches the
+ * document as `[object Object]` or as `undefined`.
+ */
+function describeInvalidResponseStatus(raw: unknown): string | null {
+  if (!isRecord(raw)) {
+    return `has a "responseStatus" of ${describeJsonType(raw)}, not an object`;
+  }
+  const code = raw['code'];
+  if (typeof code !== 'number' || !Number.isInteger(code) || code < 100 || code > 599) {
+    return (
+      `has a "responseStatus.code" of ${JSON.stringify(code)}; an audited status is an ` +
+      'integer HTTP status code between 100 and 599, and a value outside that compares ' +
+      'absurdly against the exact codes the controls assert'
+    );
+  }
+  for (const key of ['status', 'reason', 'message']) {
+    const member = optionalNestedString(raw, 'responseStatus', key, false);
+    if ('problem' in member) {
+      return member.problem;
+    }
+  }
+  return null;
+}
+
+/**
+ * Validates `annotations`: a FLAT map of string to string on the wire.
+ *
+ * Checked value-by-value because the authorizer's verdict is read out of this map
+ * by key ({@link AUTHORIZATION_DECISION_ANNOTATION}) and rendered. A nested
+ * object here would render as `[object Object]` in the decision column, which
+ * reads as a decision and is not one.
+ */
+function describeInvalidAnnotations(raw: unknown): string | null {
+  if (!isRecord(raw)) {
+    return `has "annotations" of ${describeJsonType(raw)}, not an object`;
+  }
+  for (const key of Object.keys(raw)) {
+    if (typeof raw[key] !== 'string') {
+      return (
+        `has an "annotations" entry whose value is ${describeJsonType(raw[key])}, not a ` +
+        'string. Audit annotations are a flat string map on the wire'
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * The resource a request path names, when the path is a resource path at all.
+ *
+ * `subresource` and `namespace` are present only when the path carries them.
+ */
+interface RequestUriTarget {
+  readonly resource: string;
+  readonly namespace?: string;
+  readonly subresource?: string;
+}
+
+/**
+ * Reads the resource identity out of an audit event's `requestURI`.
+ *
+ * The Kubernetes API has exactly two resource-path shapes and this recognises both
+ * and nothing else: `/api/<version>/...` for the core group and
+ * `/apis/<group>/<version>/...` for every named group, each optionally prefixed
+ * with `namespaces/<name>/` inside the version segment. Anything else — `/healthz`,
+ * `/version`, `/metrics`, `/openapi/v2` — is a NON-RESOURCE path and yields
+ * `undefined`, which is a meaningful answer rather than a failure: a non-resource
+ * request legitimately carries no `objectRef`.
+ *
+ * Deliberately conservative. It parses the path and never guesses: a path that does
+ * not match a known shape is reported as non-resource rather than as "probably the
+ * last segment", because a wrong guess here would either invent a contradiction
+ * where none exists or hide one that does.
+ *
+ * @param requestURI - the event's `requestURI`, possibly with a query string.
+ * @returns the named resource, or `undefined` for a non-resource path.
+ */
+function readRequestUriTarget(requestURI: string): RequestUriTarget | undefined {
+  const path = requestURI.split('?')[0] ?? '';
+  const segments = path.split('/').filter((segment) => segment.length > 0);
+  let rest: readonly string[];
+  if (segments[0] === 'api' && segments.length >= 2) {
+    rest = segments.slice(2);
+  } else if (segments[0] === 'apis' && segments.length >= 3) {
+    rest = segments.slice(3);
+  } else {
+    return undefined;
+  }
+
+  let namespace: string | undefined;
+  if (rest[0] === 'namespaces' && rest.length >= 2) {
+    if (rest.length === 2) {
+      // `/api/v1/namespaces/<name>` addresses the Namespace OBJECT itself, so the
+      // resource is `namespaces` and the trailing segment is that object's name
+      // rather than a namespace scope. The name is not returned because nothing
+      // compares it: `objectRef.name` is absent on collection requests, so a
+      // comparison would be a contradiction check that fires on a legitimate
+      // omission.
+      return { resource: 'namespaces' };
+    }
+    namespace = rest[1];
+    rest = rest.slice(2);
+  }
+
+  const resource = rest[0];
+  if (resource === undefined || resource.length === 0) {
+    return undefined;
+  }
+  // rest is [resource] | [resource, name] | [resource, name, subresource].
+  const subresource = rest.length >= 3 ? rest[2] : undefined;
+  return {
+    resource,
+    ...(namespace === undefined ? {} : { namespace }),
+    ...(subresource === undefined ? {} : { subresource }),
+  };
+}
+
+/**
+ * What an audit event refers to, resolved once and trusted everywhere.
+ *
+ * THE POINT OF THIS TYPE is that `uncertain` is a first-class answer. The guard it
+ * feeds used to ask `event.objectRef?.resource === SENSITIVE_RESOURCE`, an
+ * expression with only two outcomes — so "this is not a Secret" and "I cannot tell
+ * what this is" produced the same answer, and the second one is the dangerous one.
+ * Modelling uncertainty explicitly is what lets every consumer fail CLOSED on it.
+ */
+export type AuditResourceIdentity =
+  | {
+      /** The event names a resource, and this is it. */
+      readonly kind: 'resource';
+      readonly resource: string;
+      readonly namespace?: string;
+      readonly subresource?: string;
+      /**
+       * Which field the identity came from. `requestURI` means no `objectRef` was
+       * recorded, so the path is the only statement of identity available — it is
+       * still an identity, and for a Secret path it must still be treated as one.
+       */
+      readonly source: 'objectRef' | 'requestURI';
+    }
+  | {
+      /** A non-resource request: `/healthz`, `/version`, `/metrics`. */
+      readonly kind: 'non-resource';
+      readonly requestURI: string;
+    }
+  | {
+      /** The event's identity cannot be established. Consumers MUST fail closed. */
+      readonly kind: 'uncertain';
+      readonly reason: string;
+    };
+
+/**
+ * Resolves what an audit event refers to.
+ *
+ * Invariant locked (C1): the answer is `uncertain` — never `non-resource` and never
+ * a guess — whenever the event says something about its identity that cannot be
+ * believed. Three cases reach it:
+ *
+ *   1. `objectRef` is present but its `resource` is absent, empty or not a string.
+ *      Something was referenced and the reference is unreadable.
+ *   2. `objectRef` and `requestURI` name different resources, namespaces or
+ *      subresources. Two statements that disagree cannot both be believed.
+ *   3. `objectRef` is absent and the `requestURI` is a resource path — resolved
+ *      from the path with `source: 'requestURI'`, so a Secret path is still a
+ *      Secret. This is a resolved identity rather than an uncertain one, and the
+ *      distinction matters: the answer is knowable, just from the other field.
+ *
+ * An event that reaches a consumer THROUGH THIS HOOK has already been refused if it
+ * is in case 1 or 2, because {@link describeInvalidEvent} rejects both. This
+ * function exists because the panels also accept caller-supplied events in
+ * controlled mode, which bypass the parser entirely — so the guard cannot rely on
+ * the parser having run, and both paths resolve identity the same way.
+ *
+ * Pure, total and free of exceptions: every input produces one of the three arms.
+ *
+ * @param event - a wire audit event, trusted or not.
+ * @returns the resolved identity.
+ */
+export function resolveAuditResourceIdentity(event: AuditEvent): AuditResourceIdentity {
+  const requestURI = typeof event.requestURI === 'string' ? event.requestURI : '';
+  const rawObjectRef: unknown = event.objectRef;
+  const target = readRequestUriTarget(requestURI);
+
+  if (rawObjectRef === undefined || rawObjectRef === null) {
+    if (target === undefined) {
+      return { kind: 'non-resource', requestURI };
+    }
+    return {
+      kind: 'resource',
+      resource: target.resource,
+      ...(target.namespace === undefined ? {} : { namespace: target.namespace }),
+      ...(target.subresource === undefined ? {} : { subresource: target.subresource }),
+      source: 'requestURI',
+    };
+  }
+
+  if (!isRecord(rawObjectRef)) {
+    return {
+      kind: 'uncertain',
+      reason: `objectRef is ${describeJsonType(rawObjectRef)}, not an object`,
+    };
+  }
+
+  const resource = rawObjectRef['resource'];
+  if (typeof resource !== 'string' || resource.length === 0) {
+    return {
+      kind: 'uncertain',
+      reason:
+        'objectRef is present but carries no readable "resource", so what this event ' +
+        'refers to cannot be established',
+    };
+  }
+
+  const contradiction = describeIdentityContradiction(requestURI, rawObjectRef);
+  if (contradiction !== null) {
+    return { kind: 'uncertain', reason: `the event ${contradiction}` };
+  }
+
+  const namespace = rawObjectRef['namespace'];
+  const subresource = rawObjectRef['subresource'];
+  return {
+    kind: 'resource',
+    resource,
+    ...(typeof namespace === 'string' ? { namespace } : {}),
+    ...(typeof subresource === 'string' ? { subresource } : {}),
+    source: 'objectRef',
+  };
+}
+
+/**
+ * Whether an event must be treated as referring to the confidential resource.
+ *
+ * INVARIANT LOCKED (F-006-RQ-003, AAP §0.10.2): `true` for a resolved `secrets`
+ * identity AND for every UNCERTAIN identity. The second half is the whole point.
+ * An event whose identity cannot be established might be a Secret event, and the
+ * cost of the two possible mistakes is not symmetric: treating a non-Secret as
+ * sensitive withholds one response body from a report, while treating an
+ * unidentifiable Secret as non-sensitive writes a Secret's contents into the
+ * document. The guard therefore resolves ties towards withholding.
+ *
+ * @param identity - the resolved identity.
+ * @returns `true` when the event's response body must be withheld.
+ */
+export function isConfidentialAuditIdentity(identity: AuditResourceIdentity): boolean {
+  if (identity.kind === 'uncertain') {
+    return true;
+  }
+  return identity.kind === 'resource' && identity.resource === CONFIDENTIAL_AUDIT_RESOURCE;
+}
+
+/**
+ * Reports a contradiction between an event's `requestURI` and its `objectRef`.
+ *
+ * INVARIANT LOCKED (C1): an event whose two statements of identity disagree is
+ * REFUSED, not reconciled. There is no safe way to choose between them — a
+ * `requestURI` of `/api/v1/namespaces/ns/secrets/s` paired with
+ * `objectRef.resource: "configmaps"` is either a server defect or an attempt to
+ * have a Secret event classified as something else, and in both cases every
+ * downstream decision made from either field is unsound. Believing the objectRef
+ * would let a crafted event carry a Secret body past the guard; believing the URI
+ * would make the rendered table disagree with the verdict.
+ *
+ * Only fields present on BOTH sides are compared, because an omission is not a
+ * contradiction: an audit policy may record an objectRef without a subresource,
+ * and a cluster-scoped path carries no namespace.
+ *
+ * @param requestURI - the event's request path.
+ * @param objectRef - the validated object reference.
+ * @returns the contradiction, or `null` when the two agree or cannot be compared.
+ */
+function describeIdentityContradiction(
+  requestURI: string,
+  objectRef: Record<string, unknown>,
+): string | null {
+  const target = readRequestUriTarget(requestURI);
+  if (target === undefined) {
+    return null;
+  }
+  const resource = objectRef['resource'];
+  if (typeof resource === 'string' && resource !== target.resource) {
+    return (
+      `names resource ${JSON.stringify(target.resource)} in its requestURI but ` +
+      `${JSON.stringify(resource)} in its objectRef. Two statements of identity that ` +
+      'disagree cannot both be believed, and choosing either one would let a crafted ' +
+      'event be classified as something it is not'
+    );
+  }
+  const namespace = objectRef['namespace'];
+  if (
+    typeof namespace === 'string' &&
+    target.namespace !== undefined &&
+    namespace !== target.namespace
+  ) {
+    return (
+      `names namespace ${JSON.stringify(target.namespace)} in its requestURI but ` +
+      `${JSON.stringify(namespace)} in its objectRef`
+    );
+  }
+  const subresource = objectRef['subresource'];
+  if (
+    typeof subresource === 'string' &&
+    target.subresource !== undefined &&
+    subresource !== target.subresource
+  ) {
+    return (
+      `names subresource ${JSON.stringify(target.subresource)} in its requestURI but ` +
+      `${JSON.stringify(subresource)} in its objectRef`
+    );
+  }
+  return null;
 }
 
 /**
@@ -631,6 +1105,14 @@ function optionalRecord(
  *
  * `user` must be an object carrying a string `username`, because the identity of the
  * principal is what makes an audit event evidence rather than a log line.
+ *
+ * EVERY NESTED MEMBER IS VALIDATED TO ITS LEAVES, and that is the C1 fix. Checking
+ * `objectRef`, `responseStatus`, `impersonatedUser` and `annotations` as "an
+ * object" and stopping there accepted `objectRef: {}` — from which the guard's
+ * `objectRef?.resource === 'secrets'` test read `undefined`, concluded "not a
+ * Secret", and serialized the event's `responseObject` into the document. The
+ * fields are consumed to their leaves downstream, so they are validated to their
+ * leaves here.
  */
 function describeInvalidEvent(candidate: unknown): string | null {
   if (!isRecord(candidate)) {
@@ -681,19 +1163,55 @@ function describeInvalidEvent(candidate: unknown): string | null {
     return `has stage ${JSON.stringify(stage)}, which is not one of ${known}`;
   }
 
-  const user = candidate['user'];
-  if (!isRecord(user)) {
-    return `has a "user" of ${describeJsonType(user)}, not an object`;
+  const invalidUser = describeInvalidSubject(candidate['user'], 'user');
+  if (invalidUser !== null) {
+    return invalidUser;
   }
-  const username = requiredString(user, 'username');
-  if ('problem' in username) {
-    return `has a "user" whose ${username.problem}`;
+  if (candidate['impersonatedUser'] !== undefined) {
+    const invalidImpersonated = describeInvalidSubject(
+      candidate['impersonatedUser'],
+      'impersonatedUser',
+    );
+    if (invalidImpersonated !== null) {
+      return invalidImpersonated;
+    }
   }
 
-  for (const key of ['objectRef', 'responseStatus', 'impersonatedUser', 'annotations']) {
-    const nested = optionalRecord(candidate, key);
-    if ('problem' in nested) {
-      return nested.problem;
+  const sourceIPs = optionalNestedStringList(candidate, 'event', 'sourceIPs');
+  if ('problem' in sourceIPs) {
+    return sourceIPs.problem;
+  }
+  const userAgent = optionalNestedString(candidate, 'event', 'userAgent', false);
+  if ('problem' in userAgent) {
+    return userAgent.problem;
+  }
+
+  if (candidate['objectRef'] !== undefined) {
+    const invalidObjectRef = describeInvalidObjectRef(candidate['objectRef']);
+    if (invalidObjectRef !== null) {
+      return invalidObjectRef;
+    }
+    // Both halves validated, so the two statements of identity can be compared.
+    const contradiction = describeIdentityContradiction(
+      candidate['requestURI'] as string,
+      candidate['objectRef'] as Record<string, unknown>,
+    );
+    if (contradiction !== null) {
+      return contradiction;
+    }
+  }
+
+  if (candidate['responseStatus'] !== undefined) {
+    const invalidStatus = describeInvalidResponseStatus(candidate['responseStatus']);
+    if (invalidStatus !== null) {
+      return invalidStatus;
+    }
+  }
+
+  if (candidate['annotations'] !== undefined) {
+    const invalidAnnotations = describeInvalidAnnotations(candidate['annotations']);
+    if (invalidAnnotations !== null) {
+      return invalidAnnotations;
     }
   }
 
@@ -768,9 +1286,21 @@ function parseAuditEventsPayload(
     }
     const parsed: ParsedAuditEventsPage = { events: items as readonly AuditEvent[] };
     if (body.total !== undefined) {
-      if (typeof body.total !== 'number' || !Number.isFinite(body.total)) {
+      // INVARIANT LOCKED (M13): a total is a COUNT, so it is a non-negative
+      // integer. `Number.isFinite` alone accepted -3 and 2.5, and both then flowed
+      // into `page * pageSize < total`, an arithmetic comparison that yields a
+      // confident answer from a nonsensical input: a negative total makes every
+      // page look like the last one, so incomplete data reports as complete.
+      if (
+        typeof body.total !== 'number' ||
+        !Number.isInteger(body.total) ||
+        body.total < 0
+      ) {
         return {
-          problem: `"total" is ${describeJsonType(body.total)}, not a finite number`,
+          problem:
+            `"total" is ${JSON.stringify(body.total)}; a total is a non-negative integer ` +
+            'count. A negative or fractional total makes the page arithmetic report ' +
+            'incomplete data as a final page',
         };
       }
       parsed.total = body.total;
@@ -869,12 +1399,118 @@ function resolveHasNextPage(
   hasMore: boolean | undefined,
 ): boolean {
   if (typeof hasMore === 'boolean') {
+    // Trusted only because {@link describeIncoherentPage} has already refused any
+    // page whose `hasMore` contradicts its own item count and total. Precedence is
+    // unchanged; what changed is that reaching here means the claim was checked.
     return hasMore;
   }
   if (typeof total === 'number') {
-    return page * pageSize < total;
+    return pageOffset(page, pageSize) + itemCount < total;
   }
   return itemCount >= pageSize;
+}
+
+/** Items the server is expected to have skipped before the requested page. */
+function pageOffset(page: number, pageSize: number): number {
+  return (page - 1) * pageSize;
+}
+
+/**
+ * Reports pagination metadata that contradicts itself, given the page requested.
+ *
+ * INVARIANT LOCKED (M13): CONTRADICTORY METADATA IS REFUSED, never reconciled. The
+ * failure this closes is specific and quiet — a page whose metadata says "this is
+ * the last page" while its own numbers say otherwise turns incomplete data into a
+ * successful final page, and a consumer that stops paging there reports a clean
+ * confidentiality result about events it never fetched.
+ *
+ * The rules, each with the contradiction it catches:
+ *
+ *   * `items.length <= pageSize` — a server returning more items than were asked
+ *     for is not honouring the page size, so no offset arithmetic about it holds.
+ *   * when the requested offset is at or past `total`, the page must be EMPTY and
+ *     must not promise more. This is the legitimate past-the-end request, and it is
+ *     the reason the offset rule below is conditional rather than absolute.
+ *   * otherwise `offset + items.length <= total` — a server cannot have already
+ *     returned more items than it claims exist in total.
+ *   * when `total` is known, an explicit `hasMore` must EQUAL the arithmetic. Two
+ *     statements about whether more data exists that disagree cannot both be
+ *     believed, and the optimistic one is the dangerous one.
+ *   * `hasMore: true` with an empty page is refused even without a total: an empty
+ *     page promising more, with no total to arbitrate, is the shape that makes a
+ *     traversal either loop forever or stop while claiming completeness.
+ *
+ * `page` and `pageSize` are the hook's own, already clamped to positive integers,
+ * so they are inputs to the check rather than subjects of it.
+ *
+ * @param page - the 1-based page requested.
+ * @param pageSize - the page size requested.
+ * @param parsed - the parsed page and its metadata.
+ * @returns the contradiction, or `null` when the metadata is coherent.
+ */
+function describeIncoherentPage(
+  page: number,
+  pageSize: number,
+  parsed: ParsedAuditEventsPage,
+): string | null {
+  const itemCount = parsed.events.length;
+  const { total, hasMore } = parsed;
+
+  if (itemCount > pageSize) {
+    return (
+      `the page carries ${String(itemCount)} events for a requested pageSize of ` +
+      `${String(pageSize)}, so the server is not honouring the page size and no offset ` +
+      'arithmetic over its metadata holds'
+    );
+  }
+
+  if (hasMore === true && itemCount === 0 && total === undefined) {
+    return (
+      'the page is empty yet reports hasMore: true with no total to arbitrate. An empty ' +
+      'page that promises another cannot be traversed: a consumer either loops forever ' +
+      'or stops while still claiming to have seen everything'
+    );
+  }
+
+  if (total === undefined) {
+    return null;
+  }
+
+  const offset = pageOffset(page, pageSize);
+  if (offset >= total) {
+    if (itemCount > 0) {
+      return (
+        `the page starts at offset ${String(offset)} of a reported total of ` +
+        `${String(total)} yet carries ${String(itemCount)} events, so the total ` +
+        'contradicts the events already returned'
+      );
+    }
+    if (hasMore === true) {
+      return (
+        `the page is past the end of a reported total of ${String(total)} yet reports ` +
+        'hasMore: true'
+      );
+    }
+    return null;
+  }
+
+  if (offset + itemCount > total) {
+    return (
+      `the page returns events ${String(offset + 1)}-${String(offset + itemCount)} of a ` +
+      `reported total of ${String(total)}, so the server has already returned more ` +
+      'events than it claims exist'
+    );
+  }
+
+  if (hasMore !== undefined && hasMore !== offset + itemCount < total) {
+    return (
+      `the page reports hasMore: ${String(hasMore)} while its own numbers say ` +
+      `${String(offset + itemCount)} of ${String(total)} events have been returned. Two ` +
+      'statements about whether more data exists that disagree cannot both be believed'
+    );
+  }
+
+  return null;
 }
 
 /**
@@ -969,7 +1605,25 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
       try {
         const response = await fetch(requestUrl, {
           method: 'GET',
-          headers: { Accept: 'application/json' },
+          headers: {
+            Accept: 'application/json',
+            // Belt to `cache: 'no-store'`'s braces. The fetch option governs the
+            // HTTP cache this client owns; these headers ask every intermediary
+            // between here and the API server not to answer from one either.
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            Pragma: 'no-cache',
+          },
+          // INVARIANT LOCKED (F-006-RQ-003 freshness). Refresh MUST reach the
+          // server. Without this the refresh button re-issued a byte-identical
+          // cache-eligible GET, so a clean page cached before a confidentiality
+          // violation could be replayed afterwards -- and the panel would report
+          // "no Secret event carries a response body" about a page recorded before
+          // the one that did. `no-store` is chosen over `no-cache` and over a
+          // cache-busting query parameter: `no-cache` still writes the response to
+          // the cache, and a synthetic parameter would change the request URL, so
+          // the request the panel makes would no longer be the request the
+          // recorded handler and the parity map describe.
+          cache: 'no-store',
           signal,
         });
         if (signal.aborted) {
@@ -1022,6 +1676,22 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
           return;
         }
 
+        const incoherent = describeIncoherentPage(page, pageSize, parsed.page);
+        if (incoherent !== null) {
+          setState({
+            status: 'error',
+            events: [],
+            error: {
+              httpStatus: response.status,
+              message:
+                `audit event pagination is incoherent: ${incoherent}. The page is refused ` +
+                'rather than reported, because pagination metadata that contradicts ' +
+                'itself is how incomplete data becomes a successful final page.',
+            },
+          });
+          return;
+        }
+
         // Straight through: the events are handed on untouched, only proven readable.
         // FROZEN, so no consumer can mutate the page a later assertion will read -- see
         // the invariant on UseAuditEventsResult.events.
@@ -1031,6 +1701,10 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
           error: null,
           total: parsed.page.total,
           hasMore: parsed.page.hasMore,
+          // Which page these events are. Captured from the closure that issued the
+          // request, so it is the page actually asked for rather than whatever the page
+          // state has since become.
+          loadedPage: page,
         });
       } catch (cause) {
         // A cancelled request is not a failure and must leave the state alone:
@@ -1054,9 +1728,14 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
     };
   }, [enabled, requestUrl, refreshToken]);
 
+  // Resolved from the page the held events BELONG TO, not from the current page state.
+  // Between a page change and its response the two differ, and answering "is there a
+  // further page after page 2?" from page 1's events and totals is how a traversal
+  // either stops early or advances twice for one response.
+  const loadedPage = state.loadedPage ?? page;
   const hasNextPage =
     state.status === 'success'
-      ? resolveHasNextPage(page, pageSize, state.events.length, state.total, state.hasMore)
+      ? resolveHasNextPage(loadedPage, pageSize, state.events.length, state.total, state.hasMore)
       : false;
 
   const setFilter = useCallback((next: Readonly<AuditEventFilter>) => {
@@ -1097,6 +1776,7 @@ export function useAuditEvents(options: UseAuditEventsOptions = {}): UseAuditEve
     isEmpty: state.status === 'success' && state.events.length === 0,
     error: state.error,
     page,
+    loadedPage: state.loadedPage,
     pageSize,
     total: state.total,
     hasNextPage,

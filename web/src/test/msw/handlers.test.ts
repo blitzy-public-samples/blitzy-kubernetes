@@ -54,8 +54,10 @@ limitations under the License.
 import { type RequestHandler } from 'msw';
 import { describe, expect, it } from 'vitest';
 
+// AUDIT_EVENTS_DEFAULT_PAGE_SIZE is deliberately not imported: it is the HOOK's
+// default, and the endpoint defaults nothing. A spec that reached for it would be
+// asserting the behaviour this section now refuses.
 import {
-  AUDIT_EVENTS_DEFAULT_PAGE_SIZE,
   AUDIT_EVENTS_ENDPOINT,
   AUDIT_EVENTS_QUERY_PARAMS,
   type AuditEvent,
@@ -86,13 +88,18 @@ import {
   V1_POSITIVE_CONTROL_SUBJECT,
   V2_GENERATED_ADMISSION_CONFIG,
   V2_NAMESPACES,
+  V2_PODS,
+  V2_POD_CONTAINER_IMAGE,
+  V2_POD_CONTAINER_NAME,
   V2_POD_SECURITY_WARNING,
+  V2_POD_SERVICE_ACCOUNT_NAME,
   V2_RESTRICTED_WARNINGS,
   V4_AUDIENCES,
   V4_LONG_LIVED_OBSERVED_EXPIRY,
   V4_NAMESPACE,
   V4_OBSERVED_EXPIRY,
   V4_REQUESTED_TTL_SECONDS,
+  V4_REQUEST_TIME_SECONDS,
   V4_SERVICE_ACCOUNT_NAME,
   V7_PRINCIPALS,
   controlStatusFixture,
@@ -216,6 +223,35 @@ async function send(
   });
 }
 
+/**
+ * A page size large enough to hold the whole recorded stream in one page.
+ *
+ * Named rather than inlined so the "one page" intent is visible: a spec asserting
+ * that every observed event is served must ask for a page big enough to contain
+ * them, or it is asserting something about pagination instead.
+ */
+const WHOLE_PAGE_SIZE = 100;
+
+/**
+ * Concrete URL of the audit endpoint, WITH the mandatory pagination parameters.
+ *
+ * `page` and `pageSize` are required by the endpoint and defaulted by nobody (see
+ * the handler's `readMandatoryPositiveInteger`), so every spec that is not itself
+ * about pagination supplies them here rather than repeating them. The hook does the
+ * same thing in production: `buildAuditEventsQuery` sets both unconditionally.
+ *
+ * @param extra - additional query parameters, without a leading `&`.
+ * @param page - the 1-based page. Defaults to the first.
+ * @param pageSize - the page size. Defaults to {@link WHOLE_PAGE_SIZE}.
+ * @returns the URL.
+ */
+function auditUrl(extra = '', page = 1, pageSize = WHOLE_PAGE_SIZE): string {
+  const query = new URLSearchParams();
+  query.set(AUDIT_EVENTS_QUERY_PARAMS.page, String(page));
+  query.set(AUDIT_EVENTS_QUERY_PARAMS.pageSize, String(pageSize));
+  return `${AUDIT_EVENTS_ENDPOINT}?${query.toString()}${extra === '' ? '' : `&${extra}`}`;
+}
+
 /** Concrete URL of a namespaced Pod create, derived from the exported pattern. */
 function podsUrl(namespace: string, query = `?dryRun=All`): string {
   return `${PODS_PATH.replace(':namespace', namespace)}${query}`;
@@ -304,13 +340,46 @@ function podDocument(
   namespace: string | undefined,
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  // Built from the RECORDED case rather than from a generic template. The endpoint
+  // replays a recorded admission outcome, and that outcome is evidence about one
+  // document: the privileged pod's 403 names `securityContext.privileged=true`, so
+  // posting a pod without it and receiving that 403 would prove nothing about
+  // privilege at all. A name with no recorded case falls back to the plain shape,
+  // which is what the unrecorded-pod specs need.
+  const recorded = V2_PODS.find((pod) => pod.name === name);
+  const container: Record<string, unknown> = {
+    name: recorded?.containerName ?? V2_POD_CONTAINER_NAME,
+    image: recorded?.containerImage ?? V2_POD_CONTAINER_IMAGE,
+    ...(recorded?.privileged === true ? { securityContext: { privileged: true } } : {}),
+  };
   return {
     apiVersion: 'v1',
     kind: 'Pod',
     metadata: { name, ...(namespace === undefined ? {} : { namespace }) },
-    spec: { containers: [{ name: 'c', image: 'registry.k8s.io/pause:3.10' }] },
+    spec: {
+      serviceAccountName: recorded?.serviceAccountName ?? V2_POD_SERVICE_ACCOUNT_NAME,
+      // Absent unless `true`, which is how Kubernetes writes it.
+      ...(recorded?.hostPID === true ? { hostPID: true } : {}),
+      containers: [container],
+    },
     ...overrides,
   };
+}
+
+/** The recorded pod document with one `spec` member replaced or removed. */
+function podWithSpec(
+  name: string,
+  namespace: string,
+  specOverrides: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = podDocument(name, namespace);
+  const spec = { ...(base['spec'] as Record<string, unknown>), ...specOverrides };
+  for (const [key, value] of Object.entries(specOverrides)) {
+    if (value === undefined) {
+      delete spec[key];
+    }
+  }
+  return { ...base, spec };
 }
 
 /**
@@ -552,7 +621,7 @@ describe('the audit-event endpoint', () => {
   );
 
   it('serves every observed event with total and hasMore', async () => {
-    const { status, body } = await exchange(AUDIT_EVENTS_ENDPOINT);
+    const { status, body } = await exchange(auditUrl());
     expect(status).toBe(200);
     expect(body).toEqual({
       items: ALL_OBSERVED_AUDIT_EVENTS,
@@ -562,9 +631,7 @@ describe('the audit-event endpoint', () => {
   });
 
   it('hands Secret request bodies through as OBJECTS, never as presence booleans', async () => {
-    const { body } = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.resource}=secrets`,
-    );
+    const { body } = await exchange(auditUrl(`${AUDIT_EVENTS_QUERY_PARAMS.resource}=secrets`));
     const items = asRecord(body)['items'] as readonly AuditEvent[];
     expect(items).toHaveLength(secretsEvents.length);
     // A read carries no request body, so `requestObject` is legitimately absent
@@ -600,7 +667,7 @@ describe('the audit-event endpoint', () => {
 
   it('serves the RBAC control group with BOTH bodies present', async () => {
     const { body } = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.namespace}=${RBAC_AUDIT_RESPONSE_NAMESPACE}`,
+      auditUrl(`${AUDIT_EVENTS_QUERY_PARAMS.namespace}=${RBAC_AUDIT_RESPONSE_NAMESPACE}`),
     );
     const items = asRecord(body)['items'] as readonly AuditEvent[];
     expect(items.length).toBeGreaterThan(0);
@@ -612,82 +679,131 @@ describe('the audit-event endpoint', () => {
 
   it('matches the namespace filter exactly', async () => {
     const { body } = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.namespace}=${SECRET_AUDIT_REQUEST_NAMESPACE}`,
+      auditUrl(`${AUDIT_EVENTS_QUERY_PARAMS.namespace}=${SECRET_AUDIT_REQUEST_NAMESPACE}`),
     );
     expect(asRecord(body)['total']).toBe(secretsEvents.length);
   });
 
   it('matches the verb filter exactly', async () => {
-    const { body } = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.verb}=create`,
-    );
+    const { body } = await exchange(auditUrl(`${AUDIT_EVENTS_QUERY_PARAMS.verb}=create`));
     expect(asRecord(body)['total']).toBe(
       ALL_OBSERVED_AUDIT_EVENTS.filter((event) => event.verb === 'create').length,
     );
   });
 
   it('returns an honest empty page for an unrecognised filter value rather than everything', async () => {
-    const { body } = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.resource}=SECRETS`,
-    );
+    const { body } = await exchange(auditUrl(`${AUDIT_EVENTS_QUERY_PARAMS.resource}=SECRETS`));
     expect(body).toEqual({ items: [], total: 0, hasMore: false });
   });
 
   it('treats an empty filter value as absent rather than as matching the empty string', async () => {
-    const { body } = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.resource}=`,
-    );
+    const { body } = await exchange(auditUrl(`${AUDIT_EVENTS_QUERY_PARAMS.resource}=`));
     expect(asRecord(body)['total']).toBe(ALL_OBSERVED_AUDIT_EVENTS.length);
   });
 
   it('paginates, counting total across ALL pages and reporting hasMore honestly', async () => {
-    const first = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=4&${AUDIT_EVENTS_QUERY_PARAMS.page}=1`,
-    );
+    const first = await exchange(auditUrl('', 1, 4));
     expect(asRecord(first.body)['total']).toBe(ALL_OBSERVED_AUDIT_EVENTS.length);
     expect(asRecord(first.body)['hasMore']).toBe(true);
     expect(asRecord(first.body)['items']).toEqual(ALL_OBSERVED_AUDIT_EVENTS.slice(0, 4));
 
-    const last = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=4&${AUDIT_EVENTS_QUERY_PARAMS.page}=3`,
-    );
+    const last = await exchange(auditUrl('', 3, 4));
     expect(asRecord(last.body)['hasMore']).toBe(false);
     expect(asRecord(last.body)['items']).toEqual(ALL_OBSERVED_AUDIT_EVENTS.slice(8));
   });
 
   it('reports an empty page past the end as empty, not as implying more to come', async () => {
-    const { body } = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=4&${AUDIT_EVENTS_QUERY_PARAMS.page}=9`,
-    );
+    const { body } = await exchange(auditUrl('', 9, 4));
     expect(asRecord(body)['items']).toEqual([]);
     expect(asRecord(body)['hasMore']).toBe(false);
   });
 
+  // NOTHING IS DEFAULTED, and these are the specs that say so. Every case below
+  // previously answered 200 with a page the caller had not asked for -- a correct
+  // answer to a different question, which a paginating consumer cannot detect.
   it.each([
     ['zero', '0'],
     ['negative', '-3'],
     ['fractional', '1.5'],
     ['not a number', 'many'],
-  ])('falls back to the default page size for a %s pageSize', async (_label, raw) => {
-    const { body } = await exchange(
-      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=${raw}`,
+    ['the empty string', ''],
+    ['a padded integer', ' 4 '],
+    ['a hexadecimal literal', '0x4'],
+    ['an exponent form', '1e2'],
+  ])('refuses a %s pageSize with 400 rather than defaulting it', async (_label, raw) => {
+    const { status, body } = await exchange(
+      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.page}=1&` +
+        `${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=${encodeURIComponent(raw)}`,
     );
-    expect(AUDIT_EVENTS_DEFAULT_PAGE_SIZE).toBeGreaterThan(
-      ALL_OBSERVED_AUDIT_EVENTS.length,
+
+    expect(status).toBe(400);
+    expect(asRecord(body)['status']).toBe('Failure');
+    expect(asRecord(body)['message']).toContain(AUDIT_EVENTS_QUERY_PARAMS.pageSize);
+    expect(asRecord(body)['message']).toContain('positive integer');
+    // A refusal carries no page at all: a 400 that also carried items would be a
+    // partial answer to a request that had no answer.
+    expect(asRecord(body)).not.toHaveProperty('items');
+  });
+
+  it.each([
+    ['zero', '0'],
+    ['negative', '-1'],
+    ['fractional', '2.5'],
+    ['not a number', 'first'],
+  ])('refuses a %s page with 400 rather than defaulting it', async (_label, raw) => {
+    const { status, body } = await exchange(
+      `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.page}=${encodeURIComponent(raw)}&` +
+        `${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=4`,
     );
-    expect(asRecord(body)['items']).toEqual(ALL_OBSERVED_AUDIT_EVENTS);
+
+    expect(status).toBe(400);
+    expect(asRecord(body)['message']).toContain(AUDIT_EVENTS_QUERY_PARAMS.page);
+  });
+
+  it.each([
+    ['both parameters', AUDIT_EVENTS_ENDPOINT],
+    ['page', `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=4`],
+    ['pageSize', `${AUDIT_EVENTS_ENDPOINT}?${AUDIT_EVENTS_QUERY_PARAMS.page}=1`],
+  ])('refuses a request omitting %s', async (_label, url) => {
+    // The production client always sends both (`buildAuditEventsQuery` sets them
+    // unconditionally), so this strictness cannot reject a real request -- it
+    // rejects the hand-built URL that a lenient reader made unfalsifiable.
+    const { status, body } = await exchange(url);
+
+    expect(status).toBe(400);
+    expect(asRecord(body)['message']).toContain('is required');
+  });
+
+  it.each([
+    ['page', `${AUDIT_EVENTS_QUERY_PARAMS.page}=1&${AUDIT_EVENTS_QUERY_PARAMS.page}=9&${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=4`],
+    ['pageSize', `${AUDIT_EVENTS_QUERY_PARAMS.page}=1&${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=4&${AUDIT_EVENTS_QUERY_PARAMS.pageSize}=100`],
+  ])('refuses a duplicated %s rather than picking one', async (name, query) => {
+    // Two intentions, no recorded outcome: answering either would invent one.
+    const { status, body } = await exchange(`${AUDIT_EVENTS_ENDPOINT}?${query}`);
+
+    expect(status).toBe(400);
+    expect(asRecord(body)['message']).toContain(name);
+    expect(asRecord(body)['message']).toContain('two intentions');
+  });
+
+  it('serves the page the caller asked for, once both parameters are valid', async () => {
+    // The positive control: strictness must not cost the endpoint its function.
+    const { status, body } = await exchange(auditUrl('', 2, 4));
+
+    expect(status).toBe(200);
+    expect(asRecord(body)['items']).toEqual(ALL_OBSERVED_AUDIT_EVENTS.slice(4, 8));
   });
 
   it('serves the explicit empty state as a success carrying no events', async () => {
     server.use(auditEventsHandler([]));
-    const { status, body } = await exchange(AUDIT_EVENTS_ENDPOINT);
+    const { status, body } = await exchange(auditUrl());
     expect(status).toBe(200);
     expect(body).toEqual({ items: [], total: 0, hasMore: false });
   });
 
   it('refuses the listing with 403 rather than an empty page', async () => {
     server.use(forbiddenAuditEventsHandler());
-    const { status, body } = await exchange(AUDIT_EVENTS_ENDPOINT);
+    const { status, body } = await exchange(auditUrl());
     expect(status).toBe(FORBIDDEN_STATUS);
     expect(asRecord(body)['reason']).toBe('Forbidden');
     expect(asRecord(body)['details']).toEqual({
@@ -700,7 +816,7 @@ describe('the audit-event endpoint', () => {
 
   it('fails the listing with 500 rather than an empty page', async () => {
     server.use(internalErrorAuditEventsHandler());
-    const { status, body } = await exchange(AUDIT_EVENTS_ENDPOINT);
+    const { status, body } = await exchange(auditUrl());
     expect(status).toBe(INTERNAL_SERVER_ERROR_STATUS);
     expect(asRecord(body)['message']).toContain('Internal error occurred: ');
   });
@@ -1018,6 +1134,165 @@ describe('Pod admission (V2)', () => {
     expect(asRecord(body)['message']).toContain(expected);
   });
 
+  // -------------------------------------------------------------------------
+  // An admission outcome is evidence about ONE document (F-002-RQ-001).
+  //
+  // Every case below posts a document that differs from the recorded one in
+  // exactly one security-relevant field and expects `400`, never the recorded
+  // decision. That is the whole point: while the endpoint keyed only on
+  // `(namespace, name)`, a pod named `privileged-pod` that was not privileged
+  // received the recorded 403 naming `securityContext.privileged=true`, so a
+  // panel spec could assert "privilege is rejected" while proving nothing about
+  // privilege. The mismatch is refused rather than silently corrected, because a
+  // corrected document is a different document again.
+  // -------------------------------------------------------------------------
+  it.each([
+    [
+      'the privileged pod WITHOUT its privilege',
+      podWithSpec('privileged-pod', enforceNamespace, {
+        containers: [{ name: V2_POD_CONTAINER_NAME, image: V2_POD_CONTAINER_IMAGE }],
+      }),
+      'spec.containers[0].securityContext.privileged must be true',
+    ],
+    [
+      'the warn pod WITH privilege added',
+      podWithSpec('warn-pod', warnNamespace, {
+        containers: [
+          {
+            name: V2_POD_CONTAINER_NAME,
+            image: V2_POD_CONTAINER_IMAGE,
+            securityContext: { privileged: true },
+          },
+        ],
+      }),
+      'spec.containers[0].securityContext.privileged must be false',
+    ],
+    [
+      'the hostPID pod WITHOUT hostPID',
+      podWithSpec('hostpid-pod', enforceNamespace, { hostPID: undefined }),
+      'spec.hostPID must be true',
+    ],
+    [
+      'the warn pod WITH hostPID added',
+      podWithSpec('warn-pod', warnNamespace, { hostPID: true }),
+      'spec.hostPID must be false',
+    ],
+    [
+      'a different ServiceAccount',
+      podWithSpec('warn-pod', warnNamespace, { serviceAccountName: 'builder' }),
+      `spec.serviceAccountName must be ${JSON.stringify(V2_POD_SERVICE_ACCOUNT_NAME)}`,
+    ],
+    [
+      'no ServiceAccount at all',
+      podWithSpec('warn-pod', warnNamespace, { serviceAccountName: undefined }),
+      'the recorded pods run as',
+    ],
+    [
+      'a second container',
+      podWithSpec('warn-pod', warnNamespace, {
+        containers: [
+          { name: V2_POD_CONTAINER_NAME, image: V2_POD_CONTAINER_IMAGE },
+          { name: 'sidecar', image: V2_POD_CONTAINER_IMAGE },
+        ],
+      }),
+      'spec.containers must carry exactly the one recorded container, got 2',
+    ],
+    [
+      'a container that is not an object',
+      podWithSpec('warn-pod', warnNamespace, { containers: [42] }),
+      'spec.containers[0] expected a JSON object, got number',
+    ],
+    [
+      'a different container name',
+      podWithSpec('warn-pod', warnNamespace, {
+        containers: [{ name: 'app', image: V2_POD_CONTAINER_IMAGE }],
+      }),
+      `spec.containers[0].name must be ${JSON.stringify(V2_POD_CONTAINER_NAME)}`,
+    ],
+    [
+      'a different image',
+      podWithSpec('warn-pod', warnNamespace, {
+        containers: [{ name: V2_POD_CONTAINER_NAME, image: 'alpine' }],
+      }),
+      `spec.containers[0].image must be ${JSON.stringify(V2_POD_CONTAINER_IMAGE)}`,
+    ],
+    [
+      'no image',
+      podWithSpec('warn-pod', warnNamespace, {
+        containers: [{ name: V2_POD_CONTAINER_NAME }],
+      }),
+      'spec.containers[0].image expected a string, got absent',
+    ],
+    [
+      'a stringly-typed hostPID',
+      podWithSpec('warn-pod', warnNamespace, { hostPID: 'true' }),
+      'spec.hostPID expected a boolean or absence, got string',
+    ],
+    [
+      'a stringly-typed privileged flag',
+      podWithSpec('privileged-pod', enforceNamespace, {
+        containers: [
+          {
+            name: V2_POD_CONTAINER_NAME,
+            image: V2_POD_CONTAINER_IMAGE,
+            securityContext: { privileged: 'true' },
+          },
+        ],
+      }),
+      'spec.containers[0].securityContext.privileged expected a boolean or absence, got string',
+    ],
+    [
+      'a securityContext that is not an object',
+      podWithSpec('privileged-pod', enforceNamespace, {
+        containers: [
+          {
+            name: V2_POD_CONTAINER_NAME,
+            image: V2_POD_CONTAINER_IMAGE,
+            securityContext: 'privileged',
+          },
+        ],
+      }),
+      'spec.containers[0].securityContext expected a JSON object or absence, got string',
+    ],
+  ])('refuses %s with 400 rather than replaying the recorded decision', async (
+    _label,
+    document,
+    expected,
+  ) => {
+    const namespace = String(asRecord(asRecord(document)['metadata'])['namespace']);
+    const { status, body } = await send('POST', podsUrl(namespace), document);
+    expect(status).toBe(400);
+    expect(status).not.toBe(FORBIDDEN_STATUS);
+    expect(asRecord(body)['message']).toContain(expected);
+  });
+
+  it('names the requirement on every shape refusal, so a reader learns WHY', async () => {
+    const { body } = await send(
+      'POST',
+      podsUrl(enforceNamespace),
+      podWithSpec('privileged-pod', enforceNamespace, {
+        containers: [{ name: V2_POD_CONTAINER_NAME, image: V2_POD_CONTAINER_IMAGE }],
+      }),
+    );
+    expect(String(asRecord(body)['message'])).toContain('(F-002-RQ-001)');
+  });
+
+  it('accepts the recorded shape of EVERY recorded case, so the gate is two-sided', async () => {
+    // Without this control the tightened check could reject everything and still
+    // look correct. Each recorded pod is posted exactly as recorded and must reach
+    // its recorded outcome -- 403 for the two rejected cases, 201 for the admitted
+    // one -- so the gate is proven to admit the truth as well as refuse fiction.
+    for (const pod of V2_PODS) {
+      const namespace = pod.admitted ? warnNamespace : enforceNamespace;
+      const { status } = await send(
+        'POST',
+        podsUrl(namespace),
+        podDocument(pod.name, namespace),
+      );
+      expect(status).toBe(pod.admitted ? 201 : FORBIDDEN_STATUS);
+    }
+  });
+
   it('refuses an unrecorded pod, naming the recorded roster', async () => {
     const { status, body } = await send(
       'POST',
@@ -1077,6 +1352,66 @@ describe('TokenRequest (V4)', () => {
       serviceAccountTokenHandler(V4_LONG_LIVED_OBSERVED_EXPIRY.expirationTimestamp),
     );
     const { body } = await send('POST', url, tokenRequest());
+    expect(asRecord(asRecord(body)['status'])['expirationTimestamp']).toBe(
+      V4_LONG_LIVED_OBSERVED_EXPIRY.expirationTimestamp,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // The served expiry is COHERENT with the requested TTL (F-004-RQ-002).
+  //
+  // While the timestamp was pinned to the recorded expiry whatever was asked
+  // for, a request for 7200 seconds was answered by a document saying both "you
+  // asked for two hours" and "this expires in one" -- and the +-60 s window
+  // (AAP §0.10.2) was then measuring a timestamp belonging to a DIFFERENT
+  // request, so the boundary condition was unfalsifiable while every spec stayed
+  // green. The recorded TTL still yields the recorded string byte for byte.
+  // -------------------------------------------------------------------------
+  it('answers the RECORDED TTL with the RECORDED string, byte for byte', async () => {
+    const { body } = await send('POST', url, tokenRequest());
+    const status = asRecord(asRecord(body)['status']);
+    expect(status['expirationTimestamp']).toBe(V4_OBSERVED_EXPIRY.expirationTimestamp);
+    // The recorded literal is the arithmetic, not a recomputation of it.
+    expect(V4_REQUEST_TIME_SECONDS + V4_REQUESTED_TTL_SECONDS).toBe(
+      Math.floor(Date.parse(V4_OBSERVED_EXPIRY.expirationTimestamp) / 1000),
+    );
+  });
+
+  it.each([
+    [7200, '2026-01-01T02:00:00Z'],
+    [60, '2026-01-01T00:01:00Z'],
+    [1, '2026-01-01T00:00:01Z'],
+  ])(
+    'derives a coherent expiry for a %i-second TTL rather than reusing the recorded one',
+    async (ttl, expected) => {
+      const { body } = await send(
+        'POST',
+        url,
+        tokenRequest({ expirationSeconds: ttl }),
+      );
+      const document = asRecord(body);
+      // The echo and the expiry describe the SAME request.
+      expect(asRecord(document['spec'])['expirationSeconds']).toBe(ttl);
+      const served = String(asRecord(document['status'])['expirationTimestamp']);
+      expect(served).toBe(expected);
+      expect(served).not.toBe(V4_OBSERVED_EXPIRY.expirationTimestamp);
+      expect(Math.floor(Date.parse(served) / 1000)).toBe(V4_REQUEST_TIME_SECONDS + ttl);
+    },
+  );
+
+  it('serves second precision, matching the API server’s RFC 3339 output', async () => {
+    // A millisecond field would be a shape the oracle never emitted, and the
+    // panel parses this string.
+    const { body } = await send('POST', url, tokenRequest({ expirationSeconds: 7200 }));
+    const served = String(asRecord(asRecord(body)['status'])['expirationTimestamp']);
+    expect(served).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u);
+  });
+
+  it('lets an explicit override win over the derived expiry, which is what makes it a regression channel', async () => {
+    server.use(
+      serviceAccountTokenHandler(V4_LONG_LIVED_OBSERVED_EXPIRY.expirationTimestamp),
+    );
+    const { body } = await send('POST', url, tokenRequest({ expirationSeconds: 7200 }));
     expect(asRecord(asRecord(body)['status'])['expirationTimestamp']).toBe(
       V4_LONG_LIVED_OBSERVED_EXPIRY.expirationTimestamp,
     );
@@ -1289,6 +1624,35 @@ describe('NodeRestriction (V7)', () => {
       nodeStatusUpdate(V7_ACTING_NODE_NAME),
     );
     expect(malformed.status).toBe(400);
+  });
+
+  it('refuses ANY other target through the pre-creation override, naming the recorded one', async () => {
+    // The target is part of the recorded scenario, not a parameter of it. While
+    // this variant answered any node name, a request addressing node1's OWN status
+    // -- the positive control, whose recorded outcome is "allowed" -- was answered
+    // `404 Not Found` for node2: a body naming an object the request never
+    // mentioned. A spec could then conclude that a NotFound is rendered as a
+    // failure while actually exercising the ALLOWED path.
+    server.use(crossNodeNotFoundHandler());
+    const { status, body } = await send(
+      'PUT',
+      nodeStatusUrl(V7_ACTING_NODE_NAME),
+      nodeStatusUpdate(V7_ACTING_NODE_NAME),
+    );
+    expect(status).toBe(400);
+    expect(status).not.toBe(NOT_FOUND_STATUS);
+    const message = String(asRecord(body)['message']);
+    expect(message).toContain(
+      `no recorded pre-creation outcome exists for node "${V7_ACTING_NODE_NAME}"`,
+    );
+    expect(message).toContain(`"${V7_CROSS_NODE_TARGET_NAME}" only`);
+  });
+
+  it('refuses an unrecorded target through the override too, rather than a 404 for node2', async () => {
+    server.use(crossNodeNotFoundHandler());
+    const { status, body } = await send('PUT', nodeStatusUrl('node9'), nodeStatusUpdate('node9'));
+    expect(status).toBe(400);
+    expect(String(asRecord(body)['message'])).toContain('node "node9"');
   });
 
   it('refuses the unrelated Secret read with the namespaced authorization message', async () => {

@@ -108,6 +108,13 @@ import {
   verdictForAbsence,
 } from '../domain/evidence';
 import { V2_OBSERVATIONS, v2NamespaceLabelObservation } from '../domain/observationIds';
+import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
+import {
+  useLiveRegionRole,
+  usePanelLabelId,
+  usePanelSubheading,
+  useRendersOwnHeading,
+} from './embeddedPanel';
 
 /** The control this panel reports on. */
 const CONTROL_ID: ControlId = 'V2';
@@ -588,6 +595,20 @@ function describeRejection(outcome: RejectionOutcome, rejection: EnforcementReje
 interface RequiredMeasurement {
   /** Stable list key, also emitted as `data-measurement`. */
   readonly id: string;
+  /**
+   * The repository requirement identifier this measurement serves, from
+   * {@link COVERED_REQUIREMENT_IDS}.
+   *
+   * WHY EVERY ROW CARRIES ONE. The panel attributes itself to all three V2
+   * requirements, and until these were recorded per row that attribution was not
+   * checkable against the evidence: F-002-RQ-001 (the generated admission
+   * configuration) and F-002-RQ-002 (`PodSecurity` on both GCE profiles) were CLAIMED
+   * while only the namespace labels and the runtime behaviour were gated, so a payload
+   * that measured neither still rendered a pass over all three. Rendering the
+   * attribution per measurement makes an unbacked claim visible in the table instead of
+   * only in the heading (AAP §0.7.2, failure legibility).
+   */
+  readonly requirementId: string;
   /** Row header: what had to be true. */
   readonly requirement: string;
   /** The required value, in the same terms as `observed`. */
@@ -612,6 +633,192 @@ const MEASUREMENT_RESULT: Record<ControlVerdict, string> = {
 const ENFORCE_LEVEL = 'baseline';
 const WARN_LEVEL = 'restricted';
 
+/**
+ * The `audit` channel of the GENERATED admission configuration.
+ *
+ * Recorded from `cluster/gce/gci/configure-helper.sh` L1097-L1109, which writes
+ * `enforce: baseline` with `warn` and `audit` both at `restricted`. `audit` has no
+ * namespace label of its own in the oracle's scenario, so it is measured here and
+ * nowhere else — which is precisely why leaving it unmeasured let the panel claim
+ * F-002-RQ-001 on the strength of two labels that say nothing about it.
+ */
+const GENERATED_AUDIT_LEVEL = 'restricted';
+
+/**
+ * The generated configuration's exemption list, as the single joined value a payload
+ * records it under.
+ *
+ * `kube-system` and nothing else. An exemption list is a hole in the enforcement, so
+ * its exact contents are a boundary condition rather than a detail: an extra exempt
+ * namespace is an unenforced namespace, and a panel that never measured the list
+ * could not tell one apart from none.
+ */
+const GENERATED_EXEMPT_NAMESPACES = 'kube-system';
+
+/**
+ * The two GCE profiles that must each list `PodSecurity` in `ADMISSION_CONTROL`.
+ *
+ * MEASURED SEPARATELY, and that is the whole of F-002-RQ-002. `cluster/gce/config-default.sh`
+ * L374 and `cluster/gce/config-test.sh` L418 declare the plugin list independently of
+ * one another, so a one-sided edit — dropping `PodSecurity` from the test profile while
+ * the default profile still lists it — would leave every test-profile deployment with
+ * no Pod Security admission at all. A single combined flag would still read as green,
+ * which is why there are two identities and two rows.
+ */
+const ADMISSION_CONTROL_PROFILE_PATHS = {
+  default: 'cluster/gce/config-default.sh',
+  test: 'cluster/gce/config-test.sh',
+} as const;
+
+/** The admission plugin whose presence in `ADMISSION_CONTROL` F-002-RQ-002 requires. */
+const ADMISSION_CONTROL_PLUGIN = 'PodSecurity';
+
+/**
+ * Wording for a measurement that compares one configured value against its required one.
+ *
+ * Shared by the four generated-configuration rows so their three outcomes are worded
+ * identically and a reader comparing rows is comparing like with like.
+ *
+ * @param verdict - the comparison's outcome.
+ * @param field - the configuration field, named as the payload records it.
+ * @param expected - the value the field must carry.
+ * @returns the detail cell's text.
+ */
+function describeConfiguredValue(
+  verdict: ControlVerdict,
+  field: string,
+  expected: string,
+): string {
+  if (verdict === 'pass') {
+    return `the generated configuration sets ${field} to ${expected}`;
+  }
+  if (verdict === 'fail') {
+    return (
+      `the generated configuration does not set ${field} to ${expected}, so a different ` +
+      'policy is in force than the one this control requires'
+    );
+  }
+  return `${field} was not measured, so the generated configuration is unproven`;
+}
+
+/**
+ * The four measurements F-002-RQ-001's GENERATED CONFIGURATION rests on.
+ *
+ * WHY THESE ARE REQUIRED AND NOT DECORATIVE. The runtime rejections below prove that
+ * Pod Security admission worked ON THE SERVER THE ORACLE STARTED, which
+ * `startPodSecurityServer` launches with namespace labels and no
+ * `--admission-control-config-file` at all. They say nothing about the configuration
+ * `cluster/gce/gci/configure-helper.sh` L1097-L1109 generates for a real deployment, and
+ * that configuration IS F-002-RQ-001. While the panel claimed the requirement without
+ * gating on it, a payload reporting `enforce: privileged` for every namespace in the
+ * cluster still rendered a clean pass.
+ *
+ * `audit` and the exemption list have no counterpart anywhere else on the panel, so
+ * these rows are the only place either is checked.
+ *
+ * @param observations - the evidence bag, possibly absent.
+ * @returns the four measurements, always all four.
+ */
+function buildGeneratedConfigMeasurements(
+  observations: readonly ControlObservation[] | undefined,
+): readonly RequiredMeasurement[] {
+  const fields: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly field: string;
+    readonly expected: string;
+  }[] = [
+    {
+      id: 'admission-config-enforce',
+      label: V2_OBSERVATIONS.admissionEnforce,
+      field: 'defaults.enforce',
+      expected: ENFORCE_LEVEL,
+    },
+    {
+      id: 'admission-config-warn',
+      label: V2_OBSERVATIONS.admissionWarn,
+      field: 'defaults.warn',
+      expected: WARN_LEVEL,
+    },
+    {
+      id: 'admission-config-audit',
+      label: V2_OBSERVATIONS.admissionAudit,
+      field: 'defaults.audit',
+      expected: GENERATED_AUDIT_LEVEL,
+    },
+    {
+      id: 'admission-config-exempt-namespaces',
+      label: V2_OBSERVATIONS.admissionExemptNamespaces,
+      field: 'exemptions.namespaces',
+      expected: GENERATED_EXEMPT_NAMESPACES,
+    },
+  ];
+  return fields.map((entry): RequiredMeasurement => {
+    const verdict = requireString(observations, entry.label, entry.expected);
+    return {
+      id: entry.id,
+      requirementId: 'F-002-RQ-001',
+      requirement: `Generated admission configuration sets ${entry.field}`,
+      required: entry.expected,
+      observed: describeObserved(observations, entry.label),
+      detail: describeConfiguredValue(verdict, entry.field, entry.expected),
+      verdict,
+    };
+  });
+}
+
+/**
+ * The two measurements F-002-RQ-002 rests on — one per GCE profile.
+ *
+ * TWO ROWS AND NOT ONE, for the reason recorded on
+ * {@link ADMISSION_CONTROL_PROFILE_PATHS}: the profiles declare `ADMISSION_CONTROL`
+ * independently, so a one-sided edit is the failure mode this requirement exists to
+ * catch and a combined flag would still read as green. `requireBoolean` refuses a
+ * string, a number and an explicit `null`, so "the profile was not read" cannot be
+ * mistaken for "the plugin is absent" — the first withholds the pass and the second
+ * fails the control.
+ *
+ * @param observations - the evidence bag, possibly absent.
+ * @returns the two measurements, always both.
+ */
+function buildProfileMeasurements(
+  observations: readonly ControlObservation[] | undefined,
+): readonly RequiredMeasurement[] {
+  const profiles: readonly { readonly id: string; readonly label: string; readonly path: string }[] =
+    [
+      {
+        id: 'admission-control-default-profile',
+        label: V2_OBSERVATIONS.admissionControlDefaultProfile,
+        path: ADMISSION_CONTROL_PROFILE_PATHS.default,
+      },
+      {
+        id: 'admission-control-test-profile',
+        label: V2_OBSERVATIONS.admissionControlTestProfile,
+        path: ADMISSION_CONTROL_PROFILE_PATHS.test,
+      },
+    ];
+  return profiles.map((profile): RequiredMeasurement => {
+    const verdict = requireBoolean(observations, profile.label, true);
+    return {
+      id: profile.id,
+      requirementId: 'F-002-RQ-002',
+      requirement: `${profile.path} lists ${ADMISSION_CONTROL_PLUGIN} in ADMISSION_CONTROL`,
+      required: 'true',
+      observed: describeObserved(observations, profile.label),
+      detail:
+        verdict === 'pass'
+          ? `${profile.path} enables the ${ADMISSION_CONTROL_PLUGIN} admission plugin`
+          : verdict === 'fail'
+            ? `${profile.path} does NOT list ${ADMISSION_CONTROL_PLUGIN}, so deployments ` +
+              'driven by that profile run with no Pod Security admission at all'
+            : `${profile.path} was not measured, so whether the plugin is enabled there ` +
+              'is unproven — the runtime behaviour below was observed on the server the ' +
+              'oracle started, not on a profile-driven deployment',
+      verdict,
+    };
+  });
+}
+
 /** Wording for a namespace-label measurement. */
 function describeLabel(verdict: ControlVerdict, label: string, expected: string): string {
   if (verdict === 'pass') {
@@ -624,9 +831,21 @@ function describeLabel(verdict: ControlVerdict, label: string, expected: string)
 }
 
 /**
- * Builds the eight measurements a V2 pass must rest on.
+ * Builds the fourteen measurements a V2 pass must rest on.
  *
- * WHY EIGHT, AND WHY ALL OF THEM (this is finding #51's whole substance).
+ * WHY FOURTEEN RATHER THAN EIGHT. The eight runtime and namespace-label measurements
+ * described below cover F-002-RQ-003 and the runtime half of F-002-RQ-001, and they were
+ * for a while the whole gate — while the panel attributed itself to all THREE V2
+ * requirements. That made two of the three claims unbacked: the GENERATED admission
+ * configuration (F-002-RQ-001) and `PodSecurity` on BOTH GCE profiles (F-002-RQ-002)
+ * were rendered as ordinary observations that could not move the verdict, so a payload
+ * measuring neither still produced a pass over all three. The six measurements from
+ * {@link buildGeneratedConfigMeasurements} and {@link buildProfileMeasurements} are
+ * therefore prepended, and every row now carries the requirement it serves so the
+ * attribution is checkable against the evidence rather than only asserted in the
+ * heading.
+ *
+ * WHY THE ORIGINAL EIGHT, AND WHY ALL OF THEM.
  * `TestPodSecurityEnforceBaselineRejectsPrivileged` is ONE test function making
  * four accumulating assertions plus two aborting setup requirements, and its
  * single verdict covers all of them. The three measured paths are therefore the
@@ -671,8 +890,11 @@ function buildRequiredMeasurements(
   const warnStatusVerdict = requireNull(observations, V2_OBSERVATIONS.warnPodStatus);
 
   return [
+    ...buildGeneratedConfigMeasurements(observations),
+    ...buildProfileMeasurements(observations),
     {
       id: 'enforce-namespace-label',
+      requirementId: 'F-002-RQ-003',
       requirement: `Namespace ${ENFORCE_NAMESPACE} is labelled ${ENFORCE_LABEL}`,
       required: ENFORCE_LEVEL,
       observed: describeObserved(observations, enforceLabelId),
@@ -681,6 +903,7 @@ function buildRequiredMeasurements(
     },
     {
       id: 'default-serviceaccount-precondition',
+      requirementId: 'F-002-RQ-001',
       requirement: 'The namespace default ServiceAccount existed before the pods',
       required: 'true',
       observed: describeObserved(observations, V2_OBSERVATIONS.defaultServiceAccountPrecondition),
@@ -697,6 +920,7 @@ function buildRequiredMeasurements(
       const outcome = assessRejection(observations, rejection);
       return {
         id: `rejection-${rejection.pod}`,
+        requirementId: 'F-002-RQ-001',
         requirement: `Pod ${rejection.pod} (${rejection.violation}) is rejected`,
         required: `${String(ADMISSION_REJECTION_STATUS)} ${ADMISSION_REJECTION_REASON}`,
         observed: describeObserved(observations, rejection.statusLabel),
@@ -706,6 +930,7 @@ function buildRequiredMeasurements(
     }),
     {
       id: 'warn-namespace-label',
+      requirementId: 'F-002-RQ-003',
       requirement: `Namespace ${WARN_NAMESPACE} is labelled ${WARN_LABEL}`,
       required: WARN_LEVEL,
       observed: describeObserved(observations, warnLabelId),
@@ -714,6 +939,7 @@ function buildRequiredMeasurements(
     },
     {
       id: 'warn-pod-admitted',
+      requirementId: 'F-002-RQ-003',
       requirement: `Pod ${WARN_POD} is ADMITTED under ${WARN_LABEL}=${WARN_LEVEL}`,
       required: 'true',
       observed: describeObserved(observations, V2_OBSERVATIONS.warnPodAdmitted),
@@ -727,6 +953,7 @@ function buildRequiredMeasurements(
     },
     {
       id: 'warn-pod-no-rejection-status',
+      requirementId: 'F-002-RQ-003',
       requirement: `Pod ${WARN_POD} carries no rejection status`,
       required: 'null',
       observed: describeObserved(observations, V2_OBSERVATIONS.warnPodStatus),
@@ -757,6 +984,7 @@ function buildWarningMeasurement(
 ): RequiredMeasurement {
   const base = {
     id: 'warning-surfaced',
+    requirementId: 'F-002-RQ-003',
     requirement: `At least one warning is surfaced under ${WARN_LABEL}=${WARN_LEVEL}`,
     required: 'at least 1',
     observed: describeObserved(observations, V2_OBSERVATIONS.warningsRecorded),
@@ -909,10 +1137,14 @@ interface LabelledRegionProps {
  * what makes every block of this panel reachable by role and name.
  */
 function LabelledRegion({ title, children }: LabelledRegionProps): ReactNode {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const headingId = useId();
   return (
     <section aria-labelledby={headingId}>
-      <h3 id={headingId}>{title}</h3>
+      <Subheading id={headingId}>{title}</Subheading>
       {children}
     </section>
   );
@@ -940,17 +1172,31 @@ interface PanelFrameProps {
  * would be unusable at the only moment it matters.
  */
 function PanelFrame({ refresh, requirementIds, children }: PanelFrameProps): ReactNode {
+  // EMBEDDED-AWARE OWN HEADING (m3), bound once for this component.
+  const rendersOwnHeading = useRendersOwnHeading();
   const titleId = useId();
+  // EMBEDDED-AWARE REGION NAME (m3). The region is named by whichever heading exists: this
+  // panel's own when standalone, the dashboard's control heading when embedded. Without this
+  // an embedded panel would point `aria-labelledby` at an id it no longer renders, leaving a
+  // region with no accessible name at all.
+  const panelLabelId = usePanelLabelId(titleId);
 
   // The control stays PRESENT in every state, so its presence never depends on how the
   // panel was fed, but when nothing can be re-requested it is natively `disabled` with a
   // title that says why. An enabled button whose handler returns immediately looks
   // operable and is not, which is worse than an honest disabled one.
   return (
-    <section aria-labelledby={titleId}>
-      <h2 id={titleId}>{PANEL_TITLE}</h2>
+    <section aria-labelledby={panelLabelId}>
+      {/*
+        EMBEDDED-AWARE OWN HEADING (m3). Standalone, this heading names the panel's region and
+        is the only title on screen. Embedded, the dashboard has already written an `h3` naming
+        this control, so rendering a second title here both DUPLICATED the name and restarted
+        the heading run at a shallower level than the one above it. The region keeps a name
+        either way: `aria-labelledby` points at whichever heading exists.
+      */}
+      {rendersOwnHeading ? <h2 id={titleId}>{PANEL_TITLE}</h2> : null}
       <p>{PANEL_DESCRIPTION}</p>
-      <p>{`Requirements covered: ${requirementIds.join(', ')}`}</p>
+      <p>{`Requirements covered: ${requirementIds.map(safeLabel).join(', ')}`}</p>
       <button
         type="button"
         onClick={refresh}
@@ -1023,7 +1269,7 @@ function WarningsRegion({ warnings }: { readonly warnings: readonly string[] }):
           // The index participates in the key because the warning channel is an
           // ordered list of plain strings that may legitimately repeat, and
           // collapsing duplicates would under-report what the server said.
-          <li key={`${String(index)}-${warning}`}>{warning}</li>
+          <li key={`${String(index)}-${warning}`}>{safeProse(warning)}</li>
         ))}
       </ul>
     </LabelledRegion>
@@ -1052,9 +1298,13 @@ function FindingsRegion({ findings }: { readonly findings: readonly ControlFindi
       <ul aria-label={title}>
         {findings.map((finding: ControlFinding, index) => (
           <li key={`${String(index)}-${finding.message}`}>
-            {finding.subject === undefined ? null : <strong>{`${finding.subject}: `}</strong>}
-            {finding.message}
-            {finding.requirementId === undefined ? null : ` (${finding.requirementId})`}
+            {finding.subject === undefined ? null : (
+              <strong>{`${safeLabel(finding.subject)}: `}</strong>
+            )}
+            {safeProse(finding.message)}
+            {finding.requirementId === undefined
+              ? null
+              : ` (${safeLabel(finding.requirementId)})`}
           </li>
         ))}
       </ul>
@@ -1116,6 +1366,7 @@ function RequiredMeasurementsRegion({
         <thead>
           <tr>
             <th scope="col">Requirement</th>
+            <th scope="col">Covers</th>
             <th scope="col">Required</th>
             <th scope="col">Observed</th>
             <th scope="col">Result</th>
@@ -1127,8 +1378,10 @@ function RequiredMeasurementsRegion({
               key={measurement.id}
               data-measurement={measurement.id}
               data-result={measurement.verdict}
+              data-requirement={measurement.requirementId}
             >
               <th scope="row">{measurement.requirement}</th>
+              <td>{measurement.requirementId}</td>
               <td>{measurement.required}</td>
               <td>{measurement.observed}</td>
               <td>
@@ -1161,8 +1414,8 @@ function ObservationsRegion({
         <tbody>
           {observations.map((observation, index) => (
             <tr key={`${String(index)}-${observation.label}`}>
-              <th scope="row">{observation.label}</th>
-              <td>{formatObservationValue(observation.value)}</td>
+              <th scope="row">{safeLabel(observation.label)}</th>
+              <td>{safeObservationValue(observation.value)}</td>
             </tr>
           ))}
         </tbody>
@@ -1179,7 +1432,11 @@ function ObservationsRegion({
  * when it changes and to be replaced as soon as it resolves.
  */
 function LoadingState(): ReactNode {
-  return <p role="status">Loading Pod Security enforcement posture…</p>;
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
+  return <p role={liveStatusRole}>Loading Pod Security enforcement posture…</p>;
 }
 
 /**
@@ -1191,10 +1448,18 @@ function LoadingState(): ReactNode {
  * contract problem worth telling apart from an idle server.
  */
 function EmptyState({ isEmpty }: { readonly isEmpty: boolean }): ReactNode {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const title = 'No Pod Security posture reported';
   return (
-    <div role="status">
-      <h3>{title}</h3>
+    <div role={liveStatusRole}>
+      <Subheading>{title}</Subheading>
       <p>
         {isEmpty
           ? 'The status endpoint reported no controls at all.'
@@ -1225,18 +1490,30 @@ function EmptyState({ isEmpty }: { readonly isEmpty: boolean }): ReactNode {
  * "admission rejection" and never "status endpoint".
  */
 function PostureRequestFailure({ error }: { readonly error: ControlStatusError }): ReactNode {
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const title = 'Pod Security posture request failed';
   return (
-    <div role="alert">
-      <h3>{title}</h3>
-      <p>{error.message}</p>
+    <div role={liveAlertRole}>
+      <Subheading>{title}</Subheading>
+      {/*
+        `kind` is a typed union of this tier's own tokens and `httpStatus` is a number,
+        so neither is external prose. `message` and `reason` come from a Kubernetes
+        `Status` body and are the two channels a hostile or broken server controls, so
+        both are bounded and redacted (AAP §0.11.1).
+      */}
+      <p>{safeProse(error.message)}</p>
       <ul aria-label={title}>
         <li>{`Status endpoint failure kind: ${error.kind}`}</li>
         {error.httpStatus === undefined ? null : (
           <li>{`Status endpoint response code: ${String(error.httpStatus)}`}</li>
         )}
         {error.reason === undefined ? null : (
-          <li>{`Status endpoint response reason: ${error.reason}`}</li>
+          <li>{`Status endpoint response reason: ${safeLabel(error.reason)}`}</li>
         )}
       </ul>
       <p>
@@ -1257,6 +1534,14 @@ function PostureRequestFailure({ error }: { readonly error: ControlStatusError }
  * exists to protect.
  */
 function ControlBody({ status }: { readonly status: ControlStatus }): ReactNode {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const assessment = assessPodSecurity(status);
   const { verdict, warnChannelEmpty, passWithheld, measurements } = assessment;
   const observations = status.evidence?.observations;
@@ -1264,8 +1549,8 @@ function ControlBody({ status }: { readonly status: ControlStatus }): ReactNode 
 
   return (
     <>
-      <h3>{VERDICT_HEADINGS[verdict]}</h3>
-      <p role="status">
+      <Subheading>{VERDICT_HEADINGS[verdict]}</Subheading>
+      <p role={liveStatusRole}>
         {explainVerdict(
           verdict,
           status.findings.length,
@@ -1274,12 +1559,19 @@ function ControlBody({ status }: { readonly status: ControlStatus }): ReactNode 
           assessment.measurementViolated,
         )}
       </p>
-      <p>{status.summary}</p>
-      {status.detail === undefined ? null : <p>{status.detail}</p>}
+      {/*
+        Every string below is server-supplied, so every one is bounded and redacted.
+        Prose goes through `safeProse` and the timestamp through the harder `safeLabel`
+        -- a timestamp needing 2000 characters is not a timestamp. `dateTime` keeps the
+        raw value because it is a machine-readable attribute rather than rendered text,
+        and an invalid one is ignored by the user agent rather than displayed.
+      */}
+      <p>{safeProse(status.summary)}</p>
+      {status.detail === undefined ? null : <p>{safeProse(status.detail)}</p>}
       {status.observedAt === undefined ? null : (
         <p>
           {'Observed at '}
-          <time dateTime={status.observedAt}>{status.observedAt}</time>
+          <time dateTime={status.observedAt}>{safeLabel(status.observedAt)}</time>
         </p>
       )}
 

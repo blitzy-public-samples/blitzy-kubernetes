@@ -84,7 +84,15 @@ export const V1_OBSERVATIONS = Object.freeze({
   positiveControlAllowed: 'positive control: status.allowed',
   /** How many ClusterRoles were enumerated at all. Zero means nothing was checked. */
   clusterRolesObserved: 'ClusterRoles observed',
-  /** How many ClusterRoles declare an unrestricted rule. Exactly one is expected. */
+  /**
+   * WHICH ClusterRoles declare an unrestricted rule, as a comma-separated NAME list.
+   * MUST be exactly `cluster-admin`.
+   *
+   * A name list rather than a count, and the difference is load-bearing: a count of one
+   * is also satisfied by a cluster in which some other role carries the wildcard and
+   * `cluster-admin` does not, which is the very substitution the control exists to
+   * detect (`rbac_test.go` L1270-1278 raises a finding for both directions).
+   */
   wildcardClusterRoles: 'ClusterRoles carrying a full wildcard rule',
   /** How many do so OUTSIDE `cluster-admin`. MUST be 0. */
   wildcardClusterRolesOutsideClusterAdmin:
@@ -137,6 +145,20 @@ export const V2_OBSERVATIONS = Object.freeze({
   admissionWarn: 'admission config defaults.warn',
   admissionAudit: 'admission config defaults.audit',
   admissionExemptNamespaces: 'admission config exemptions.namespaces',
+  /**
+   * F-002-RQ-002: whether `PodSecurity` appears in `ADMISSION_CONTROL`, measured
+   * SEPARATELY on each GCE profile.
+   *
+   * Two identities and not one, because a one-sided edit is the failure mode this
+   * requirement exists to catch: leaving `PodSecurity` out of the test profile
+   * while the default profile still lists it would read as green if only one were
+   * measured, and the admission plugin would then be absent from every deployment
+   * driven by that profile. Recorded from `cluster/gce/config-default.sh` L374 and
+   * `cluster/gce/config-test.sh` L418, which declare the plugin list independently
+   * of one another.
+   */
+  admissionControlDefaultProfile: 'PodSecurity in ADMISSION_CONTROL (cluster/gce/config-default.sh)',
+  admissionControlTestProfile: 'PodSecurity in ADMISSION_CONTROL (cluster/gce/config-test.sh)',
 } as const);
 
 /**
@@ -299,6 +321,19 @@ export const V5_OBSERVATIONS = Object.freeze({
 export const V6_OBSERVATIONS = Object.freeze({
   /** How many audit events were seen at all. Zero means nothing was checked. */
   auditEventsObserved: 'audit events observed',
+  /**
+   * How many events the oracle EXPECTED to observe, and whether every one of them
+   * was seen.
+   *
+   * These two are what turn "some audit events arrived" into "the audit policy was
+   * verified". The Go oracle polls until its whole expected set has been observed
+   * and reports a missing-events list otherwise (`test/utils/audit.go` L86, L93), so
+   * a count of observed events alone proves nothing: ten events that are all the
+   * wrong ten satisfy it. `expectedEventsObserved` is the completeness answer and
+   * `expectedEventCount` is the denominator that makes it auditable.
+   */
+  expectedEventCount: 'expected audit events',
+  expectedEventsObserved: 'every expected audit event observed',
   /** The observed level for `secrets`. MUST be exactly `Request`. */
   secretsAuditLevel: 'secrets audit level',
   /** The required level, carried alongside so a failure reads without external context. */
@@ -413,6 +448,20 @@ export const V8_OBSERVATIONS = Object.freeze({
   exitCodeRequiredForPartial: 'exit code required for partial credentials',
   /** The compatibility shim, so its plaintext expectation reads as deliberate. */
   unitTestCompatibilityDefault: 'unit-test compatibility default',
+  /**
+   * The diagnostic `configure-etcd-params` emitted, verbatim, or `null` when the
+   * branch taken emits none.
+   *
+   * Load-bearing rather than decorative. AAP §0.10.2 states the fail-closed
+   * condition as stderr containing "refusing to fall back to plaintext etcd" AND
+   * `exit 1` — the exit code alone does not distinguish an intentional fail-closed
+   * abort from a crash, and the message alone does not prove the boot stopped. The
+   * plaintext branch is the mirror image: its WARNING is what makes an
+   * operator-chosen plaintext transport an announced decision rather than a silent
+   * downgrade, which is why the explicit opt-in requires it and the compatibility
+   * default (which emits nothing) does not.
+   */
+  diagnostic: 'diagnostic emitted',
   /** Both GCE profiles must default the opt-out to false. A one-sided edit must fail. */
   insecureFallbackDefaultDefaultProfile:
     'insecure fallback default (cluster/gce/config-default.sh)',

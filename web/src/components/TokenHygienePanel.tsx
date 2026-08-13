@@ -47,10 +47,17 @@ limitations under the License.
 //            `!(value < centre-leeway || value > centre+leeway)` — an
 //            INCLUSIVE bound at both edges, which is why a value sitting
 //            exactly on an edge renders here as in window.
-//   * L1521-1525  `sub` is `system:serviceaccount:<namespace>:<name>`,
-//            `kubernetes.io.namespace` and `kubernetes.io.serviceaccount.name`
-//            are present, and `kubernetes.io.pod` and `kubernetes.io.secret`
-//            are both exactly null.
+//   * L1484  `token := treq.Status.Token; if token == "" { t.Fatalf(...) }`.
+//            The empty-token ABORT, and it comes before every assertion above
+//            and below it, which is why issuance is a precondition here rather
+//            than one check among ten.
+//   * L1521-1523  `sub` is `system:serviceaccount:` + `ns.Name` + `:` +
+//            `sa.Name`, `kubernetes.io.namespace` is `ns.Name` and
+//            `kubernetes.io.serviceaccount.name` is `sa.Name` — three
+//            INDEPENDENT equality assertions, each against a name the test
+//            itself created and no token can influence.
+//   * L1525-1526  `kubernetes.io.pod` and `kubernetes.io.secret` are both
+//            exactly null.
 //
 // The oracle reports those claim checks with `t.Errorf` (L1279), which
 // accumulates and continues rather than aborting at the first mismatch. This
@@ -98,6 +105,22 @@ limitations under the License.
 //      including `2026-02-30T00:00:00Z`, which it silently reads as 2 March —
 //      moving an expiry two days later and then comparing it as if it were the
 //      value the server sent.
+//  10. IDENTITY IS COMPARED AGAINST TRUSTED CONSTANTS, never against the
+//      payload's own other claims. The expected `sub`, namespace and
+//      ServiceAccount name are the three module constants recorded from the
+//      oracle's `ns.Name` and `sa.Name`. Deriving the expectation from the
+//      payload made the comparison a tautology — a token reporting
+//      `sub: system:serviceaccount:evil:evil` alongside namespace `evil` and
+//      name `evil` matched its own expectation and passed on all three rows —
+//      so what was measured was internal consistency, reported as identity.
+//  11. ISSUANCE GATES EVERY DEPENDENT CHECK. Exactly one observation reporting
+//      that a token was issued is required before the audience, lifetime or
+//      claim rows can support a pass; absent, duplicated, non-boolean and
+//      `false` all withhold every one of them as "could not verify". This
+//      mirrors the oracle's L1484 abort, and an unissued token is UNKNOWN and
+//      never FAIL — a `t.Fatalf` is a measurement that did not run rather than
+//      a hardening defect. Withholding keeps each row and its observed value on
+//      screen and withdraws only the comparison, so no evidence is hidden.
 //
 // The only imports are `react`, the sibling hook module and the two
 // production-neutral `../domain` modules, all already fixed by AAP §0.6.1.2; no
@@ -121,6 +144,16 @@ import {
 import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
 import { strictestVerdict } from '../domain/evidence';
 import { V4_OBSERVATIONS } from '../domain/observationIds';
+// Only the prose bound is taken from here. This panel keeps its OWN `REDACTED` marker for the
+// credential substitution, so `SAFE_REDACTED` is deliberately not imported: two markers for
+// one meaning would make the rendered output harder to read, not safer.
+import { safeProse } from '../domain/safeText';
+import {
+  useLiveRegionRole,
+  usePanelLabelId,
+  usePanelSubheading,
+  useRendersOwnHeading,
+} from './embeddedPanel';
 
 /** The control this panel reports on. Annotated so a typo cannot compile. */
 const CONTROL_ID: ControlId = 'V4';
@@ -171,6 +204,41 @@ const REQUIREMENT_IDS: readonly string[] = ['F-004-RQ-001', 'F-004-RQ-002'];
 
 /** Prefix of the canonical `sub` claim (`svcaccttoken_test.go` L1521). */
 const SUBJECT_PREFIX = 'system:serviceaccount:';
+
+/**
+ * The namespace the ServiceAccount under test lives in
+ * (`svcaccttoken_test.go` L1460, `framework.CreateNamespaceOrDie(kubeClient, "myns-v4", t)`).
+ *
+ * A TRUSTED CONSTANT, and that is the whole of this fix. See
+ * {@link CANONICAL_SUBJECT}.
+ */
+const EXPECTED_NAMESPACE = 'myns-v4';
+
+/**
+ * The ServiceAccount under test (`svcaccttoken_test.go` L1464,
+ * `ObjectMeta{Name: "test-svcacct", ...}`). A trusted constant for the same reason.
+ */
+const EXPECTED_SERVICE_ACCOUNT_NAME = 'test-svcacct';
+
+/**
+ * The one `sub` value a compliant token may carry.
+ *
+ * WHY THIS IS A CONSTANT AND NOT DERIVED FROM THE PAYLOAD. The expectation used to
+ * be built from the payload's OWN `kubernetes.io/namespace` and
+ * `kubernetes.io/serviceaccount/name` claims, which made the comparison a
+ * tautology: a token reporting `sub: system:serviceaccount:evil:evil` alongside
+ * namespace `evil` and name `evil` matched its own expectation and passed. The
+ * check validated internal consistency and called it identity.
+ *
+ * The oracle does NOT do that. It builds its expectation from `ns.Name` and
+ * `sa.Name` — the names IT created, which no token can influence — and asserts
+ * `sub`, `kubernetes.io.namespace` and `kubernetes.io.serviceaccount.name` against
+ * them by EQUALITY (`svcaccttoken_test.go` L1521-1523). Both halves are ported:
+ * the subject row compares against this constant, and the two sub-claim rows
+ * compare against the two names it is built from, so a token for a different
+ * account fails on three independent rows rather than passing on all three.
+ */
+const CANONICAL_SUBJECT = `${SUBJECT_PREFIX}${EXPECTED_NAMESPACE}:${EXPECTED_SERVICE_ACCOUNT_NAME}`;
 
 /** Rendered when the server reported nothing for a field. */
 const NOT_REPORTED = 'not reported';
@@ -312,6 +380,43 @@ const ALL_CLAIMS: readonly ClaimDescriptor[] = [
   SERVICE_ACCOUNT_NAME_CLAIM,
   POD_CLAIM,
   SECRET_CLAIM,
+];
+
+/**
+ * The ISSUANCE PRECONDITION: whether a token was issued at all.
+ *
+ * Not a claim — a claim is something read OUT of a token, and this is the question
+ * of whether there is a token to read. It is nevertheless resolved through the same
+ * {@link selectClaim} machinery, because the exactly-one-observation rule that
+ * makes a duplicated claim unverifiable applies here with more force: two
+ * disagreeing issuance observations are the one case where the panel must not pick
+ * the convenient one.
+ *
+ * WHY IT GATES EVERYTHING BELOW IT. The oracle aborts on an empty token before it
+ * evaluates anything at all — `token := treq.Status.Token; if token == "" {
+ * t.Fatalf("expected a non-empty projected token") }` (`svcaccttoken_test.go`
+ * L1484-L1487) — and EVERY subsequent assertion, the audience, both expiry bounds,
+ * the echoed request spec and all five claim assertions, sits after that abort.
+ * This panel used to ignore the observation entirely, so a payload explicitly
+ * reporting that issuance had failed could still be rendered as a pass on the
+ * strength of claim observations that, by its own account, came from no token.
+ */
+const ISSUANCE_OBSERVATION: ClaimDescriptor = claimDescriptor(
+  'token issued',
+  V4_OBSERVATIONS.tokenIssued,
+);
+
+/**
+ * Every observation identity this panel recognises.
+ *
+ * Used only by {@link unrecognisedObservations}, so that the issuance observation is
+ * reported as the precondition it is rather than appearing a second time under
+ * "other reported evidence" — where a reader would have no way to tell that it had
+ * already been acted upon.
+ */
+const RECOGNISED_OBSERVATIONS: readonly ClaimDescriptor[] = [
+  ISSUANCE_OBSERVATION,
+  ...ALL_CLAIMS,
 ];
 
 // ---------------------------------------------------------------------------
@@ -524,9 +629,26 @@ function presentValue(label: string, value: string | number | boolean | null): s
  * This is the second half of invariant 5: {@link presentValue} guards measured
  * values, and this guards prose, so there is no path by which a credential
  * reaches the DOM.
+ *
+ * WHAT CHANGED THE SECOND TIME, AND WHY. Credential shapes were the only thing
+ * this guarded, so three other properties of untrusted prose reached the DOM
+ * untouched: LENGTH, so an eight-thousand-character message rendered in full and
+ * pushed the panel's own wording off screen; CONTROL CHARACTERS, including NUL
+ * and BEL; and BIDIRECTIONAL OVERRIDES such as U+202E, which reorder the glyphs
+ * after them and can make a rendered sentence read as the opposite of the text
+ * actually present. The last is the serious one on this panel, because the same
+ * prose feeds an error affordance that announces itself.
+ *
+ * The shared sanitizer already bounds all three, and eight sibling panels use it.
+ * It is applied AFTER the local substitution rather than instead of it, so this
+ * panel keeps emitting its own {@link REDACTED} marker — the marker its specs and
+ * its measured-value guard both use — while gaining the bounds. The composition
+ * is safe in that order: the local pass has already replaced every credential
+ * shape, so the shared pass finds none left to mark with a second, different
+ * marker, and it is idempotent besides.
  */
 function redactCredentialShapedText(text: string): string {
-  return text.replace(CREDENTIAL_SHAPED_VALUE_GLOBAL, REDACTED);
+  return safeProse(text.replace(CREDENTIAL_SHAPED_VALUE_GLOBAL, REDACTED));
 }
 
 /** Renders a count of seconds with its unit, without altering the number. */
@@ -747,6 +869,141 @@ const NO_WINDOW_DETAIL =
 const CLAIM_NOT_REPORTED_DETAIL = 'the claim was not reported';
 
 /**
+ * What the reported evidence says about whether a token was issued.
+ *
+ * FIVE states rather than a boolean, because the four non-`issued` ones call for
+ * different wording and none of them may be collapsed into "not issued": a payload
+ * that never mentioned issuance is a gap in the report, one that mentioned it twice
+ * is a broken report, one that reported a non-boolean is an unreadable report, and
+ * one that reported `false` is a measured setup failure. Only the first of the five
+ * lets anything downstream support a pass.
+ */
+type IssuanceState = 'issued' | 'not-issued' | 'absent' | 'ambiguous' | 'unreadable';
+
+/**
+ * Why the checks below are withheld, one sentence per non-satisfied state.
+ *
+ * Each reads as an explanation rather than as a value mismatch, because the reader
+ * of a withheld row needs to know what to go and fix — which is a different question
+ * from what the row would have said had it been evaluated.
+ */
+const ISSUANCE_GATE_REASON: Readonly<Record<Exclude<IssuanceState, 'issued'>, string>> = {
+  'not-issued':
+    'issuance was reported as having produced no token, so there are no claims to read and ' +
+    'nothing about audience or lifetime is asserted either way',
+  absent:
+    'the report did not say whether a token was issued, so the claims below cannot be ' +
+    'attributed to a token that is known to exist',
+  ambiguous:
+    'issuance was reported more than once, so whether a token exists cannot be determined ' +
+    'and taking either answer would be a guess',
+  unreadable:
+    'issuance was reported as something other than true or false, so whether a token exists ' +
+    'cannot be read',
+};
+
+/** Resolves the issuance precondition out of one reading. */
+function classifyIssuance(reading: ClaimReading): IssuanceState {
+  if (reading.state === 'absent') {
+    return 'absent';
+  }
+  if (reading.state === 'ambiguous') {
+    return 'ambiguous';
+  }
+  const { value } = reading.observation;
+  if (value === true) {
+    return 'issued';
+  }
+  if (value === false) {
+    return 'not-issued';
+  }
+  return 'unreadable';
+}
+
+/**
+ * Builds the issuance precondition check.
+ *
+ * Invariant locked: a token that was NOT issued is `unknown` and never `fail`. The
+ * oracle's counterpart is a `t.Fatalf` — setup breakage, which aborts without
+ * asserting anything about the control — and this tier's translation of an abort is
+ * "could not verify" (AAP §0.4.1.2). Recording it as a failure would report a
+ * hardening defect where the evidence only shows that the measurement did not run,
+ * and the recorded indeterminate payload says exactly that.
+ */
+function buildIssuanceRow(reading: ClaimReading, state: IssuanceState): CheckRow {
+  const base = { id: 'token-issued', check: ISSUANCE_OBSERVATION.claimName, required: 'true' };
+
+  if (reading.state === 'absent') {
+    return {
+      ...base,
+      observed: NOT_REPORTED,
+      detail: ISSUANCE_GATE_REASON.absent,
+      outcome: 'unknown',
+    };
+  }
+  if (reading.state === 'ambiguous') {
+    return {
+      ...base,
+      observed: AMBIGUOUS_OBSERVED,
+      detail: `${describeAmbiguity(reading.count)}; ${ISSUANCE_GATE_REASON.ambiguous}`,
+      outcome: 'unknown',
+    };
+  }
+  const { observation } = reading;
+  const observed = presentValue(observation.label, observation.value);
+  if (state === 'issued') {
+    return {
+      ...base,
+      observed,
+      detail: 'a token was issued, so the checks below were measured against it',
+      outcome: 'pass',
+    };
+  }
+  return {
+    ...base,
+    observed,
+    // `state` is narrowed to the reported non-`issued` cases here, both of which
+    // have their own sentence, so this indexes the map rather than defaulting.
+    detail: ISSUANCE_GATE_REASON[state === 'not-issued' ? 'not-issued' : 'unreadable'],
+    outcome: 'unknown',
+  };
+}
+
+/** Prefix of a withheld row's detail, so a spec can query the whole class. */
+const WITHHELD_PREFIX = 'withheld';
+
+/**
+ * Downgrades one row to "could not verify", stating why.
+ *
+ * The OBSERVED column is preserved deliberately: what the server reported is still
+ * worth showing, and hiding it would make the withheld row less informative than
+ * the evidence behind it. Only the comparison is withdrawn, because the comparison
+ * is what depended on the precondition.
+ */
+function withholdRow(row: CheckRow, reason: string): CheckRow {
+  return { ...row, detail: `${WITHHELD_PREFIX}: ${reason}`, outcome: 'unknown' };
+}
+
+/**
+ * Applies the issuance gate to every dependent row.
+ *
+ * @param rows - the rows as they were measured.
+ * @param state - the resolved precondition.
+ * @returns the rows unchanged when a token was issued, and every one of them
+ *   withheld otherwise.
+ */
+function applyIssuanceGate(
+  rows: readonly CheckRow[],
+  state: IssuanceState,
+): readonly CheckRow[] {
+  if (state === 'issued') {
+    return rows;
+  }
+  const reason = ISSUANCE_GATE_REASON[state];
+  return rows.map((row) => withholdRow(row, reason));
+}
+
+/**
  * Builds the audience checks (F-004-RQ-001).
  *
  * TWO rows on purpose. The values row would already fail a superset, but the
@@ -935,83 +1192,36 @@ function readClaims(
   };
 }
 
-/** The value of a claim that resolved to exactly one observation. */
-function claimValue(reading: ClaimReading): string | number | boolean | null | undefined {
-  return reading.state === 'reported' ? reading.observation.value : undefined;
-}
-
 /**
- * Derives the canonical subject from the namespace and ServiceAccount-name
- * claims, exactly as the oracle builds its expectation
- * (`svcaccttoken_test.go` L1521).
+ * Builds a claim check that compares against a TRUSTED expectation.
  *
- * @returns the expected `sub` value, or `undefined` when either half is missing,
- *   in which case the subject check reports that it could not be verified
- *   rather than inventing an expectation.
+ * The expectation is a module constant recorded from the oracle, never a value the
+ * same payload supplied — see {@link CANONICAL_SUBJECT} for why that distinction is
+ * the substance of this check rather than a refinement of it.
+ *
+ * A mismatch is a `fail` and not an `unknown`: the claim WAS reported and it names
+ * a different identity, which is a measured defect. Absence and ambiguity remain
+ * `unknown`, because neither says anything about which identity the token carries.
+ *
+ * @param id - stable row identity.
+ * @param descriptor - the claim being read.
+ * @param reading - the resolved reading for it.
+ * @param expected - the trusted value the claim must equal.
+ * @param subjectOfCheck - how the claim is described in the detail cell.
+ * @returns the row.
  */
-function expectedSubject(readings: ClaimReadings): string | undefined {
-  const namespace = claimValue(readings.namespace);
-  const name = claimValue(readings.serviceAccountName);
-  if (typeof namespace !== 'string' || namespace.length === 0) {
-    return undefined;
-  }
-  if (typeof name !== 'string' || name.length === 0) {
-    return undefined;
-  }
-  return `${SUBJECT_PREFIX}${namespace}:${name}`;
-}
-
-/** Builds the `sub` check. */
-function buildSubjectRow(readings: ClaimReadings): CheckRow {
-  const expected = expectedSubject(readings);
-  // The required column is DERIVED FROM SERVER DATA — the namespace and
-  // ServiceAccount-name claims — so it is guarded like any other server text
-  // rather than treated as a computed literal. The comparison below uses the
-  // unredacted `expected`, so guarding what is shown changes no verdict.
-  const required = redactCredentialShapedText(
-    expected ?? `${SUBJECT_PREFIX}<namespace>:<serviceaccount name>`,
-  );
-  const reading = readings.subject;
-  const base = { id: 'claim-sub', check: SUBJECT_CLAIM.claimName, required };
-
-  if (reading.state === 'absent') {
-    return { ...base, observed: NOT_REPORTED, detail: CLAIM_NOT_REPORTED_DETAIL, outcome: 'unknown' };
-  }
-  if (reading.state === 'ambiguous') {
-    return {
-      ...base,
-      observed: AMBIGUOUS_OBSERVED,
-      detail: describeAmbiguity(reading.count),
-      outcome: 'unknown',
-    };
-  }
-  const { observation } = reading;
-  const observed = presentValue(observation.label, observation.value);
-  if (expected === undefined) {
-    return {
-      ...base,
-      observed,
-      detail:
-        'the expected subject could not be derived: the namespace or ServiceAccount name claim was not reported',
-      outcome: 'unknown',
-    };
-  }
-  const matches = observation.value === expected;
-  return {
-    ...base,
-    observed,
-    detail: matches ? 'matches the canonical subject' : 'does not match the canonical subject',
-    outcome: matches ? 'pass' : 'fail',
-  };
-}
-
-/** Builds a "must be a non-empty string" claim check. */
-function buildPresenceRow(
+function buildExactClaimRow(
   id: string,
   descriptor: ClaimDescriptor,
   reading: ClaimReading,
+  expected: string,
+  subjectOfCheck: string,
 ): CheckRow {
-  const base = { id, check: descriptor.claimName, required: 'a non-empty string' };
+  // The required column is a LOCAL constant, so it needs no guarding — but it is
+  // passed through the same helper the observed column uses so the two are formatted
+  // alike and a future non-constant expectation cannot slip through unguarded.
+  const base = { id, check: descriptor.claimName, required: redactCredentialShapedText(expected) };
+
   if (reading.state === 'absent') {
     return { ...base, observed: NOT_REPORTED, detail: CLAIM_NOT_REPORTED_DETAIL, outcome: 'unknown' };
   }
@@ -1024,12 +1234,12 @@ function buildPresenceRow(
     };
   }
   const { observation } = reading;
-  const present = typeof observation.value === 'string' && observation.value.length > 0;
+  const matches = observation.value === expected;
   return {
     ...base,
     observed: presentValue(observation.label, observation.value),
-    detail: present ? 'present' : 'reported, but not as a non-empty string',
-    outcome: present ? 'pass' : 'fail',
+    detail: matches ? `matches the ${subjectOfCheck}` : `does not match the ${subjectOfCheck}`,
+    outcome: matches ? 'pass' : 'fail',
   };
 }
 
@@ -1073,12 +1283,40 @@ function buildNullRow(
   };
 }
 
-/** Builds all five claim-shape checks (F-004-RQ-002). */
+/**
+ * Builds all five claim-shape checks (F-004-RQ-002).
+ *
+ * THREE of the five compare against a TRUSTED CONSTANT and two require exactly
+ * `null`, which is the whole of the oracle's claim-shape block: five independent
+ * `checkPayload` calls, three of them built from `ns.Name` and `sa.Name`
+ * (`svcaccttoken_test.go` L1521-1523) and two of them against the literal `null`
+ * (L1525-1526). A token issued for a different account therefore fails on three
+ * separate rows rather than passing on all three, which is the difference between
+ * checking an identity and checking that a payload agrees with itself.
+ */
 function buildClaimRows(readings: ClaimReadings): readonly CheckRow[] {
   return [
-    buildSubjectRow(readings),
-    buildPresenceRow('claim-namespace', NAMESPACE_CLAIM, readings.namespace),
-    buildPresenceRow('claim-serviceaccount-name', SERVICE_ACCOUNT_NAME_CLAIM, readings.serviceAccountName),
+    buildExactClaimRow(
+      'claim-sub',
+      SUBJECT_CLAIM,
+      readings.subject,
+      CANONICAL_SUBJECT,
+      'canonical subject',
+    ),
+    buildExactClaimRow(
+      'claim-namespace',
+      NAMESPACE_CLAIM,
+      readings.namespace,
+      EXPECTED_NAMESPACE,
+      'namespace under test',
+    ),
+    buildExactClaimRow(
+      'claim-serviceaccount-name',
+      SERVICE_ACCOUNT_NAME_CLAIM,
+      readings.serviceAccountName,
+      EXPECTED_SERVICE_ACCOUNT_NAME,
+      'ServiceAccount under test',
+    ),
     buildNullRow('claim-pod', POD_CLAIM, readings.pod),
     buildNullRow('claim-secret', SECRET_CLAIM, readings.secret),
   ];
@@ -1103,7 +1341,8 @@ function unrecognisedObservations(
   // the claim table and once as unrelated evidence — and the second reading
   // would look like an independent measurement.
   return observations.filter(
-    (observation) => !ALL_CLAIMS.some((descriptor) => identifies(descriptor, observation)),
+    (observation) =>
+      !RECOGNISED_OBSERVATIONS.some((descriptor) => identifies(descriptor, observation)),
   );
 }
 
@@ -1111,6 +1350,10 @@ function unrecognisedObservations(
 interface PanelAnalysis {
   /** The strictest of the server's verdict, the recomputed rows and warnings. */
   readonly overallVerdict: ControlVerdict;
+  /** The resolved issuance precondition, which gates every group below it. */
+  readonly issuanceState: IssuanceState;
+  /** The precondition row, always exactly one. */
+  readonly issuanceRows: readonly CheckRow[];
   /** The audience list as reported, or `undefined` when none was. */
   readonly audiences: readonly string[] | undefined;
   readonly audienceRows: readonly CheckRow[];
@@ -1141,30 +1384,48 @@ interface PanelAnalysis {
  * rendered directly underneath a `pass`. A finding is the server stating that
  * something is wrong, so it is a `fail` on its own authority and needs no
  * corroborating measurement.
+ *
+ * THE ISSUANCE GATE runs before the three groups are folded into a verdict, and it
+ * is what makes those groups conditional rather than independent. Every one of the
+ * oracle's assertions — audience, both expiry bounds, the echoed request spec and
+ * all five claim assertions — sits after its empty-token `t.Fatalf`
+ * (`svcaccttoken_test.go` L1484-L1526), so a payload that cannot establish that a
+ * token exists has established nothing about the token, whatever else it reported.
+ * Withholding rather than dropping keeps every row on screen with its observed
+ * value, so the reader sees both what was reported and why it was not acted upon.
  */
 function analyseControl(control: ControlStatus): PanelAnalysis {
   const evidence = control.evidence;
   const observations = evidence?.observations;
   const readings = readClaims(observations);
-  const audienceRows = buildAudienceRows(evidence);
+
+  const issuanceReading = selectClaim(observations, ISSUANCE_OBSERVATION);
+  const issuanceState = classifyIssuance(issuanceReading);
+  const issuanceRows: readonly CheckRow[] = [buildIssuanceRow(issuanceReading, issuanceState)];
+
+  const audienceRows = applyIssuanceGate(buildAudienceRows(evidence), issuanceState);
   const lifetime = buildLifetimeChecks(evidence);
-  const claimRows = buildClaimRows(readings);
+  const lifetimeRows = applyIssuanceGate(lifetime.rows, issuanceState);
+  const claimRows = applyIssuanceGate(buildClaimRows(readings), issuanceState);
+
   const findingVerdict: ControlVerdict = control.findings.length > 0 ? 'fail' : 'pass';
   const warningVerdict: ControlVerdict = control.warnings.length > 0 ? 'warn' : 'pass';
 
   return {
     overallVerdict: strictestVerdict([
       control.verdict,
-      verdictFromRows([...audienceRows, ...lifetime.rows, ...claimRows]),
+      verdictFromRows([...issuanceRows, ...audienceRows, ...lifetimeRows, ...claimRows]),
       findingVerdict,
       warningVerdict,
     ]),
+    issuanceState,
+    issuanceRows,
     audiences: evidence?.audiences,
     audienceRows,
     requestTimeSeconds: evidence?.observedExpiry?.requestTimeSeconds,
     reportedLeewaySeconds: evidence?.observedExpiry?.leewaySeconds,
     permittedWindow: lifetime.permittedWindow,
-    lifetimeRows: lifetime.rows,
+    lifetimeRows,
     claimRows,
     extraObservations: unrecognisedObservations(observations),
   };
@@ -1207,6 +1468,7 @@ const BLOCK = 'token-hygiene-panel';
 /** Element ids used for the accessible names of the panel and its sections. */
 interface PanelIds {
   readonly heading: string;
+  readonly issuance: string;
   readonly audience: string;
   readonly lifetime: string;
   readonly claims: string;
@@ -1249,6 +1511,47 @@ function ChecksTable({
 }
 
 /**
+ * The issuance-precondition section, rendered FIRST.
+ *
+ * Placed above everything it gates so the reader meets the precondition before the
+ * rows that depend on it, rather than discovering afterwards that the three groups
+ * they have just read were withheld. When the precondition does not hold, the
+ * section says so in its own words as well as in the row, because a reader scanning
+ * headings should not have to read a table cell to learn that nothing below it was
+ * evaluated.
+ */
+function IssuanceSection({
+  state,
+  rows,
+  headingId,
+}: {
+  readonly state: IssuanceState;
+  readonly rows: readonly CheckRow[];
+  readonly headingId: string;
+}) {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
+  return (
+    <section className={`${BLOCK}__section`} aria-labelledby={headingId}>
+      <Subheading id={headingId}>Token issuance</Subheading>
+      <p>
+        {'Required: exactly one observation reporting that a token was issued (F-004-RQ-002). ' +
+          'The oracle aborts on an empty token before it asserts anything at all, so audience, ' +
+          'lifetime and claim shape are all conditional on this row.'}
+      </p>
+      {state === 'issued' ? null : (
+        <p className={`${BLOCK}__issuance-withheld`} role="note">
+          {`The checks below are withheld and report "could not verify": ${ISSUANCE_GATE_REASON[state]}.`}
+        </p>
+      )}
+      <ChecksTable caption="Token issuance checks" rows={rows} />
+    </section>
+  );
+}
+
+/**
  * Renders the observed audience list.
  *
  * Three distinct outcomes, because "no audience was reported" and "the audience
@@ -1283,9 +1586,13 @@ function AudienceSection({
   readonly rows: readonly CheckRow[];
   readonly headingId: string;
 }) {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   return (
     <section className={`${BLOCK}__section`} aria-labelledby={headingId}>
-      <h3 id={headingId}>Audience binding</h3>
+      <Subheading id={headingId}>Audience binding</Subheading>
       <p>
         {`Required: exactly ${formatAudienceList(
           REQUIRED_AUDIENCES,
@@ -1360,9 +1667,13 @@ function LifetimeSection({
   readonly rows: readonly CheckRow[];
   readonly headingId: string;
 }) {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   return (
     <section className={`${BLOCK}__section`} aria-labelledby={headingId}>
-      <h3 id={headingId}>Token lifetime</h3>
+      <Subheading id={headingId}>Token lifetime</Subheading>
       <p>
         {`Required: ${REQUIRED_WINDOW_LABEL} (F-004-RQ-002). Both the JWT exp claim and the status expiration timestamp are checked against that window, and each carries its own result.`}
       </p>
@@ -1387,11 +1698,15 @@ function ClaimShapeSection({
   readonly rows: readonly CheckRow[];
   readonly headingId: string;
 }) {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   return (
     <section className={`${BLOCK}__section`} aria-labelledby={headingId}>
-      <h3 id={headingId}>Claim shape</h3>
+      <Subheading id={headingId}>Claim shape</Subheading>
       <p>
-        {`Required: the canonical subject, the namespace and ServiceAccount name claims present, and the pod and secret sub-claims exactly null (F-004-RQ-002). Every row is shown whatever its value, so a non-null pod or secret claim cannot hide.`}
+        {`Required: the canonical subject ${CANONICAL_SUBJECT}, the namespace claim ${EXPECTED_NAMESPACE}, the ServiceAccount-name claim ${EXPECTED_SERVICE_ACCOUNT_NAME}, and the pod and secret sub-claims exactly null (F-004-RQ-002). The three identity values are compared against the account under test rather than against the payload's own claims, so a token issued for a different account cannot agree with itself and pass. Every row is shown whatever its value, so a non-null pod or secret claim cannot hide.`}
       </p>
       <ChecksTable caption="Claim shape checks" rows={rows} />
     </section>
@@ -1406,9 +1721,13 @@ function OtherEvidenceSection({
   readonly observations: readonly ControlObservation[];
   readonly headingId: string;
 }) {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   return (
     <section className={`${BLOCK}__section`} aria-labelledby={headingId}>
-      <h3 id={headingId}>Other reported evidence</h3>
+      <Subheading id={headingId}>Other reported evidence</Subheading>
       {observations.length === 0 ? (
         <p>No further evidence was reported.</p>
       ) : (
@@ -1460,9 +1779,13 @@ function FindingsSection({
   readonly findings: readonly ControlFinding[];
   readonly headingId: string;
 }) {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   return (
     <section className={`${BLOCK}__section`} aria-labelledby={headingId}>
-      <h3 id={headingId}>Findings</h3>
+      <Subheading id={headingId}>Findings</Subheading>
       {findings.length === 0 ? (
         <p>No findings were reported for this control.</p>
       ) : (
@@ -1484,9 +1807,13 @@ function WarningsSection({
   readonly warnings: readonly string[];
   readonly headingId: string;
 }) {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   return (
     <section className={`${BLOCK}__section`} aria-labelledby={headingId}>
-      <h3 id={headingId}>Server warnings</h3>
+      <Subheading id={headingId}>Server warnings</Subheading>
       {warnings.length === 0 ? (
         <p>No warnings were reported for this control.</p>
       ) : (
@@ -1507,8 +1834,12 @@ function WarningsSection({
 
 /** The request is in flight. */
 function LoadingBody() {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
-    <p className={`${BLOCK}__loading`} role="status">
+    <p className={`${BLOCK}__loading`} role={liveStatusRole}>
       Requesting the ServiceAccount token posture.
     </p>
   );
@@ -1524,9 +1855,11 @@ function LoadingBody() {
  * enforced by the compiler rather than by this comment.
  */
 function ErrorBody({ error }: { readonly error: ControlStatusError }) {
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
   return (
     <div className={`${BLOCK}__error`}>
-      <p role="alert">
+      <p role={liveAlertRole}>
         {`Posture could not be read, so no verdict is shown: ${redactCredentialShapedText(
           error.message,
         )}`}
@@ -1556,8 +1889,12 @@ function ErrorBody({ error }: { readonly error: ControlStatusError }) {
  * observable without counting a list at the call site.
  */
 function EmptyBody({ isEmpty }: { readonly isEmpty: boolean }) {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
-    <p className={`${BLOCK}__empty`} role="status">
+    <p className={`${BLOCK}__empty`} role={liveStatusRole}>
       {isEmpty
         ? `The server reported no control posture at all, so there is nothing to show for ${CONTROL_ID}.`
         : `The server reported posture for other controls but none for ${CONTROL_ID}, so there is nothing to show.`}
@@ -1598,6 +1935,11 @@ function SuccessBody({
         }`}
       </p>
 
+      <IssuanceSection
+        state={analysis.issuanceState}
+        rows={analysis.issuanceRows}
+        headingId={ids.issuance}
+      />
       <AudienceSection
         audiences={analysis.audiences}
         rows={analysis.audienceRows}
@@ -1639,12 +1981,15 @@ function TokenHygieneView({
   readonly onRefresh?: () => void;
   readonly canRefresh?: boolean;
 }) {
+  // EMBEDDED-AWARE OWN HEADING (m3), bound once for this component.
+  const rendersOwnHeading = useRendersOwnHeading();
   // One generated prefix per mounted panel, so several panels on one page keep
   // unique ids without the caller having to supply any.
   const generatedId = useId();
   const base = headingId ?? `${BLOCK}-${generatedId}`;
   const ids: PanelIds = {
     heading: base,
+    issuance: `${base}-issuance`,
     audience: `${base}-audience`,
     lifetime: `${base}-lifetime`,
     claims: `${base}-claims`,
@@ -1652,6 +1997,11 @@ function TokenHygieneView({
     findings: `${base}-findings`,
     warnings: `${base}-warnings`,
   };
+  // EMBEDDED-AWARE REGION NAME (m3). The region is named by whichever heading exists: this
+  // panel's own when standalone, the dashboard's control heading when embedded. Without this
+  // an embedded panel would point `aria-labelledby` at an id it no longer renders, leaving a
+  // region with no accessible name at all.
+  const panelLabelId = usePanelLabelId(ids.heading);
 
   const control =
     result.status === 'success' ? selectControlStatus(result.controls, CONTROL_ID) : undefined;
@@ -1682,13 +2032,22 @@ function TokenHygieneView({
   return (
     <section
       className={BLOCK}
-      aria-labelledby={ids.heading}
+      aria-labelledby={panelLabelId}
       aria-busy={state === 'loading'}
       data-control-id={CONTROL_ID}
       data-state={state}
       data-verdict={analysis?.overallVerdict}
     >
-      <h2 id={ids.heading}>ServiceAccount token hygiene ({CONTROL_ID})</h2>
+      {/*
+        EMBEDDED-AWARE OWN HEADING (m3). Standalone, this heading names the panel's region and
+        is the only title on screen. Embedded, the dashboard has already written an `h3` naming
+        this control, so rendering a second title here both DUPLICATED the name and restarted
+        the heading run at a shallower level than the one above it. The region keeps a name
+        either way: `aria-labelledby` points at whichever heading exists.
+      */}
+      {rendersOwnHeading ? (
+        <h2 id={ids.heading}>ServiceAccount token hygiene ({CONTROL_ID})</h2>
+      ) : null}
       <p className={`${BLOCK}__requirements`}>
         {`Requirements covered: ${requirementIds
           .map((identifier) => redactCredentialShapedText(identifier))
@@ -1805,7 +2164,10 @@ export interface TokenHygienePanelProps {
  * time-bound so that BOTH its JWT `exp` claim and its status expiration
  * timestamp fall within `requestTime + 3600 s` plus or minus the fixed
  * tolerance, with the `kubernetes.io.pod` and `kubernetes.io.secret` sub-claims
- * null. Every check is rendered whatever its outcome; an unverifiable check
+ * null and the subject, namespace and ServiceAccount-name claims each equal to
+ * the account under test rather than merely to one another. None of that is
+ * asserted at all until exactly one observation establishes that a token was
+ * issued. Every check is rendered whatever its outcome; an unverifiable check
  * reads "could not verify" and never "pass"; a 403 or 500 renders the error
  * affordance and no verdict; and no token, key or other credential material is
  * ever rendered.

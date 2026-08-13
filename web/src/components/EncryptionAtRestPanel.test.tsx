@@ -50,7 +50,7 @@ limitations under the License.
 // The oracle every required value comes from is `test/integration/secrets/encryption_test.go`
 // L80-L153, which this workstream never modifies.
 
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { V3_OBSERVATIONS } from '../domain/observationIds';
@@ -61,9 +61,15 @@ import {
   SERVER_ERROR_CONTROL_STATUS_ERROR,
   V3_ENCRYPTION_FAILING,
   V3_ENCRYPTION_PASSING,
+  V3_DEPLOYMENT_MANIFEST_OBSERVATIONS,
   V3_ENCRYPTION_UNKNOWN,
   V3_EXAMPLE_STORAGE_PREFIX,
 } from '../test/fixtures/controlStatus';
+import {
+  MAX_SAFE_PROSE_INPUT_LENGTH,
+  SAFE_OVERSIZED_TEXT,
+  SAFE_REDACTED,
+} from '../domain/safeText';
 import { renderWithProviders } from '../test/utils/renderWithProviders';
 import EncryptionAtRestPanel, {
   resolveEncryptionAtRestEffectiveVerdict,
@@ -87,7 +93,22 @@ function rowOutcome(check: string): string {
   return cells[cells.length - 1]?.textContent ?? '';
 }
 
-/** The four measurements a pass rests on, plus the live-prefix context, all proven. */
+/**
+ * Everything a PASS rests on: the four ciphertext assertions, the live-storage-prefix
+ * PRECONDITION, and the committed manifest's posture.
+ *
+ * WHY THE MANIFEST ROWS BELONG HERE. This panel attributes itself to all three V3
+ * requirements, and while only the ciphertext proof could move its verdict, two of those
+ * three claims rested on measurements that could not fail them: the four runtime
+ * assertions prove a Secret written through THE TEST'S OWN API server was ciphertext, and
+ * say nothing about the document a real deployment loads. Put `identity` first in the
+ * provider list and every new write is plaintext while all four still pass.
+ *
+ * The manifest half is spread from the recorded fixture rather than written out, so this
+ * list and the recorded document cannot diverge. The first case of the next block is the
+ * two-sided control proving the list is SUFFICIENT -- without it every `without()` case
+ * below would report the same verdict whatever the gate did.
+ */
 const ALL_PROVEN: readonly ControlObservation[] = [
   { label: V3_OBSERVATIONS.etcdEntryCount, value: 1 },
   { label: V3_OBSERVATIONS.rawValuePrefix, value: AESGCM_PREFIX },
@@ -96,6 +117,7 @@ const ALL_PROVEN: readonly ControlObservation[] = [
   { label: V3_OBSERVATIONS.plaintextRoundTrip, value: true },
   { label: V3_OBSERVATIONS.storagePrefixFromLiveConfig, value: true },
   { label: V3_OBSERVATIONS.storagePrefixShape, value: V3_EXAMPLE_STORAGE_PREFIX },
+  ...V3_DEPLOYMENT_MANIFEST_OBSERVATIONS,
 ];
 
 /** A payload claiming `pass`, carrying the observation list under test. */
@@ -180,6 +202,17 @@ describe('the recorded payloads', () => {
 });
 
 describe('a pass must be earned by all four assertions', () => {
+  it('renders a PASS with the whole recorded evidence set, so the gate is two-sided', () => {
+    // THE CONTROL FOR EVERY CASE BELOW. Without it a gate that refused every payload
+    // would look correct, and each `withholds the pass when ...` case would be asserting
+    // "not PASS" against a panel that never says PASS at all.
+    const status = claimingPass(ALL_PROVEN);
+    renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(verdictText()).toContain('PASS');
+    expect(resolveEncryptionAtRestEffectiveVerdict(status)).toBe('pass');
+  });
+
   it.each([
     ['the stored-entry count', V3_OBSERVATIONS.etcdEntryCount],
     ['the ciphertext prefix', V3_OBSERVATIONS.rawValuePrefix],
@@ -294,6 +327,8 @@ describe('pseudo-evidence is refused', () => {
   });
 
   it('withholds a row whose identity is reported twice', () => {
+    // APPENDED, not replaced: this is the one case that WANTS a duplicate identity, so
+    // it adds a second, contradicting canary answer beside the recorded one.
     const status = claimingPass([
       ...ALL_PROVEN,
       { label: V3_OBSERVATIONS.canaryPresentInRawBlob, value: true },
@@ -361,10 +396,7 @@ describe('provider ordering needs a real encrypting provider', () => {
     ['identity in the middle', 'kms, identity, aesgcm', 'violated'],
     ['identity alone', 'identity', 'violated'],
   ])('reads %s as %s', (_name, value, expected) => {
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.providerOrder, value },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.providerOrder, value));
     renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(rowOutcome('Provider order')).toBe(expected);
@@ -373,10 +405,7 @@ describe('provider ordering needs a real encrypting provider', () => {
   it('does NOT accept an unrecognised sole provider merely because identity is absent', () => {
     // The defect: any list without `identity` passed, so a typo or a removed provider
     // rendered as "no plaintext fallback present" and counted as satisfied.
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.providerOrder, value: 'not-a-provider' },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.providerOrder, 'not-a-provider'));
     renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(rowOutcome('Provider order')).toBe('not proven');
@@ -384,13 +413,164 @@ describe('provider ordering needs a real encrypting provider', () => {
   });
 
   it('does not accept the word "ok" as an ordering answer', () => {
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.providerOrder, value: 'ok' },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.providerOrder, 'ok'));
     renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(rowOutcome('Provider order')).toBe('not proven');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE LIVE-STORAGE-PREFIX PRECONDITION GATES THE PROOF (M4, AAP §0.10.2).
+//
+// The etcd key must be derived from the LIVE storage prefix, which embeds a per-run UUID.
+// While the gate only closed when the observation was PRESENT and reported `false`, three
+// ways of failing to establish it left it open -- never reporting it, reporting it twice,
+// and reporting it at a type that is not a boolean -- so a payload earned a clean pass on
+// four assertions about an object nobody had confirmed was the right one.
+// ---------------------------------------------------------------------------
+
+describe('the live-storage-prefix precondition', () => {
+  /** The rows that are only trustworthy once the right object was addressed. */
+  const DEPENDENT_ROWS = [
+    'Stored value prefix',
+    'Plaintext canary in the raw blob',
+    'Plaintext round trip',
+  ] as const;
+
+  it.each([
+    ['is never reported', without(V3_OBSERVATIONS.storagePrefixFromLiveConfig), 'never reported'],
+    [
+      'is reported as false',
+      replacing(V3_OBSERVATIONS.storagePrefixFromLiveConfig, false),
+      'was not read from the live configuration',
+    ],
+    [
+      'is reported at a type that is not a boolean',
+      replacing(V3_OBSERVATIONS.storagePrefixFromLiveConfig, 'true'),
+      'at a type that is not a boolean',
+    ],
+    [
+      'is reported twice',
+      [
+        ...ALL_PROVEN,
+        { label: V3_OBSERVATIONS.storagePrefixFromLiveConfig, value: false },
+      ] as readonly ControlObservation[],
+      'reported more than once',
+    ],
+  ])('withholds the dependent rows when the precondition %s', (_name, observations, reason) => {
+    const status = claimingPass(observations);
+    renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(verdictText()).not.toContain('PASS');
+    expect(resolveEncryptionAtRestEffectiveVerdict(status)).not.toBe('pass');
+    for (const row of DEPENDENT_ROWS) {
+      expect.soft(rowOutcome(row)).toBe('not proven');
+      expect.soft(rowText(row)).toContain('withheld');
+    }
+    // The reason is worded per case, because "you did not measure this" and "you
+    // measured it and it was false" send a reader to different places.
+    expect(rowText(DEPENDENT_ROWS[0])).toContain(reason);
+  });
+
+  it('never claims a defect from an unestablished precondition', () => {
+    // Absent evidence is not a defect. Reporting FAIL here would blame encryption for
+    // the harness's own mistake, which is as untruthful as reporting PASS.
+    const status = claimingPass(without(V3_OBSERVATIONS.storagePrefixFromLiveConfig));
+    renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(verdictText()).not.toContain('FAIL');
+  });
+
+  it('does not let the precondition alone count as partial proof of ciphertext', () => {
+    // Having read a storage prefix from the live configuration says nothing whatsoever
+    // about ciphertext, so it must not lift a payload from UNKNOWN to "partly verified".
+    const status = claimingPass([
+      { label: V3_OBSERVATIONS.storagePrefixFromLiveConfig, value: true },
+      { label: V3_OBSERVATIONS.storagePrefixShape, value: V3_EXAMPLE_STORAGE_PREFIX },
+    ]);
+    renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(verdictText()).toContain('UNKNOWN');
+    expect(resolveEncryptionAtRestEffectiveVerdict(status)).toBe('unknown');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE COMMITTED MANIFEST POSTURE IS REQUIRED FOR A PASS (M15).
+//
+// The panel claims F-003-RQ-001 and F-003-RQ-003, which ARE the manifest. While only the
+// ciphertext proof could move the verdict, both claims rested on measurements that could
+// not fail them: put `identity` first in the provider list and every new write is
+// plaintext while a test server configured with aesgcm still passes all four assertions.
+// ---------------------------------------------------------------------------
+
+describe('the committed manifest posture gates the pass', () => {
+  it.each([
+    ['the encrypted resources list', V3_OBSERVATIONS.encryptedResources, 'F-003-RQ-001'],
+    ['the provider order', V3_OBSERVATIONS.providerOrder, 'F-003-RQ-003'],
+    ['the KMS timeout', V3_OBSERVATIONS.kmsTimeout, 'F-003-RQ-003'],
+    ['the cachesize key', V3_OBSERVATIONS.cachesizeKey, 'F-003-RQ-003'],
+  ])('withholds the pass when %s is not reported', (_name, label, requirementId) => {
+    const status = claimingPass(without(label));
+    renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(verdictText()).not.toContain('PASS');
+    expect(resolveEncryptionAtRestEffectiveVerdict(status)).not.toBe('pass');
+    // The requirement the unproven row serves is rendered beside it, so the reader can
+    // see WHICH of the panel's three claims is unbacked.
+    expect(screen.getByRole('table')).toHaveTextContent(requirementId);
+  });
+
+  it('reports a complete ciphertext proof under an unmeasured manifest as a WARNING', () => {
+    // The honest reading: the thing the control is chiefly about was measured in full,
+    // and the caveat is that the shipped deployment posture was not. Not a pass, so
+    // nothing is over-claimed; not unknown either, because the proof did complete.
+    const status = claimingPass(
+      ALL_PROVEN.filter(
+        (observation) =>
+          !V3_DEPLOYMENT_MANIFEST_OBSERVATIONS.some(
+            (manifest) => manifest.label === observation.label,
+          ),
+      ),
+    );
+    renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(verdictText()).toContain('WARN');
+    expect(resolveEncryptionAtRestEffectiveVerdict(status)).toBe('warn');
+  });
+
+  it('still fails, not merely withholds, when a manifest row is CONTRADICTED', () => {
+    // `identity` first means every new write is plaintext. That is a measured defect and
+    // it fails the control, which is the asymmetry that distinguishes it from silence.
+    const status = claimingPass(
+      replacing(V3_OBSERVATIONS.providerOrder, `${'identity'},kms`),
+    );
+    renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(verdictText()).toContain('FAIL');
+    expect(resolveEncryptionAtRestEffectiveVerdict(status)).toBe('fail');
+  });
+
+  it('attributes every claimed requirement to at least one gated row', () => {
+    renderWithProviders(<EncryptionAtRestPanel status={V3_ENCRYPTION_PASSING} />);
+
+    const table = screen.getByRole('table');
+    for (const requirementId of ['F-003-RQ-001', 'F-003-RQ-002', 'F-003-RQ-003']) {
+      expect.soft(table).toHaveTextContent(requirementId);
+    }
+  });
+
+  it('leaves the three INFORMATIONAL rows out of the gate, or a pass would be unreachable', () => {
+    // `Storage prefix shape`, `Canary searched for` and `KMS endpoint` never return
+    // `satisfied` by construction, so requiring one would make PASS impossible rather
+    // than stricter. The recorded payload is a pass, which is the proof of that.
+    renderWithProviders(<EncryptionAtRestPanel status={V3_ENCRYPTION_PASSING} />);
+
+    expect(verdictText()).toContain('PASS');
+    for (const row of ['Storage prefix shape', 'Canary searched for', 'KMS endpoint']) {
+      expect.soft(rowOutcome(row)).toBe('context');
+    }
   });
 });
 
@@ -400,10 +580,7 @@ describe('the manifest boundaries', () => {
     ['a different duration', '30s', 'violated'],
     ['a bare number', 3, 'violated'],
   ])('reads a KMS timeout of %s as %s', (_name, value, expected) => {
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.kmsTimeout, value },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.kmsTimeout, value));
     renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(rowOutcome('KMS timeout')).toBe(expected);
@@ -415,19 +592,24 @@ describe('the manifest boundaries', () => {
     ['true', true, 'violated'],
     ['a number', 1000, 'violated'],
   ])('reads a cachesize key of %s as %s', (_name, value, expected) => {
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.cachesizeKey, value },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.cachesizeKey, value));
     renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(rowOutcome('cachesize key')).toBe(expected);
   });
 
   it('treats an unreported cachesize key as unproven, not as absent', () => {
-    renderWithProviders(<EncryptionAtRestPanel status={claimingPass(ALL_PROVEN)} />);
+    // The distinction this case exists for: "nobody looked" is not "the key is absent",
+    // and treating it as absent would be the quiet false pass. The observation is
+    // REMOVED explicitly rather than relied on being missing from the baseline, because
+    // the recorded posture now carries it as `null` -- a MEASURED absence, which is the
+    // opposite claim and the one that does satisfy the row.
+    renderWithProviders(
+      <EncryptionAtRestPanel status={claimingPass(without(V3_OBSERVATIONS.cachesizeKey))} />,
+    );
 
     expect(rowOutcome('cachesize key')).toBe('not proven');
+    expect(verdictText()).not.toContain('PASS');
   });
 
   it.each([
@@ -435,10 +617,7 @@ describe('the manifest boundaries', () => {
     ['the list reversed', 'configmaps, secrets', 'violated'],
     ['a shorter list', 'secrets', 'violated'],
   ])('reads encrypted resources of %s as %s', (_name, value, expected) => {
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.encryptedResources, value },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.encryptedResources, value));
     renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(rowOutcome('Encrypted resources')).toBe(expected);
@@ -494,10 +673,7 @@ describe('no measured string is echoed into the DOM', () => {
 
   it('never echoes an out-of-shape KMS endpoint', () => {
     const hostile = `unix://${PLAINTEXT_CANARY} and a whole sentence of Secret data`;
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.kmsEndpoint, value: hostile },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.kmsEndpoint, hostile));
     const { container } = renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(container.textContent).not.toContain(hostile);
@@ -506,10 +682,7 @@ describe('no measured string is echoed into the DOM', () => {
 
   it('never echoes an out-of-shape KMS timeout', () => {
     const hostile = 'three seconds, give or take, plus a Secret';
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.kmsTimeout, value: hostile },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.kmsTimeout, hostile));
     const { container } = renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(container.textContent).not.toContain(hostile);
@@ -518,10 +691,7 @@ describe('no measured string is echoed into the DOM', () => {
 
   it('never echoes an oversized provider list member', () => {
     const oversized = 'k'.repeat(200);
-    const status = claimingPass([
-      ...ALL_PROVEN,
-      { label: V3_OBSERVATIONS.providerOrder, value: oversized },
-    ]);
+    const status = claimingPass(replacing(V3_OBSERVATIONS.providerOrder, oversized));
     const { container } = renderWithProviders(<EncryptionAtRestPanel status={status} />);
 
     expect(container.textContent).not.toContain(oversized);
@@ -624,5 +794,243 @@ describe('the interaction case', () => {
 
     expect(onRefresh).toHaveBeenCalledTimes(1);
     expect(ownRefresh).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EXTERNAL TEXT IS BOUNDED AND REDACTED (M18, AAP §0.11.1).
+//
+// This panel already refused to echo a measured VALUE into the DOM -- the block above
+// proves that -- but its prose channels were rendered as supplied: the summary, the
+// detail, the timestamp, the reported requirement identifiers, each finding, each server
+// warning, each unrecognised observation's label, and the error message. All of them now
+// pass through the shared sanitizer. Two-sided on purpose: dangerous text is withheld AND
+// the recorded text survives, because a sanitizer that mangled ordinary prose would push
+// the panel back to inventing its own wording.
+// ---------------------------------------------------------------------------
+
+describe('external prose is bounded and redacted', () => {
+  /** A JWT-shaped value: three dot-separated runs of at least eight word characters. */
+  const TOKEN_SHAPED = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlLXZhbHVl';
+
+  it('renders the recorded summary and detail verbatim', () => {
+    const { container } = renderWithProviders(
+      <EncryptionAtRestPanel status={V3_ENCRYPTION_PASSING} />,
+    );
+
+    expect(container).toHaveTextContent(V3_ENCRYPTION_PASSING.summary);
+    expect(container).toHaveTextContent(V3_ENCRYPTION_PASSING.detail);
+  });
+
+  it('renders every recorded finding message verbatim on the failing payload', () => {
+    const { container } = renderWithProviders(
+      <EncryptionAtRestPanel status={V3_ENCRYPTION_FAILING} />,
+    );
+
+    for (const finding of V3_ENCRYPTION_FAILING.findings) {
+      expect.soft(container).toHaveTextContent(finding.message);
+    }
+  });
+
+  it('bounds an oversized summary rather than rendering it', () => {
+    const status: ControlStatus = {
+      ...V3_ENCRYPTION_PASSING,
+      summary: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+    };
+    const { container } = renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(container).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    expect(container.textContent).not.toContain('xxxxxxxxxx');
+  });
+
+  it('redacts a credential shape out of the detail, a finding and a warning', () => {
+    const status: ControlStatus = {
+      ...V3_ENCRYPTION_PASSING,
+      detail: `the transformer key was ${TOKEN_SHAPED} at the time of the read.`,
+      warnings: [`provider reload reported ${TOKEN_SHAPED}`],
+      findings: [
+        {
+          message: `the raw blob began with ${TOKEN_SHAPED} instead.`,
+          subject: TOKEN_SHAPED,
+          requirementId: 'F-003-RQ-002',
+        },
+      ],
+    };
+    const { container } = renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(container.textContent).not.toContain(TOKEN_SHAPED);
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+    // The surrounding explanation survives: only the shape is removed.
+    expect(container).toHaveTextContent('at the time of the read');
+    expect(container).toHaveTextContent('provider reload reported');
+  });
+
+  it('bounds the timestamp and the reported requirement identifiers', () => {
+    const status: ControlStatus = {
+      ...V3_ENCRYPTION_PASSING,
+      observedAt: TOKEN_SHAPED,
+      requirementIds: [TOKEN_SHAPED],
+    };
+    const { container } = renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(container.textContent).not.toContain(TOKEN_SHAPED);
+    expect(container).toHaveTextContent(`Observed at ${SAFE_REDACTED}`);
+    expect(container).toHaveTextContent(`Reported requirements: ${SAFE_REDACTED}`);
+  });
+
+  it('bounds an unrecognised observation LABEL as well as its value', () => {
+    // The value was already reduced to a shape; the label was not, and an unrecognised
+    // observation on THIS control is exactly where a raw stored blob would arrive.
+    const status = claimingPass([...ALL_PROVEN, { label: `leaked ${TOKEN_SHAPED}`, value: 3 }]);
+    const { container } = renderWithProviders(<EncryptionAtRestPanel status={status} />);
+
+    expect(container.textContent).not.toContain(TOKEN_SHAPED);
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+  });
+
+  it('collapses control characters out of server prose', () => {
+    const status: ControlStatus = {
+      ...V3_ENCRYPTION_PASSING,
+      summary: 'Ciphertext.\n\u0007\u202EPlaintext for nobody.',
+    };
+    const { container } = renderWithProviders(<EncryptionAtRestPanel status={status} />);
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain('\u0007');
+    expect(text).not.toContain('\u202E');
+    expect(container).toHaveTextContent('Ciphertext. Plaintext for nobody.');
+  });
+
+  it('bounds the error message while keeping this tier’s own typed explanation', () => {
+    renderWithProviders(
+      <EncryptionAtRestPanel
+        result={{
+          status: 'error',
+          error: {
+            kind: 'http',
+            message: `controls.posture.k8s.io is forbidden: ${TOKEN_SHAPED}`,
+            httpStatus: 403,
+            reason: 'Forbidden',
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    expect(alert).toHaveTextContent('controls.posture.k8s.io is forbidden');
+    // `describeFailure` composes locally authored words around the numeric status, so both
+    // survive; the server's `reason` inside that same sentence is bounded, and the cases
+    // below are what establish it.
+    expect(alert).toHaveTextContent('403');
+  });
+
+  it('bounds the server’s reason inside the composed failure sentence', () => {
+    // HOW THIS GAP SURVIVED A FIRST PASS, recorded so it is not reintroduced: every case above
+    // supplies `reason: 'Forbidden'`. It is short, it is a well-known Kubernetes `Status` value,
+    // and it reads like a local constant — but nothing in the contract obliges a server to send
+    // that rather than key material, and this sentence is the panel's most prominent failure
+    // text. `message` was guarded and `reason`, one token away in the same string, was not.
+    renderWithProviders(
+      <EncryptionAtRestPanel
+        result={{
+          status: 'error',
+          error: {
+            kind: 'http',
+            message: 'the posture endpoint refused the request',
+            httpStatus: 500,
+            reason: '-----BEGIN PRIVATE KEY----- abcd -----END PRIVATE KEY-----',
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent ?? '').not.toContain('BEGIN PRIVATE KEY');
+    expect(alert).toHaveTextContent(SAFE_REDACTED);
+    // The locally authored sentence is unconditional, so the redaction marker never stands
+    // alone and the reader still learns that no verdict was claimed.
+    expect(alert).toHaveTextContent('nothing is reported as passing');
+    expect(alert).toHaveTextContent('500');
+  });
+
+  it('bounds an oversized reason and collapses control characters in it', () => {
+    renderWithProviders(
+      <EncryptionAtRestPanel
+        result={{
+          status: 'error',
+          error: {
+            kind: 'http',
+            message: 'the posture endpoint refused the request',
+            httpStatus: 500,
+            reason: 'z'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    expect(alert.textContent ?? '').not.toContain('zzzzzzzzzz');
+  });
+
+  it('renders an ordinary reason unchanged — the control for both cases above', () => {
+    renderWithProviders(
+      <EncryptionAtRestPanel
+        result={{
+          status: 'error',
+          error: {
+            kind: 'http',
+            message: 'the posture endpoint refused the request',
+            httpStatus: 403,
+            reason: 'Forbidden',
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent('HTTP 403 Forbidden (http)');
+  });
+});
+
+describe('EncryptionAtRestPanel — the connected path, which issues its own request', () => {
+  // WHY THIS BLOCK EXISTS. Given neither `result` nor `status`, this panel falls back to a
+  // connected variant that reads the posture endpoint through the hook itself. Every case above
+  // supplies one prop or the other, so that whole variant — an entire render path a caller gets
+  // by writing `<EncryptionAtRestPanel />` — was never executed by any spec. An uncovered render
+  // path on the tier's only Critical-severity control is not a coverage statistic; it is a
+  // component whose behaviour nothing had checked.
+
+  it('shows its loading affordance first and claims no verdict until the read resolves', async () => {
+    const { container } = renderWithProviders(<EncryptionAtRestPanel />);
+
+    // Before the read resolves, the panel is busy and says so. It does NOT show an absence of
+    // state, which a reader could take for a clean result.
+    expect(container.querySelector('section')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByRole('status')).toHaveTextContent('Checking whether the stored Secret');
+
+    await waitFor(() => {
+      expect(container.querySelector('section')).toHaveAttribute('aria-busy', 'false');
+    });
+    // And once resolved it renders the panel proper, with its title intact.
+    expect(
+      screen.getByRole('heading', { name: /Secrets encryption at rest/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('disables its refresh affordance when no handler reached it, and explains why', async () => {
+    renderWithProviders(<EncryptionAtRestPanel canRefresh={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Secrets encryption at rest/ })).toBeInTheDocument();
+    });
+
+    const button = screen.getByRole('button');
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title');
   });
 });

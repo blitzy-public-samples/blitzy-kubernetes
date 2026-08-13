@@ -42,57 +42,106 @@ limitations under the License.
 // L41, the fail-closed `exit 1` at L44-L46, and the partial-credential `exit 1` at L48-L50
 // whose message is the imperative "Please provide all mTLS credential".
 //
-// NO CREDENTIAL MATERIAL APPEARS HERE. The only path-shaped strings are the Go fixture's own
-// placeholders — `CACertPath`, `APIServerCertPath`, `APIServerKeyPath` — recorded from
-// `cluster/gce/gci/apiserver_etcd_test.go` L169 and L175-L176.
+// NO CREDENTIAL MATERIAL APPEARS HERE. The credential observations carry the real absolute
+// FILE PATHS from `V8_CREDENTIAL_PATHS`, and the Go fixture's own bare-word placeholders —
+// `CACertPath`, `APIServerCertPath`, `APIServerKeyPath`, recorded from
+// `cluster/gce/gci/apiserver_etcd_test.go` L169 and L175-L176 — now appear only as REJECTED
+// shapes, because a bare word is not a path. `V8_MUTUAL_TLS_FLAGS` still records them
+// verbatim inside the rendered flag strings, which is a different thing and is where parity
+// with the shell test lives.
+//
+// The credential-shaped strings in the M17 and M18 cases below are SYNTHETIC and inert: a
+// PEM header with no key body and a JWT-shaped run of base64 characters that decodes to
+// nothing. They exist to prove the guards reject and withhold them.
 
 import { screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { V8_OBSERVATIONS } from '../domain/observationIds';
 import {
+  MAX_SAFE_PATH_LENGTH,
+  MAX_SAFE_PROSE_INPUT_LENGTH,
+  SAFE_OVERSIZED_TEXT,
+  SAFE_REDACTED,
+} from '../domain/safeText';
+import {
+  ETCD_FAIL_CLOSED_MESSAGE,
+  ETCD_PARTIAL_CREDENTIALS_MESSAGE,
   ETCD_PLAINTEXT_ENDPOINT,
+  ETCD_PLAINTEXT_WARNING_MESSAGE,
   ETCD_TLS_ENDPOINT,
 } from '../domain/securityConstants';
 import type { ControlObservation, ControlStatus } from '../hooks/useControlStatus';
 import {
   CONTROL_STATUS_ERRORS,
+  ETCD_TRANSPORT_STATES,
+  V8_CREDENTIAL_PATHS,
+  V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT,
   V8_ETCD_TRANSPORT_FAIL_CLOSED,
   V8_ETCD_TRANSPORT_FAILING,
   V8_ETCD_TRANSPORT_PASSING,
   V8_ETCD_TRANSPORT_UNKNOWN,
   V8_ETCD_TRANSPORT_WARNING,
+  V8_PROFILE_DEFAULT_OBSERVATIONS,
 } from '../test/fixtures/controlStatus';
 import { renderWithProviders } from '../test/utils/renderWithProviders';
 import EtcdTransportPanel, {
   resolveEtcdTransportEffectiveVerdict,
 } from './EtcdTransportPanel';
 
-/** The mutual-TLS branch, fully evidenced. */
-const MUTUAL_TLS_PROVEN: readonly ControlObservation[] = [
-  { label: V8_OBSERVATIONS.credentialsSupplied, value: 'all' },
-  { label: V8_OBSERVATIONS.etcdServers, value: ETCD_TLS_ENDPOINT },
-  { label: V8_OBSERVATIONS.etcdCaFile, value: 'CACertPath' },
-  { label: V8_OBSERVATIONS.etcdCertFile, value: 'APIServerCertPath' },
-  { label: V8_OBSERVATIONS.etcdKeyFile, value: 'APIServerKeyPath' },
-  { label: V8_OBSERVATIONS.exitCode, value: 0 },
-];
+/**
+ * The mutual-TLS branch, fully evidenced — TAKEN FROM THE RECORDED PASSING PAYLOAD.
+ *
+ * Derived rather than written out, and the change is load-bearing twice over. This list
+ * used to be six hand-written observations, three of which set the credential flags to the
+ * bare words `CACertPath`, `APIServerCertPath` and `APIServerKeyPath` — which is exactly the
+ * M17 defect the panel now rejects, because a bare word is not a file path. It also predated
+ * the profile-default, outcome and diagnostic requirements, so once those were required this
+ * list stopped producing a pass and every `withholds the pass when X` case built on it would
+ * have held VACUOUSLY over a baseline that was already `unknown`.
+ *
+ * Deriving it means the fixture and the gate cannot drift apart silently: if the recorded
+ * payload stops satisfying the panel, the two-sided control fails immediately and loudly.
+ *
+ * Note what is NOT changed by this: {@link V8_MUTUAL_TLS_FLAGS} still records the oracle's
+ * rendered flags containing `CACertPath` VERBATIM, because that is what the shell test
+ * measured and parity depends on it. The rendered flag string and this tier's evidence that
+ * each flag carries a credential PATH are two different things.
+ */
+const MUTUAL_TLS_PROVEN: readonly ControlObservation[] =
+  V8_ETCD_TRANSPORT_PASSING.evidence.observations;
 
-/** The fail-closed branch, fully evidenced. */
-const FAIL_CLOSED_PROVEN: readonly ControlObservation[] = [
-  { label: V8_OBSERVATIONS.credentialsSupplied, value: 'none' },
-  { label: V8_OBSERVATIONS.insecureFallbackPermitted, value: false },
-  { label: V8_OBSERVATIONS.outcome, value: 'fail-closed' },
-  { label: V8_OBSERVATIONS.exitCode, value: 1 },
-  { label: V8_OBSERVATIONS.etcdServers, value: null },
-];
+/** The fail-closed branch, fully evidenced — from the recorded fail-closed payload. */
+const FAIL_CLOSED_PROVEN: readonly ControlObservation[] =
+  V8_ETCD_TRANSPORT_FAIL_CLOSED.evidence.observations;
 
-/** The partial-credential branch, behaving as the control demands. */
+/** The operator-chosen plaintext branch — from the recorded warning payload. */
+const PERMITTED_PLAINTEXT_PROVEN: readonly ControlObservation[] =
+  V8_ETCD_TRANSPORT_WARNING.evidence.observations;
+
+/** The direct-invocation compatibility branch — from the recorded compatibility payload. */
+const COMPATIBILITY_DEFAULT_PROVEN: readonly ControlObservation[] =
+  V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT.evidence.observations;
+
+/** The recorded partial-credential state, which has no `ControlStatus` payload of its own. */
+const RECORDED_PARTIAL_STATE = ETCD_TRANSPORT_STATES[4];
+
+/**
+ * The partial-credential branch, behaving as the control demands.
+ *
+ * Assembled from {@link ETCD_TRANSPORT_STATES}'s recorded partial entry rather than written
+ * out, for the same reason as the lists above: the exit code, the outcome and the diagnostic
+ * are measured facts about the shell, and a second hand-written copy of them here could
+ * disagree with the recording while typechecking.
+ */
 const PARTIAL_ABORTED: readonly ControlObservation[] = [
-  { label: V8_OBSERVATIONS.credentialsSupplied, value: 'partial' },
-  { label: V8_OBSERVATIONS.exitCode, value: 1 },
+  { label: V8_OBSERVATIONS.credentialsSupplied, value: RECORDED_PARTIAL_STATE.credentialsPresent },
+  { label: V8_OBSERVATIONS.exitCode, value: RECORDED_PARTIAL_STATE.exitCode },
   { label: V8_OBSERVATIONS.etcdServers, value: null },
-  { label: V8_OBSERVATIONS.exitCodeRequiredForPartial, value: 1 },
+  { label: V8_OBSERVATIONS.outcome, value: RECORDED_PARTIAL_STATE.outcome },
+  { label: V8_OBSERVATIONS.diagnostic, value: RECORDED_PARTIAL_STATE.diagnostic },
+  { label: V8_OBSERVATIONS.exitCodeRequiredForPartial, value: RECORDED_PARTIAL_STATE.exitCode },
+  ...V8_PROFILE_DEFAULT_OBSERVATIONS,
 ];
 
 /** A payload claiming `pass`, carrying exactly the observations under test. */
@@ -249,12 +298,21 @@ describe('EtcdTransportPanel — a plaintext endpoint is never a pass (the defec
   });
 
   it('caps the explicitly permitted plaintext branch at WARN even when the check said pass', () => {
-    const status = claimingPass([
-      { label: V8_OBSERVATIONS.credentialsSupplied, value: 'none' },
-      { label: V8_OBSERVATIONS.insecureFallbackPermitted, value: true },
-      { label: V8_OBSERVATIONS.etcdServers, value: ETCD_PLAINTEXT_ENDPOINT },
-      { label: V8_OBSERVATIONS.outcome, value: 'plaintext-loopback' },
-    ]);
+    // FULLY EVIDENCED, from the recorded operator-chosen payload. The hand-written four
+    // observations this case used to carry named no compatibility flag, so under the M9
+    // split they no longer identify a branch at all — and `unknown` would have satisfied
+    // "not a pass" for entirely the wrong reason. The point of this case is the CAP: even
+    // with every requirement of the branch proven, plaintext tops out at a warning.
+    const status = claimingPass(PERMITTED_PLAINTEXT_PROVEN);
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('warn');
+  });
+
+  it('caps the compatibility-default branch at WARN too, and never at pass', () => {
+    // The other plaintext branch. It is the state the in-tree shell test measures, so it is
+    // EXPECTED rather than a defect — and the transport is still unauthenticated, so it is
+    // still not a pass. Both truths, held at once (AAP §0.10.4).
+    const status = claimingPass(COMPATIBILITY_DEFAULT_PROVEN);
 
     expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('warn');
   });
@@ -651,3 +709,633 @@ describe('EtcdTransportPanel — loading, empty, error and interaction', () => {
     expect(button).toHaveAttribute('title');
   });
 });
+
+describe('EtcdTransportPanel — M9: the two plaintext states are different states', () => {
+  it('identifies the operator-chosen state, and caps it at a warning', () => {
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_WARNING} />,
+    );
+
+    expect(renderedBranch(container)).toBe('permitted-plaintext');
+    expect(renderedVerdict(container)).toBe('warn');
+  });
+
+  it('identifies the compatibility-default state, and caps it at a warning too', () => {
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT} />,
+    );
+
+    expect(renderedBranch(container)).toBe('compatibility-default');
+    expect(renderedVerdict(container)).toBe('warn');
+  });
+
+  it('explains the two plaintext states differently, since only one is a decision', () => {
+    const operator = renderWithProviders(<EtcdTransportPanel status={V8_ETCD_TRANSPORT_WARNING} />);
+    const operatorText = operator.container.textContent ?? '';
+    operator.unmount();
+
+    const shim = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_COMPATIBILITY_DEFAULT} />,
+    );
+    const shimText = shim.container.textContent ?? '';
+
+    // The verdicts are identical, so the EXPLANATION is the only thing telling a reader
+    // whether an unauthenticated transport was asked for or inherited from a test shim.
+    expect(operatorText).toContain('explicitly permitted by an operator');
+    expect(shimText).toContain('compatibility default');
+    expect(shimText).not.toContain('explicitly permitted by an operator');
+  });
+
+  it('AAP §0.10.4 — plaintext with exit 0 is expected here and forbidden there', () => {
+    // BOTH TRUTHS IN ONE CASE, because they are one requirement and separating them is how
+    // one gets "fixed" into breaking the other. The empty-environment shim legitimately
+    // yields a plaintext endpoint and exit 0; the profile-driven absent-credential path must
+    // exit 1 with no endpoint at all.
+    expect(
+      resolveEtcdTransportEffectiveVerdict(claimingPass(COMPATIBILITY_DEFAULT_PROVEN)),
+    ).toBe('warn');
+    expect(resolveEtcdTransportEffectiveVerdict(claimingPass(FAIL_CLOSED_PROVEN))).toBe('pass');
+    // And the fail-closed path reporting the shim's plaintext outcome is a FAILURE.
+    const downgraded = claimingPass(
+      replacing(FAIL_CLOSED_PROVEN, V8_OBSERVATIONS.etcdServers, ETCD_PLAINTEXT_ENDPOINT),
+    );
+    expect(resolveEtcdTransportEffectiveVerdict(downgraded)).toBe('fail');
+  });
+
+  it('cannot name a branch when the payload does not say which plaintext state it is', () => {
+    // THE M9 DEFECT, directly. The superseded reader split on `insecureFallbackPermitted`
+    // alone and called this `permitted-plaintext`, which then demanded a warning the
+    // compatibility shim never writes — or, read the other way, would have let a real
+    // deployment's silent downgrade pass as a test-harness artefact.
+    const status = claimingPass(
+      without(PERMITTED_PLAINTEXT_PROVEN, V8_OBSERVATIONS.unitTestCompatibilityDefault),
+    );
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedBranch(container)).toBe('indeterminate');
+    expect(renderedVerdict(container)).toBe('unknown');
+  });
+
+  it.each([
+    ['a string', 'false'],
+    ['a number', 0],
+    ['an explicit null', null],
+  ])('cannot name a branch when the compatibility flag is %s', (_name, value) => {
+    const status = claimingPass(
+      replacing(PERMITTED_PLAINTEXT_PROVEN, V8_OBSERVATIONS.unitTestCompatibilityDefault, value),
+    );
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
+  });
+
+  it('fails an operator opt-in that configured plaintext silently', () => {
+    // Without the warning it is not a decision, it is a downgrade — whoever set the variable.
+    const status = claimingPass(
+      replacing(PERMITTED_PLAINTEXT_PROVEN, V8_OBSERVATIONS.diagnostic, null),
+    );
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, V8_OBSERVATIONS.diagnostic)).toBe('violated');
+  });
+
+  it('withholds the warning verdict when the opt-in reported no diagnostic at all', () => {
+    const status = claimingPass(
+      without(PERMITTED_PLAINTEXT_PROVEN, V8_OBSERVATIONS.diagnostic),
+    );
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
+  });
+
+  it('fails a compatibility default that announced itself', () => {
+    // The mirror of the case above. The shim prints NOTHING; a branch that emitted a warning
+    // consulted the opt-out and found it explicitly true, so reporting it as the shim path
+    // misattributes an operator decision to a test harness.
+    const status = claimingPass(
+      replacing(
+        COMPATIBILITY_DEFAULT_PROVEN,
+        V8_OBSERVATIONS.diagnostic,
+        `WARNING: ${ETCD_PLAINTEXT_WARNING_MESSAGE}.`,
+      ),
+    );
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, V8_OBSERVATIONS.diagnostic)).toBe('violated');
+  });
+
+  it('withholds the verdict when the compatibility default reported no diagnostic field', () => {
+    const status = claimingPass(without(COMPATIBILITY_DEFAULT_PROVEN, V8_OBSERVATIONS.diagnostic));
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
+  });
+
+  it.each([
+    ['the default profile', V8_OBSERVATIONS.insecureFallbackDefaultDefaultProfile],
+    ['the test profile', V8_OBSERVATIONS.insecureFallbackDefaultTestProfile],
+  ])('withholds the pass when %s default is not reported', (_name, identity) => {
+    const status = claimingPass(without(MUTUAL_TLS_PROVEN, identity));
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, identity)).toBe('indeterminate');
+  });
+
+  it.each([
+    ['the default profile', V8_OBSERVATIONS.insecureFallbackDefaultDefaultProfile],
+    ['the test profile', V8_OBSERVATIONS.insecureFallbackDefaultTestProfile],
+  ])('fails when %s defaults the insecure fallback to true', (_name, identity) => {
+    // AAP §0.10.2 requires BOTH profiles asserted together for exactly this reason: a
+    // one-sided edit would leave one profile insecure while the other stayed green, and
+    // either profile alone would report that as compliant.
+    const status = claimingPass(replacing(MUTUAL_TLS_PROVEN, identity, true));
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, identity)).toBe('violated');
+  });
+});
+
+describe('EtcdTransportPanel — M10: missing evidence is indeterminate, never satisfied', () => {
+  it('grants each branch its recorded verdict when fully evidenced — the control', () => {
+    // Two-sided first. Every withholding case below removes ONE observation from one of
+    // these lists, so if a list did not produce its verdict here, each of those cases would
+    // hold vacuously over a payload that was already unknown.
+    expect.soft(resolveEtcdTransportEffectiveVerdict(claimingPass(MUTUAL_TLS_PROVEN))).toBe('pass');
+    expect.soft(resolveEtcdTransportEffectiveVerdict(claimingPass(FAIL_CLOSED_PROVEN))).toBe('pass');
+    expect.soft(resolveEtcdTransportEffectiveVerdict(claimingPass(PARTIAL_ABORTED))).toBe('pass');
+    expect
+      .soft(resolveEtcdTransportEffectiveVerdict(claimingPass(PERMITTED_PLAINTEXT_PROVEN)))
+      .toBe('warn');
+    expect
+      .soft(resolveEtcdTransportEffectiveVerdict(claimingPass(COMPATIBILITY_DEFAULT_PROVEN)))
+      .toBe('warn');
+  });
+
+  it('withholds the fail-closed pass when the endpoint was never reported', () => {
+    // THE M10 DEFECT. An unreported endpoint used to be SATISFIED, on the reasoning that
+    // silence is consistent with a branch that aborts before configuring one — which is true
+    // and is not evidence, because it is equally consistent with a check that never looked.
+    // The fail-closed branch reaches a PASS on the strength of an absent endpoint, so this
+    // was a pass for measuring nothing.
+    const status = claimingPass(without(FAIL_CLOSED_PROVEN, V8_OBSERVATIONS.etcdServers));
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, V8_OBSERVATIONS.etcdServers)).toBe('indeterminate');
+  });
+
+  it('accepts an explicitly absent endpoint, which is an absence that was measured', () => {
+    // The other side of the same rule, and the reason it costs a real report nothing.
+    const status = claimingPass(FAIL_CLOSED_PROVEN);
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(measurementResult(container, V8_OBSERVATIONS.etcdServers)).toBe('satisfied');
+    expect(renderedVerdict(container)).toBe('pass');
+  });
+
+  it.each([
+    ['the fail-closed branch', () => FAIL_CLOSED_PROVEN],
+    ['the partial-credential branch', () => PARTIAL_ABORTED],
+    ['the mutual-TLS branch', () => MUTUAL_TLS_PROVEN],
+  ])('withholds the pass on %s when the outcome was never reported', (_name, base) => {
+    // "The outcome was not reported separately" used to read as agreement, so a payload could
+    // claim the exact outcome its branch requires by declining to state one.
+    const status = claimingPass(without(base(), V8_OBSERVATIONS.outcome));
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, V8_OBSERVATIONS.outcome)).toBe('indeterminate');
+  });
+
+  it.each([
+    ['the fail-closed branch', () => FAIL_CLOSED_PROVEN],
+    ['the partial-credential branch', () => PARTIAL_ABORTED],
+  ])('withholds the pass on %s when no diagnostic was reported', (_name, base) => {
+    // AAP §0.10.2 states the aborting branches as the PHRASE and the exit code together: an
+    // exit code alone cannot tell an intentional abort from a crash.
+    const status = claimingPass(without(base(), V8_OBSERVATIONS.diagnostic));
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
+  });
+
+  it('fails the fail-closed branch when it aborted without saying why', () => {
+    const status = claimingPass(replacing(FAIL_CLOSED_PROVEN, V8_OBSERVATIONS.diagnostic, null));
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('fail');
+  });
+
+  it('fails the fail-closed branch when the diagnostic is some other message', () => {
+    const status = claimingPass(
+      replacing(
+        FAIL_CLOSED_PROVEN,
+        V8_OBSERVATIONS.diagnostic,
+        'ERROR: the etcd client certificate has expired.',
+      ),
+    );
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, V8_OBSERVATIONS.diagnostic)).toBe('violated');
+  });
+
+  it('will not let the partial branch borrow the all-absent diagnostic', () => {
+    // The two aborting branches share an outcome and an exit code, so the PHRASE is what
+    // tells them apart — and telling them apart is what stops a half-configured deployment
+    // being reported as a deliberately permitted one. The partial branch never consults the
+    // opt-out at all.
+    const status = claimingPass(
+      replacing(
+        PARTIAL_ABORTED,
+        V8_OBSERVATIONS.diagnostic,
+        `ERROR: ${ETCD_FAIL_CLOSED_MESSAGE} for a hardened profile.`,
+      ),
+    );
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('fail');
+  });
+
+  it('requires the partial branch to name the incomplete credential set', () => {
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={claimingPass(PARTIAL_ABORTED)} />,
+    );
+
+    expect(measurementResult(container, V8_OBSERVATIONS.diagnostic)).toBe('satisfied');
+    expect(RECORDED_PARTIAL_STATE.diagnostic).toContain(ETCD_PARTIAL_CREDENTIALS_MESSAGE);
+  });
+});
+
+describe('EtcdTransportPanel — M17: a credential field must be a path, and is never echoed', () => {
+  /** A PEM header with no key body: credential-SHAPED and inert. */
+  const PEM_SHAPED = '-----BEGIN RSA PRIVATE KEY----- abcd -----END RSA PRIVATE KEY-----';
+
+  /** A JWT-shaped run that decodes to nothing. */
+  const TOKEN_SHAPED = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlLXZhbHVl';
+
+  const CREDENTIAL_IDENTITIES: readonly (readonly [string, string])[] = [
+    ['the CA file', V8_OBSERVATIONS.etcdCaFile],
+    ['the client certificate', V8_OBSERVATIONS.etcdCertFile],
+    ['the client key', V8_OBSERVATIONS.etcdKeyFile],
+  ];
+
+  it('grants the pass for the recorded absolute paths — the control', () => {
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={claimingPass(MUTUAL_TLS_PROVEN)} />,
+    );
+
+    expect(renderedVerdict(container)).toBe('pass');
+    for (const [, identity] of CREDENTIAL_IDENTITIES) {
+      expect.soft(measurementResult(container, identity)).toBe('satisfied');
+    }
+  });
+
+  it('renders the basename of each credential path, and not the directory tree', () => {
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={claimingPass(MUTUAL_TLS_PROVEN)} />,
+    );
+    const text = container.textContent ?? '';
+
+    // What a reader needs is WHICH file, not where a production control plane keeps it.
+    expect(text).toContain('etcd-apiserver-ca.crt');
+    expect(text).toContain('etcd-apiserver-client.crt');
+    expect(text).toContain('etcd-apiserver-client.key');
+    expect(text).not.toContain('/etc/srv/kubernetes/pki');
+    expect(text).not.toContain(V8_CREDENTIAL_PATHS.keyFile);
+  });
+
+  it.each(CREDENTIAL_IDENTITIES)(
+    'refuses a PEM body in %s, and never renders it',
+    (_name, identity) => {
+      // THE M17 DEFECT AT ITS WORST: `path.value.length > 0` was the whole test, so this
+      // earned a PASS for the strongest posture V8 has AND was rendered back in full, beside
+      // a label giving a reader every reason to think it belonged there.
+      const status = claimingPass(replacing(MUTUAL_TLS_PROVEN, identity, PEM_SHAPED));
+      const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+      expect(renderedVerdict(container)).not.toBe('pass');
+      expect(container.textContent ?? '').not.toContain('BEGIN RSA PRIVATE KEY');
+      expect(container).toHaveTextContent('value withheld');
+    },
+  );
+
+  it.each(CREDENTIAL_IDENTITIES)(
+    'refuses a token-shaped value in %s, and never renders it',
+    (_name, identity) => {
+      const status = claimingPass(replacing(MUTUAL_TLS_PROVEN, identity, TOKEN_SHAPED));
+      const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+      expect(renderedVerdict(container)).not.toBe('pass');
+      expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    },
+  );
+
+  it.each([
+    ['a bare word, as the Go fixture spells its placeholder', 'CACertPath'],
+    ['a relative path', 'pki/etcd-apiserver-ca.crt'],
+    ['a path with a newline', '/etc/srv/kubernetes/pki/ca.crt\nrm -rf /'],
+    ['a path with a control character', '/etc/srv/kubernetes/pki/ca\u0007.crt'],
+    ['a path with a space', '/etc/srv/kubernetes/pki/ca file.crt'],
+    ['a dot-dot traversal', '/etc/srv/../../root/.ssh/id_rsa'],
+    ['an oversized path', `/etc/${'x'.repeat(MAX_SAFE_PATH_LENGTH)}/ca.crt`],
+    ['a boolean', true],
+    ['a number', 1],
+  ])('withholds the pass when the CA file is %s', (_name, value) => {
+    const status = claimingPass(replacing(MUTUAL_TLS_PROVEN, V8_OBSERVATIONS.etcdCaFile, value));
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    // INDETERMINATE rather than violated: the flag may be configured correctly and reported
+    // badly, so this is a defect in the report rather than proof of one in the deployment.
+    // Either way it withholds the pass, which is the part that matters.
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, V8_OBSERVATIONS.etcdCaFile)).toBe('indeterminate');
+  });
+
+  it('still calls an EMPTY credential field a violation, not merely unreadable', () => {
+    // An empty string is not a badly reported path, it is no credential at all — which is a
+    // fact about the deployment rather than about the report.
+    const status = claimingPass(replacing(MUTUAL_TLS_PROVEN, V8_OBSERVATIONS.etcdCaFile, ''));
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, V8_OBSERVATIONS.etcdCaFile)).toBe('violated');
+  });
+
+  it('still calls an explicitly absent credential field a violation', () => {
+    const status = claimingPass(replacing(MUTUAL_TLS_PROVEN, V8_OBSERVATIONS.etcdCaFile, null));
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, V8_OBSERVATIONS.etcdCaFile)).toBe('violated');
+  });
+
+  it('never explains its refusal by quoting the value it refused', () => {
+    const status = claimingPass(
+      replacing(MUTUAL_TLS_PROVEN, V8_OBSERVATIONS.etcdKeyFile, PEM_SHAPED),
+    );
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+    const text = container.textContent ?? '';
+
+    // The sentence says WHY the value was refused and warns that it may be the credential
+    // itself — without demonstrating the point by printing it.
+    expect(text).toContain('may well contain the credential');
+    expect(text).not.toContain('BEGIN RSA PRIVATE KEY');
+    expect(text).not.toContain('abcd');
+  });
+});
+
+describe('EtcdTransportPanel — M18: external text is bounded and redacted', () => {
+  /** A JWT-shaped value: three dot-separated runs of at least eight word characters. */
+  const TOKEN_SHAPED = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlLXZhbHVl';
+
+  /** A PEM block, which the shared guard treats as credential-shaped whole. */
+  const PEM_SHAPED = '-----BEGIN PRIVATE KEY----- abcd -----END PRIVATE KEY-----';
+
+  it('renders the recorded prose unchanged — the control', () => {
+    const passing = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_PASSING} />,
+    );
+    expect(passing.container).toHaveTextContent(V8_ETCD_TRANSPORT_PASSING.summary);
+    expect(passing.container).toHaveTextContent(V8_ETCD_TRANSPORT_PASSING.detail);
+    passing.unmount();
+
+    const failing = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_FAILING} />,
+    );
+    for (const finding of V8_ETCD_TRANSPORT_FAILING.findings) {
+      expect.soft(failing.container).toHaveTextContent(finding.message);
+    }
+  });
+
+  it.each([
+    [
+      'the summary',
+      (text: string): ControlStatus => ({ ...V8_ETCD_TRANSPORT_PASSING, summary: text }),
+    ],
+    [
+      'the detail',
+      (text: string): ControlStatus => ({ ...V8_ETCD_TRANSPORT_PASSING, detail: text }),
+    ],
+    [
+      'a warning',
+      (text: string): ControlStatus => ({ ...V8_ETCD_TRANSPORT_PASSING, warnings: [text] }),
+    ],
+    [
+      'a finding message',
+      (text: string): ControlStatus => ({
+        ...V8_ETCD_TRANSPORT_PASSING,
+        findings: [{ message: text, requirementId: 'F-008-RQ-001' }],
+      }),
+    ],
+    [
+      'a finding subject',
+      (text: string): ControlStatus => ({
+        ...V8_ETCD_TRANSPORT_PASSING,
+        findings: [{ message: 'the transport downgraded.', subject: text }],
+      }),
+    ],
+    [
+      'a finding requirement identifier',
+      (text: string): ControlStatus => ({
+        ...V8_ETCD_TRANSPORT_PASSING,
+        findings: [{ message: 'the transport downgraded.', requirementId: text }],
+      }),
+    ],
+    [
+      'the evaluation timestamp',
+      (text: string): ControlStatus => ({ ...V8_ETCD_TRANSPORT_PASSING, observedAt: text }),
+    ],
+    [
+      'a reported requirement identifier',
+      (text: string): ControlStatus => ({ ...V8_ETCD_TRANSPORT_PASSING, requirementIds: [text] }),
+    ],
+    [
+      'an unrecognised observation label',
+      (text: string): ControlStatus =>
+        claimingPass([...MUTUAL_TLS_PROVEN, { label: text, value: 1 }]),
+    ],
+    [
+      'an unrecognised observation value',
+      (text: string): ControlStatus =>
+        claimingPass([...MUTUAL_TLS_PROVEN, { label: 'probe', value: text }]),
+    ],
+  ])('withholds a token-shaped credential in %s', (_name, build) => {
+    const { container } = renderWithProviders(<EtcdTransportPanel status={build(TOKEN_SHAPED)} />);
+
+    expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+  });
+
+  it('withholds a credential in the failure message and its reason', () => {
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel
+        result={{
+          status: 'error',
+          error: {
+            ...CONTROL_STATUS_ERRORS.serverError,
+            message: `the posture endpoint reported ${TOKEN_SHAPED}`,
+            reason: `upstream said ${PEM_SHAPED}`,
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain(TOKEN_SHAPED);
+    expect(text).not.toContain('BEGIN PRIVATE KEY');
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+    // The locally authored sentence is unconditional, so a redaction marker never stands alone.
+    expect(container).toHaveTextContent('no verdict is shown');
+  });
+
+  it('bounds the timestamp in the datetime attribute as well as in the text', () => {
+    const status: ControlStatus = { ...V8_ETCD_TRANSPORT_PASSING, observedAt: TOKEN_SHAPED };
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+    const time = container.querySelector('time');
+
+    // Guarding only the visible text would leave the attribute — which assistive technology
+    // and any consuming tool reads — carrying the raw value.
+    expect(time?.getAttribute('datetime') ?? '').not.toContain(TOKEN_SHAPED);
+    expect(time?.textContent ?? '').not.toContain(TOKEN_SHAPED);
+  });
+
+  it('bounds an oversized summary rather than rendering any of it', () => {
+    const status: ControlStatus = {
+      ...V8_ETCD_TRANSPORT_PASSING,
+      summary: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+    };
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(container).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    expect(container.textContent ?? '').not.toContain('xxxxxxxxxx');
+  });
+
+  it('collapses control characters and bidirectional overrides out of prose', () => {
+    const status: ControlStatus = {
+      ...V8_ETCD_TRANSPORT_PASSING,
+      summary: 'etcd is mutually authenticated.\n\u0007\u202ENothing downgraded.',
+    };
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain('\u0007');
+    expect(text).not.toContain('\u202E');
+    expect(container).toHaveTextContent('etcd is mutually authenticated. Nothing downgraded.');
+  });
+
+  it('substitutes local wording for text that sanitized away to nothing', () => {
+    const status: ControlStatus = {
+      ...V8_ETCD_TRANSPORT_PASSING,
+      summary: '\u0000\u0007',
+      findings: [{ message: '\u202E\u200B' }],
+    };
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(container).toHaveTextContent('summary could not be displayed');
+    expect(container).toHaveTextContent('finding whose message could not be displayed');
+  });
+
+  it('never names an external standards benchmark', () => {
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel status={V8_ETCD_TRANSPORT_PASSING} />,
+    );
+
+    expect(container.textContent ?? '').not.toMatch(/CIS|NSA|OWASP/);
+  });
+});
+
+
+describe('EtcdTransportPanel — a duplicated or wrong-typed measurement is never a value', () => {
+  it.each([
+    ['the endpoint', V8_OBSERVATIONS.etcdServers, ETCD_PLAINTEXT_ENDPOINT],
+    ['the outcome', V8_OBSERVATIONS.outcome, 'plaintext-loopback'],
+    ['the diagnostic', V8_OBSERVATIONS.diagnostic, 'ERROR: something else'],
+    ['a credential path', V8_OBSERVATIONS.etcdCaFile, '/etc/other/ca.crt'],
+    ['the exit code', V8_OBSERVATIONS.exitCode, 1],
+  ])('withholds the pass when %s is reported twice', (_name, identity, second) => {
+    // Never resolved by LIST ORDER. Two answers to one question means the report cannot say
+    // which is authoritative, and a verdict that depended on serialisation order would be a
+    // verdict about the serialiser.
+    const status = claimingPass([...MUTUAL_TLS_PROVEN, { label: identity, value: second }]);
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, identity)).toBe('indeterminate');
+  });
+
+  it.each([
+    ['the outcome as a number', V8_OBSERVATIONS.outcome, 1],
+    ['the endpoint as a number', V8_OBSERVATIONS.etcdServers, 2379],
+    ['the diagnostic as a number', V8_OBSERVATIONS.diagnostic, 1],
+    ['the exit code as a string', V8_OBSERVATIONS.exitCode, '0'],
+  ])('withholds the pass when %s cannot be read as its own type', (_name, identity, value) => {
+    // A stringified zero is not the number zero; re-parsing it would be the panel deciding
+    // what the report meant to say.
+    const status = claimingPass(replacing(MUTUAL_TLS_PROVEN, identity, value));
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
+  });
+
+  it('withholds the pass when the compatibility flag is a string rather than a boolean', () => {
+    // Measured on a PLAINTEXT baseline, because that is the only branch which consults the
+    // flag at all: `"no"` is not `false`, and a payload whose flag cannot be read does not
+    // say which of the two plaintext states it describes.
+    const status = claimingPass(
+      replacing(PERMITTED_PLAINTEXT_PROVEN, V8_OBSERVATIONS.unitTestCompatibilityDefault, 'no'),
+    );
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
+  });
+
+  it('fails an endpoint whose scheme is neither https nor plaintext', () => {
+    const status = claimingPass(
+      replacing(MUTUAL_TLS_PROVEN, V8_OBSERVATIONS.etcdServers, 'unix:///tmp/etcd.sock'),
+    );
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    // Violated rather than indeterminate: an endpoint WAS configured and it is not the
+    // required one, which is a fact about the deployment.
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(container).toHaveTextContent('does not use the required scheme');
+  });
+
+  it('substitutes local wording for a failure message that sanitized away', () => {
+    const { container } = renderWithProviders(
+      <EtcdTransportPanel
+        result={{
+          status: 'error',
+          error: { ...CONTROL_STATUS_ERRORS.network, message: '\u0000\u0007' },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(container).toHaveTextContent('failure whose message could not be displayed');
+  });
+
+  it('describes an empty unrecognised observation value rather than rendering a blank cell', () => {
+    const status = claimingPass([...MUTUAL_TLS_PROVEN, { label: 'probe', value: '' }]);
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(container).toHaveTextContent('reported as an empty string');
+  });
+
+  it('describes a null unrecognised observation value as an explicit null', () => {
+    const status = claimingPass([...MUTUAL_TLS_PROVEN, { label: 'probe', value: null }]);
+    const { container } = renderWithProviders(<EtcdTransportPanel status={status} />);
+
+    expect(container).toHaveTextContent('reported as null');
+  });
+
+  it('withholds the pass when the rendered command was reported unreadable', () => {
+    // Nothing below it was observed, so nothing below it is evidence — the transport is
+    // unknown rather than assumed to be mutually authenticated.
+    const status = claimingPass([
+      ...MUTUAL_TLS_PROVEN,
+      { label: V8_OBSERVATIONS.renderedCommandReadable, value: false },
+    ]);
+
+    expect(resolveEtcdTransportEffectiveVerdict(status)).toBe('unknown');
+  });
+});
+

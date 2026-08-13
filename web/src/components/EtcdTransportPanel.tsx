@@ -109,7 +109,22 @@ import {
   type EffectiveVerdict,
 } from '../domain/evidence';
 import { V8_OBSERVATIONS } from '../domain/observationIds';
-import { ETCD_PLAINTEXT_ENDPOINT, ETCD_TLS_ENDPOINT } from '../domain/securityConstants';
+import {
+  isSafeAbsolutePath,
+  safeLabel,
+  safeObservationValue,
+  safePathBasename,
+  safeProse,
+} from '../domain/safeText';
+// The three shell diagnostics, matched as substrings against the SAME constants the shell
+// tier asserts, so one grep finds the phrase in both suites (M10).
+import {
+  ETCD_FAIL_CLOSED_MESSAGE,
+  ETCD_PARTIAL_CREDENTIALS_MESSAGE,
+  ETCD_PLAINTEXT_ENDPOINT,
+  ETCD_PLAINTEXT_WARNING_MESSAGE,
+  ETCD_TLS_ENDPOINT,
+} from '../domain/securityConstants';
 import {
   selectControlStatus,
   useControlStatus,
@@ -121,6 +136,13 @@ import {
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
 import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
+import {
+  useLiveRegionRole,
+  usePanelDeepSubheading,
+  usePanelLabelId,
+  usePanelSubheading,
+  useRendersOwnHeading,
+} from './embeddedPanel';
 
 /**
  * The control this panel reports on.
@@ -514,26 +536,112 @@ const VERDICT_DESCRIPTION: Record<ControlVerdict, string> = {
 const NO_REFRESH_AVAILABLE = (): void => undefined;
 
 /**
+ * The three observation identities whose values are CREDENTIAL FILE PATHS.
+ *
+ * Gathered as a set because they need a rendering rule of their own (M17): everything else
+ * in the evidence table is a scheme, a word, a number or a boolean, and these three are the
+ * only cells whose contents a misbehaving or compromised reporter has a reason to fill with
+ * the credential itself rather than a path to it.
+ */
+const CREDENTIAL_PATH_IDENTITIES: ReadonlySet<string> = new Set([
+  V8_OBSERVATIONS.etcdCaFile,
+  V8_OBSERVATIONS.etcdCertFile,
+  V8_OBSERVATIONS.etcdKeyFile,
+]);
+
+/** Substituted for a summary that sanitized away to nothing. */
+const WITHHELD_SUMMARY = 'The check reported a verdict whose summary could not be displayed.';
+
+/** Substituted for a finding whose message sanitized away to nothing. */
+const WITHHELD_FINDING_MESSAGE =
+  'The check reported a finding whose message could not be displayed.';
+
+/** Substituted for a failure message that sanitized away to nothing. */
+const WITHHELD_ERROR_MESSAGE = 'The check reported a failure whose message could not be displayed.';
+
+/**
+ * Bounds a verdict summary, substituting local wording when nothing survives.
+ *
+ * An empty string is not an acceptable rendering of a verdict: a reader would see the badge
+ * over a blank line and could not tell a withheld summary from a server that said nothing.
+ */
+function safeSummary(summary: string): string {
+  const bounded = safeProse(summary);
+  return bounded === '' ? WITHHELD_SUMMARY : bounded;
+}
+
+/** Bounds a finding message, substituting local wording when nothing survives. */
+function safeFindingMessage(message: string): string {
+  const bounded = safeProse(message);
+  return bounded === '' ? WITHHELD_FINDING_MESSAGE : bounded;
+}
+
+/** Bounds a failure message, substituting local wording when nothing survives. */
+function safeErrorMessage(message: string): string {
+  const bounded = safeProse(message);
+  return bounded === '' ? WITHHELD_ERROR_MESSAGE : bounded;
+}
+
+/** Rendered for a credential field whose value is not a path — the value itself is withheld. */
+const NOT_PATH_SHAPED_TEXT = 'reported as something other than a file path; value withheld';
+
+/** Rendered for a credential field the report explicitly measured as absent. */
+const CREDENTIAL_ABSENT_TEXT = 'reported as absent';
+
+/**
+ * Renders a CREDENTIAL-labelled observation value, never verbatim.
+ *
+ * M17, THE DISCLOSURE HALF. The evidence table rendered every value through the general
+ * formatter, so a PEM body or a bearer token placed in `--etcd-keyfile` was displayed in
+ * full — and, before the shape gate above, had also earned a PASS on the way. The label made
+ * it worse: a reader who sees a long opaque string beside `--etcd-keyfile` has every reason
+ * to believe it belongs there.
+ *
+ * A path-shaped value renders as its BASENAME, which is what a reader actually needs — is
+ * this the CA, the client certificate or the key? — without the directory tree of a
+ * production control plane. Anything else renders as a fixed phrase and the value is dropped
+ * on the floor, because the most likely reason a credential field is not a path is that it
+ * holds the credential.
+ */
+function formatCredentialValue(value: ControlObservation['value']): string {
+  if (value === null) {
+    return CREDENTIAL_ABSENT_TEXT;
+  }
+  if (typeof value !== 'string' || !isSafeAbsolutePath(value)) {
+    return NOT_PATH_SHAPED_TEXT;
+  }
+  return safePathBasename(value);
+}
+
+/**
  * Renders one measured observation value as text.
  *
- * Invariant locked: NOTHING is rounded, truncated, re-scaled or re-parsed — the
- * value is surfaced as the server sent it — and no state renders as the bare
- * text `null`, `undefined` or an empty cell. An explicit `null` is a
- * REPRESENTABLE value in {@link ControlObservation} rather than a missing one,
- * so it is described rather than hidden, and an empty string is described for
- * the same reason.
+ * Invariant locked: NOTHING is rounded, truncated, re-scaled or re-parsed — the reported
+ * value is surfaced as the server sent it, subject only to the bounding below — and no state
+ * renders as the bare text `null`, `undefined` or an empty cell. An explicit `null` is a
+ * REPRESENTABLE value in {@link ControlObservation} rather than a missing one, so it is
+ * described rather than hidden, and an empty string is described for the same reason.
  *
+ * TWO GUARDS, and they are different in kind (M17 and M18). A credential-labelled identity
+ * goes to {@link formatCredentialValue}, which never renders the value at all. Everything
+ * else goes through the shared bounded sanitizer, because an observation value is external
+ * text of arbitrary length and shape whatever its label says.
+ *
+ * @param identity - the observation label, which decides which rule applies.
  * @param value - the observation value, verbatim from the wire.
  * @returns text safe to render in a table cell.
  */
-function formatObservationValue(value: ControlObservation['value']): string {
+function formatObservationValue(identity: string, value: ControlObservation['value']): string {
+  if (CREDENTIAL_PATH_IDENTITIES.has(identity)) {
+    return formatCredentialValue(value);
+  }
   if (value === null) {
     return 'reported as null';
   }
   if (value === '') {
     return 'reported as an empty string';
   }
-  return typeof value === 'string' ? value : String(value);
+  return typeof value === 'string' ? safeObservationValue(value) : String(value);
 }
 
 /** The scheme prefix a mutually authenticated etcd endpoint carries. */
@@ -548,16 +656,38 @@ const NO_OBSERVATIONS: readonly ControlObservation[] = Object.freeze([]);
 /**
  * Which branch of `configure-etcd-params` the reported evidence describes.
  *
- * The three input branches of the shell are `all`, `none` and `partial`
- * credentials, and the `none` branch splits on the opt-out, so four reachable
- * outcomes plus `indeterminate` for evidence that does not identify a branch at
- * all. Named after the outcome rather than the input, because the outcome is what
- * a reader has to act on.
+ * The three input branches of the shell are `all`, `none` and `partial` credentials, and
+ * the `none` branch splits TWICE: first on the opt-out, and then — when the opt-out reads
+ * as permitted — on whether the permission was an operator's explicit `true` or the
+ * function-local backward-compatibility default. FIVE reachable outcomes, plus
+ * `indeterminate` for evidence that does not identify one.
+ *
+ * `compatibility-default` IS THE M9 FIX, and AAP §0.10.4 names the distinction it draws
+ * the single subtlest parity requirement in this migration. Two truths hold at once:
+ *
+ *   * `TestTLSFlags` "mTLS disabled" invokes the shell with an EMPTY environment and
+ *     legitimately expects `--etcd-servers=http://127.0.0.1:2379` with exit 0, because of
+ *     the `":-true"` shim at `configure-kubeapiserver.sh` L41 that exists for
+ *     direct-invocation contexts which never load the GCE profiles;
+ *   * a PROFILE-DRIVEN deployment missing credentials must fail closed with exit 1,
+ *     because both profiles set the opt-out to false.
+ *
+ * The superseded reader collapsed the two into one `permitted-plaintext` branch on
+ * `insecureFallbackPermitted === true` alone, which made them indistinguishable — so the
+ * requirements that separate them could not be checked. They differ in exactly two
+ * observable ways, and BOTH are now required: the compatibility default reports
+ * `unit-test compatibility default` as `true` and emits NO diagnostic, while an explicit
+ * opt-in reports it `false` and MUST emit the plaintext warning. The silence is the
+ * discriminator, which is why an unreported diagnostic can no longer be waved through.
+ *
+ * Named after the outcome rather than the input, because the outcome is what a reader has
+ * to act on.
  */
 type EtcdBranch =
   | 'mutual-tls'
   | 'fail-closed'
   | 'permitted-plaintext'
+  | 'compatibility-default'
   | 'partial-credentials'
   | 'indeterminate';
 
@@ -645,7 +775,19 @@ function requireEndpointScheme(
   );
 }
 
-/** Requires the endpoint to be absent, which is what an aborting branch produces. */
+/**
+ * Requires the endpoint to be MEASURED ABSENT, which is what an aborting branch produces.
+ *
+ * M10 — AN UNREPORTED ENDPOINT IS NO LONGER SATISFIED. The superseded reading was that
+ * silence is "consistent with a branch that aborts before configuring one", which is true
+ * and is not evidence: it is equally consistent with a check that never looked. The
+ * distinction is the whole of this measurement, because the fail-closed and partial branches
+ * reach a PASS on the strength of an absent endpoint — so a payload that simply omitted the
+ * field earned the strongest claim the aborting branches can make while measuring nothing.
+ *
+ * An explicit `null` is what an absence looks like when it has been measured, and the
+ * recorded payloads carry exactly that.
+ */
 function requireNoEndpoint(observations: readonly ControlObservation[]): EtcdMeasurement {
   const identity = V8_OBSERVATIONS.etcdServers;
   const title = 'no etcd endpoint was configured';
@@ -654,9 +796,10 @@ function requireNoEndpoint(observations: readonly ControlObservation[]): EtcdMea
     return measurement(
       identity,
       title,
-      'satisfied',
-      'No endpoint was reported, which is consistent with a branch that aborts before ' +
-        'configuring one.',
+      'indeterminate',
+      'The endpoint was not reported at all, so whether the boot configured one is ' +
+        'unmeasured. An abort must be shown by an explicitly absent endpoint, not by ' +
+        'silence — silence is equally consistent with a check that never looked.',
     );
   }
   if (found.state !== 'reported') {
@@ -674,7 +817,21 @@ function requireNoEndpoint(observations: readonly ControlObservation[]): EtcdMea
   );
 }
 
-/** Requires one of the three mutual-TLS flags to carry a path. */
+/**
+ * Requires one of the three mutual-TLS flags to carry something PATH-SHAPED.
+ *
+ * M17 — `path.value.length > 0` WAS THE WHOLE TEST, and it is the worst kind of false pass
+ * because it is also a disclosure. Any non-empty string satisfied it, so a payload could
+ * put a PEM body, a bearer token or the word `no` in a field labelled `--etcd-keyfile`,
+ * earn the strongest posture V8 has, AND have that value rendered back verbatim in the
+ * evidence table. The label made it worse rather than better: a reader seeing a long opaque
+ * string beside `--etcd-keyfile` has every reason to think it belongs there.
+ *
+ * The shape is validated by the shared {@link isSafeAbsolutePath}: an absolute POSIX path,
+ * bounded in length, with no control character, no newline and no credential-shaped content.
+ * A flag carries a PATH or it carries something this panel will not accept — and either way
+ * the raw value never reaches the document, because only a basename is rendered.
+ */
 function requireTlsFlag(
   observations: readonly ControlObservation[],
   identity: string,
@@ -697,14 +854,186 @@ function requireTlsFlag(
   if (path.state !== 'reported') {
     return measurement(identity, title, 'indeterminate', path.reason);
   }
-  return path.value.length > 0
-    ? measurement(identity, title, 'satisfied', 'The flag carries a path.')
+  if (path.value.length === 0) {
+    return measurement(
+      identity,
+      title,
+      'violated',
+      'The flag was reported empty, which configures no credential at all.',
+    );
+  }
+  if (!isSafeAbsolutePath(path.value)) {
+    // INDETERMINATE, not violated. The flag may well be configured correctly and reported
+    // badly, so this is a defect in the REPORT rather than proof of one in the deployment —
+    // and it withholds the pass, which is the outcome that matters. Note what the sentence
+    // does NOT do: it does not quote the offending value, because the single most likely
+    // reason a credential field is not path-shaped is that it contains the credential.
+    return measurement(
+      identity,
+      title,
+      'indeterminate',
+      'The flag was reported as something other than an absolute file path, so no ' +
+        'credential file can be shown to be configured. The value is withheld: a ' +
+        'credential-labelled field that is not a path may well contain the credential.',
+    );
+  }
+  return measurement(
+    identity,
+    title,
+    'satisfied',
+    `The flag carries an absolute path to ${safePathBasename(path.value)}.`,
+  );
+}
+
+/**
+ * Requires the reported diagnostic to contain `phrase`.
+ *
+ * M10 — THE DIAGNOSTIC IS EVIDENCE. AAP §0.10.2 states the fail-closed condition as stderr
+ * containing "refusing to fall back to plaintext etcd" AND `exit 1`, and the conjunction is
+ * load-bearing in both directions: an exit code alone cannot tell an intentional
+ * fail-closed abort from a crash, and a message alone cannot prove the boot stopped. The
+ * plaintext opt-in is the mirror image — its WARNING is what makes an unauthenticated
+ * transport an announced decision rather than a silent downgrade.
+ *
+ * The phrase is matched as a SUBSTRING of the reported diagnostic against the same
+ * constants the shell tier asserts, so a CI reader can grep both suites for one string.
+ * Reported prose is never echoed back here; only whether the required phrase was present.
+ */
+function requireDiagnosticPhrase(
+  observations: readonly ControlObservation[],
+  phrase: string,
+  title: string,
+): EtcdMeasurement {
+  const identity = V8_OBSERVATIONS.diagnostic;
+  const found = selectObservation(observations, identity);
+  if (found.state !== 'reported') {
+    return measurement(
+      identity,
+      title,
+      'indeterminate',
+      'No diagnostic was reported, so the branch cannot be shown to have announced what ' +
+        'it did.',
+    );
+  }
+  if (found.value.value === null) {
+    return measurement(
+      identity,
+      title,
+      'violated',
+      'The diagnostic is explicitly absent, so this branch ran silently where it must ' +
+        'announce itself.',
+    );
+  }
+  const text = readString(observations, identity);
+  if (text.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', text.reason);
+  }
+  return text.value.includes(phrase)
+    ? measurement(identity, title, 'satisfied', 'The required diagnostic was emitted.')
     : measurement(
         identity,
         title,
         'violated',
-        'The flag was reported empty, which configures no credential at all.',
+        'A diagnostic was emitted but it does not carry the required phrase, so the ' +
+          'branch this evidence describes is not the branch that ran.',
       );
+}
+
+/**
+ * Requires the diagnostic to be MEASURED SILENT — the compatibility default's signature.
+ *
+ * The shim path prints nothing at all, and that silence is precisely what distinguishes it
+ * from an operator's explicit opt-in. Requiring an explicit `null` rather than accepting an
+ * absent field is the same rule as {@link requireNoEndpoint}: an absence that was measured
+ * is evidence, and an absence nobody looked for is not.
+ */
+function requireNoDiagnostic(observations: readonly ControlObservation[]): EtcdMeasurement {
+  const identity = V8_OBSERVATIONS.diagnostic;
+  const title = 'the branch ran without a diagnostic, as the compatibility shim does';
+  const found = selectObservation(observations, identity);
+  if (found.state !== 'reported') {
+    return measurement(
+      identity,
+      title,
+      'indeterminate',
+      'The diagnostic was not reported at all, so the silence that identifies the ' +
+        'compatibility default is unmeasured.',
+    );
+  }
+  if (found.value.value === null) {
+    return measurement(
+      identity,
+      title,
+      'satisfied',
+      'No diagnostic was emitted, which is the direct-invocation shim path.',
+    );
+  }
+  if (typeof found.value.value !== 'string') {
+    // WRONG-TYPED IS NOT THE SAME AS EMITTED. A number or a boolean in this field is a
+    // defect in the report rather than proof that the branch announced itself, and reading
+    // it as "something was printed" would assert a fact about the boot on the strength of a
+    // malformed field. Indeterminate, consistent with every other wrong type this panel
+    // meets — and it still withholds the pass.
+    return measurement(
+      identity,
+      title,
+      'indeterminate',
+      'The diagnostic was reported as something other than text, so whether the branch ' +
+        'announced itself cannot be read.',
+    );
+  }
+  return measurement(
+    identity,
+    title,
+    'violated',
+    'A diagnostic was emitted, so this is not the silent compatibility path — a branch ' +
+      'that announces itself is an operator decision and must be reported as one.',
+  );
+}
+
+/**
+ * Requires BOTH GCE profiles to default the insecure fallback to `false`.
+ *
+ * M9 — "neither GCE profile enables it" is the entire reason a plaintext branch is a warning
+ * rather than a failure, so the claim needs evidence. AAP §0.10.2 requires both profiles
+ * asserted TOGETHER for a specific reason: a one-sided edit would leave the test profile
+ * insecure while the default profile stayed green, and either profile alone would report
+ * that as compliant.
+ */
+function requireProfileDefault(
+  observations: readonly ControlObservation[],
+  identity: string,
+): EtcdMeasurement {
+  const title = `${identity} is false`;
+  const reported = readBoolean(observations, identity);
+  if (reported.state !== 'reported') {
+    return measurement(identity, title, 'indeterminate', reported.reason);
+  }
+  return reported.value
+    ? measurement(
+        identity,
+        title,
+        'violated',
+        'This profile defaults the insecure fallback to true, so a deployment missing ' +
+          'credentials would downgrade to plaintext instead of failing closed.',
+      )
+    : measurement(
+        identity,
+        title,
+        'satisfied',
+        'This profile defaults the insecure fallback to false, so a deployment missing ' +
+          'credentials fails closed.',
+      );
+}
+
+/** Both profile-default measurements, in file order. */
+function requireBothProfileDefaults(
+  observations: readonly ControlObservation[],
+): readonly EtcdMeasurement[] {
+  return [
+    requireProfileDefault(observations, V8_OBSERVATIONS.insecureFallbackDefaultDefaultProfile),
+    requireProfileDefault(observations, V8_OBSERVATIONS.insecureFallbackDefaultTestProfile),
+  ];
 }
 
 /**
@@ -742,7 +1071,14 @@ function requireExitCode(
   );
 }
 
-/** Requires the reported outcome word to be exactly `expected`. */
+/**
+ * Requires the reported outcome word to be exactly `expected`.
+ *
+ * M10 — AN UNREPORTED OUTCOME IS NO LONGER SATISFIED. "The outcome was not reported
+ * separately" treated an absent field as agreement, which let a payload claim the exact
+ * outcome its branch requires by declining to state one. Every recorded V8 payload carries
+ * the outcome, so requiring it costs nothing a real report supplies.
+ */
 function requireOutcome(
   observations: readonly ControlObservation[],
   expected: string,
@@ -751,7 +1087,13 @@ function requireOutcome(
   const title = `the reported outcome is ${expected}`;
   const found = selectObservation(observations, identity);
   if (found.state === 'unreported') {
-    return measurement(identity, title, 'satisfied', 'The outcome was not reported separately.');
+    return measurement(
+      identity,
+      title,
+      'indeterminate',
+      `The outcome was not reported, so it cannot be shown to be ${expected}. An absent ` +
+        'field is not agreement.',
+    );
   }
   const observed = readString(observations, identity);
   if (observed.state !== 'reported') {
@@ -793,7 +1135,25 @@ function readBranch(observations: readonly ControlObservation[]): EtcdBranch {
   if (permitted.state !== 'reported') {
     return 'indeterminate';
   }
-  return permitted.value ? 'permitted-plaintext' : 'fail-closed';
+  if (!permitted.value) {
+    return 'fail-closed';
+  }
+  // M9 — THE SECOND SPLIT. Plaintext was permitted, and the two ways of arriving there are
+  // different facts with different requirements: an operator's explicit `true` must be
+  // announced by a warning, while the direct-invocation compatibility shim emits nothing at
+  // all. The superseded reader stopped at the line above and called both `permitted-plaintext`,
+  // so the compatibility default was held to a requirement it structurally cannot meet and
+  // the explicit opt-in was never held to the one that makes it a decision.
+  //
+  // A report that does not say WHICH is `indeterminate` rather than defaulted to either.
+  // Choosing the operator branch would demand a warning the shim never writes; choosing the
+  // shim branch would let a real deployment's silent downgrade pass as a test-harness
+  // artefact. Neither guess is available, so the honest answer is that the branch is unnamed.
+  const compatibility = readBoolean(observations, V8_OBSERVATIONS.unitTestCompatibilityDefault);
+  if (compatibility.state !== 'reported') {
+    return 'indeterminate';
+  }
+  return compatibility.value ? 'compatibility-default' : 'permitted-plaintext';
 }
 
 /**
@@ -845,6 +1205,14 @@ function buildEtcdEvidence(observations: readonly ControlObservation[]): EtcdTra
     );
   }
 
+  // EVERY BRANCH REQUIRES BOTH PROFILE DEFAULTS (M9). F-008-RQ-002 is claimed by every
+  // recorded payload and every one of them carries the pair, and the pair is what makes each
+  // branch mean what it claims: it is why an absent-credential deployment fails closed, and
+  // why a plaintext branch is an escape hatch rather than the norm.
+  if (branch !== 'indeterminate') {
+    measurements.push(...requireBothProfileDefaults(observations));
+  }
+
   if (branch === 'mutual-tls') {
     measurements.push(
       requireEndpointScheme(observations, TLS_SCHEME, `etcd is addressed over ${TLS_SCHEME}`),
@@ -852,17 +1220,40 @@ function buildEtcdEvidence(observations: readonly ControlObservation[]): EtcdTra
       requireTlsFlag(observations, V8_OBSERVATIONS.etcdCertFile),
       requireTlsFlag(observations, V8_OBSERVATIONS.etcdKeyFile),
       requireExitCode(observations, 0, 'the API server was allowed to start'),
+      requireOutcome(observations, 'mutual-tls'),
+      // EVERY BRANCH NOW STATES WHAT ITS DIAGNOSTIC MUST BE, and the mutual-TLS branch emits
+      // none: the shell prints only on the fallback and abort paths. Requiring the silence
+      // rather than ignoring the field closes the case where a payload claims mutual TLS
+      // while the shell actually printed a warning — which would mean the branch that ran was
+      // not this one, and the endpoint and flags below describe a boot that did not happen.
+      requireNoDiagnostic(observations),
     );
   } else if (branch === 'fail-closed') {
     measurements.push(
       requireExitCode(observations, 1, 'the boot aborted rather than downgrading'),
       requireNoEndpoint(observations),
       requireOutcome(observations, 'fail-closed'),
+      // AAP §0.10.2 states this branch as the phrase AND the exit code, together.
+      requireDiagnosticPhrase(
+        observations,
+        ETCD_FAIL_CLOSED_MESSAGE,
+        'the boot announced that it refused to fall back to plaintext',
+      ),
     );
   } else if (branch === 'partial-credentials') {
     measurements.push(
       requireExitCode(observations, 1, 'a half-configured deployment aborted the boot'),
       requireNoEndpoint(observations),
+      // THE SUBTLE BRANCH (AAP §0.10.2). It never consults the opt-out at all, so its
+      // outcome is `fail-closed` like the all-absent branch — and its diagnostic is a
+      // DIFFERENT phrase, which is what stops a half-configured deployment being reported
+      // as a deliberately permitted one.
+      requireOutcome(observations, 'fail-closed'),
+      requireDiagnosticPhrase(
+        observations,
+        ETCD_PARTIAL_CREDENTIALS_MESSAGE,
+        'the boot announced that the credential set was incomplete',
+      ),
     );
   } else if (branch === 'permitted-plaintext') {
     measurements.push(
@@ -872,6 +1263,27 @@ function buildEtcdEvidence(observations: readonly ControlObservation[]): EtcdTra
         'the explicitly permitted plaintext endpoint was configured',
       ),
       requireOutcome(observations, 'plaintext-loopback'),
+      requireExitCode(observations, 0, 'the boot continued, as the opt-out permits'),
+      // WITHOUT THE WARNING IT IS NOT A DECISION (M9). An unauthenticated transport
+      // configured silently is a downgrade whoever set the variable, so the announcement is
+      // what separates "the operator asked for it" from an assumption.
+      requireDiagnosticPhrase(
+        observations,
+        ETCD_PLAINTEXT_WARNING_MESSAGE,
+        'the plaintext transport was announced with a warning',
+      ),
+    );
+  } else if (branch === 'compatibility-default') {
+    measurements.push(
+      requireEndpointScheme(
+        observations,
+        PLAINTEXT_SCHEME,
+        'the compatibility default configured the plaintext loopback endpoint',
+      ),
+      requireOutcome(observations, 'plaintext-loopback'),
+      requireExitCode(observations, 0, 'the direct invocation was allowed to continue'),
+      // The silence IS the measurement here, and it is the mirror of the warning above.
+      requireNoDiagnostic(observations),
     );
   } else {
     measurements.push(
@@ -890,8 +1302,11 @@ function buildEtcdEvidence(observations: readonly ControlObservation[]): EtcdTra
   let verdict: EffectiveVerdict;
   if (violated) {
     verdict = 'fail';
-  } else if (branch === 'permitted-plaintext') {
-    // Never a pass: the transport is unauthenticated even though it was asked for.
+  } else if (branch === 'permitted-plaintext' || branch === 'compatibility-default') {
+    // NEITHER PLAINTEXT BRANCH IS EVER A PASS: the transport is unauthenticated whether an
+    // operator asked for it or a compatibility shim supplied it. They are told apart by the
+    // EXPLANATION the panel renders, not by the verdict — which is exactly how the recorded
+    // payloads treat them, both `warn`.
     verdict = allSatisfied ? 'warn' : 'unknown';
   } else {
     verdict = allSatisfied ? 'pass' : 'unknown';
@@ -955,7 +1370,11 @@ const BRANCH_WORDS: Record<EtcdBranch, string> = {
   'mutual-tls': `all six credentials supplied, so etcd is addressed at ${ETCD_TLS_ENDPOINT}`,
   'fail-closed': 'credentials absent and the insecure fallback not permitted, so the boot aborts',
   'permitted-plaintext':
-    'the insecure fallback explicitly permitted, so etcd is addressed at ' +
+    'the insecure fallback explicitly permitted by an operator, so etcd is addressed at ' +
+    ETCD_PLAINTEXT_ENDPOINT,
+  'compatibility-default':
+    'no credentials and no explicit fallback setting, so the direct-invocation ' +
+    'compatibility default applied and etcd is addressed at ' +
     ETCD_PLAINTEXT_ENDPOINT,
   'partial-credentials': 'credentials only partially supplied, which must abort the boot',
   indeterminate: 'not identified by the reported evidence',
@@ -1018,9 +1437,16 @@ interface EtcdTransportPanelViewProps {
 function FindingItem({ finding }: { readonly finding: ControlFinding }): ReactElement {
   return (
     <li className="etcd-transport-panel__finding">
-      {finding.message}
-      {finding.subject !== undefined ? <> Object: {finding.subject}.</> : null}
-      {finding.requirementId !== undefined ? <> Violates {finding.requirementId}.</> : null}
+      {/*
+        ALL THREE MEMBERS ARE SERVER PROSE (M18). The message is bounded as a sentence and
+        the other two as identifiers, so neither a credential nor an unbounded blob can
+        arrive through a finding — which is the channel a failing check fills most freely.
+      */}
+      {safeFindingMessage(finding.message)}
+      {finding.subject !== undefined ? <> Object: {safeLabel(finding.subject)}.</> : null}
+      {finding.requirementId !== undefined ? (
+        <> Violates {safeLabel(finding.requirementId)}.</>
+      ) : null}
     </li>
   );
 }
@@ -1032,18 +1458,25 @@ function FindingItem({ finding }: { readonly finding: ControlFinding }): ReactEl
  * carries no control payload, so a 403 or a 500 renders this element and can
  * never render a pass. The server's own status code and reason are shown
  * verbatim, because "forbidden" and "the server broke" are different operator
- * problems with different remedies. `role="alert"` rather than a silent block,
+ * problems with different remedies. `role={liveAlertRole}` rather than a silent block,
  * so the failure is announced.
  */
 function PostureError({ error }: { readonly error: ControlStatusError }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
   return (
-    <div className="etcd-transport-panel__state" role="alert" data-state="error">
+    <div className="etcd-transport-panel__state" role={liveAlertRole} data-state="error">
       <p>The etcd transport posture could not be read, so no verdict is shown.</p>
       <dl className="etcd-transport-panel__facts">
         <dt>Failure</dt>
         <dd>{error.kind}</dd>
+        {/*
+          `kind` and `httpStatus` above and below are a typed union and a number, so neither
+          is external text and neither is guarded. The message and the reason are the
+          server's own words and both are bounded.
+        */}
         <dt>Message</dt>
-        <dd>{error.message}</dd>
+        <dd>{safeErrorMessage(error.message)}</dd>
         {error.httpStatus !== undefined ? (
           <>
             <dt>HTTP status</dt>
@@ -1053,7 +1486,7 @@ function PostureError({ error }: { readonly error: ControlStatusError }): ReactE
         {error.reason !== undefined ? (
           <>
             <dt>Reason</dt>
-            <dd>{error.reason}</dd>
+            <dd>{safeProse(error.reason)}</dd>
           </>
         ) : null}
       </dl>
@@ -1104,10 +1537,13 @@ function PostureDetail({ control }: { readonly control: ControlStatus }): ReactE
           ))}
         </dl>
       </section>
-      <p className="etcd-transport-panel__summary">{control.summary}</p>
-      {control.detail !== undefined ? <p>{control.detail}</p> : null}
+      <p className="etcd-transport-panel__summary">{safeSummary(control.summary)}</p>
+      {control.detail !== undefined ? <p>{safeProse(control.detail)}</p> : null}
       {control.requirementIds !== undefined && control.requirementIds.length > 0 ? (
-        <p>Requirements covered: {control.requirementIds.join(', ')}</p>
+        <p>
+          Requirements covered:{' '}
+          {control.requirementIds.map((identifier) => safeLabel(identifier)).join(', ')}
+        </p>
       ) : null}
       {control.findings.length > 0 ? (
         <ul className="etcd-transport-panel__findings" aria-label="Reported findings">
@@ -1119,7 +1555,7 @@ function PostureDetail({ control }: { readonly control: ControlStatus }): ReactE
       {control.warnings.length > 0 ? (
         <ul className="etcd-transport-panel__warnings" aria-label="Reported warnings">
           {control.warnings.map((warning, index) => (
-            <li key={`${String(index)}:${warning}`}>{warning}</li>
+            <li key={`${String(index)}:${warning}`}>{safeProse(warning)}</li>
           ))}
         </ul>
       ) : null}
@@ -1135,8 +1571,8 @@ function PostureDetail({ control }: { readonly control: ControlStatus }): ReactE
           <tbody>
             {observations.map((observation, index) => (
               <tr key={`${String(index)}:${observation.label}`}>
-                <th scope="row">{observation.label}</th>
-                <td>{formatObservationValue(observation.value)}</td>
+                <th scope="row">{safeLabel(observation.label)}</th>
+                <td>{formatObservationValue(observation.label, observation.value)}</td>
               </tr>
             ))}
           </tbody>
@@ -1144,7 +1580,13 @@ function PostureDetail({ control }: { readonly control: ControlStatus }): ReactE
       ) : null}
       {control.observedAt !== undefined ? (
         <p>
-          Observed at <time dateTime={control.observedAt}>{control.observedAt}</time>.
+          {/*
+            SANITIZED ONCE and used for both the visible text and the `datetime` attribute
+            (M18). Guarding only the text would leave the attribute — which assistive
+            technology and any consuming tool reads — carrying the raw value.
+          */}
+          Observed at{' '}
+          <time dateTime={safeLabel(control.observedAt)}>{safeLabel(control.observedAt)}</time>.
         </p>
       ) : null}
     </div>
@@ -1163,9 +1605,13 @@ function PostureDetail({ control }: { readonly control: ControlStatus }): ReactE
  * broken.
  */
 function ReportedPosture({ result }: { readonly result: UseControlStatusResult }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   if (result.status === 'loading') {
     return (
-      <p className="etcd-transport-panel__state" role="status" data-state="loading">
+      <p className="etcd-transport-panel__state" role={liveStatusRole} data-state="loading">
         Reading the etcd transport posture…
       </p>
     );
@@ -1176,7 +1622,7 @@ function ReportedPosture({ result }: { readonly result: UseControlStatusResult }
   const control = selectControlStatus(result.controls, ETCD_TRANSPORT_CONTROL_ID);
   if (control === undefined) {
     return (
-      <p className="etcd-transport-panel__state" role="status" data-state="empty">
+      <p className="etcd-transport-panel__state" role={liveStatusRole} data-state="empty">
         {result.isEmpty
           ? 'The server reported no control posture at all, so there is no etcd transport verdict to show.'
           : 'The server reported other controls but not etcd transport, so there is no verdict to show.'}
@@ -1197,6 +1643,10 @@ function ReportedPosture({ result }: { readonly result: UseControlStatusResult }
  */
 function ScenarioArticle({ scenario }: { readonly scenario: EtcdTransportScenario }): ReactElement {
   const headingId = useId();
+  // One level below this panel's own subheadings, whichever level those currently are. A
+  // literal `h4` here was correct standalone and FLATTENED once embedded, putting each
+  // scenario beside the "Measured behaviour" subheading it belongs under.
+  const ScenarioHeading = usePanelDeepSubheading();
   return (
     <article
       className="etcd-transport-panel__scenario"
@@ -1204,7 +1654,7 @@ function ScenarioArticle({ scenario }: { readonly scenario: EtcdTransportScenari
       data-scenario={scenario.id}
       data-verdict={scenario.verdict}
     >
-      <h4 id={headingId}>{scenario.title}</h4>
+      <ScenarioHeading id={headingId}>{scenario.title}</ScenarioHeading>
       <dl className="etcd-transport-panel__facts">
         <dt>Verdict</dt>
         <dd>
@@ -1280,8 +1730,8 @@ function ScenarioArticle({ scenario }: { readonly scenario: EtcdTransportScenari
  *   * Every control is a native element: a `<button type="button">` for the
  *     re-request and a labelled `<select>` for the scenario filter, both
  *     keyboard-operable with no key handling of our own.
- *   * The state paragraphs carry `role="status"`, and the error block
- *     `role="alert"`, so a state change is announced rather than silent.
+ *   * The state paragraphs carry `role={liveStatusRole}`, and the error block
+ *     `role={liveAlertRole}`, so a state change is announced rather than silent.
  *   * `aria-busy` marks the posture part while a request is in flight. The
  *     button is never disabled, so it stays reachable in every state.
  */
@@ -1291,11 +1741,22 @@ function EtcdTransportPanelView({
   canRefresh = true,
   scenario,
 }: EtcdTransportPanelViewProps): ReactElement {
+  // EMBEDDED-AWARE OWN HEADING (m3), bound once for this component.
+  const rendersOwnHeading = useRendersOwnHeading();
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   // ONE refresh channel, resolved once and used for BOTH the click handler and the
   // disabled state, so the two can never disagree.
   const refresh = resolveRefreshHandler(onRefresh, result.refresh, canRefresh);
   const idPrefix = useId();
   const panelHeadingId = `${idPrefix}-panel`;
+  // EMBEDDED-AWARE REGION NAME (m3). The region is named by whichever heading exists: this
+  // panel's own when standalone, the dashboard's control heading when embedded. Without this
+  // an embedded panel would point `aria-labelledby` at an id it no longer renders, leaving a
+  // region with no accessible name at all.
+  const panelLabelId = usePanelLabelId(panelHeadingId);
   const postureHeadingId = `${idPrefix}-posture`;
   const inputsHeadingId = `${idPrefix}-inputs`;
   const scenariosHeadingId = `${idPrefix}-scenarios`;
@@ -1323,8 +1784,17 @@ function EtcdTransportPanelView({
       : ETCD_TRANSPORT_SCENARIOS.filter((candidate) => candidate.id === visibleScenario);
 
   return (
-    <section className="etcd-transport-panel" aria-labelledby={panelHeadingId}>
-      <h2 id={panelHeadingId}>V8 — etcd mutual-TLS transport</h2>
+    <section className="etcd-transport-panel" aria-labelledby={panelLabelId}>
+      {/*
+        EMBEDDED-AWARE OWN HEADING (m3). Standalone, this heading names the panel's region and
+        is the only title on screen. Embedded, the dashboard has already written an `h3` naming
+        this control, so rendering a second title here both DUPLICATED the name and restarted
+        the heading run at a shallower level than the one above it. The region keeps a name
+        either way: `aria-labelledby` points at whichever heading exists.
+      */}
+      {rendersOwnHeading ? (
+        <h2 id={panelHeadingId}>V8 — etcd mutual-TLS transport</h2>
+      ) : null}
       <p>
         The kube-apiserver-to-etcd transport must be mutually authenticated, and a
         deployment that cannot authenticate it must fail closed rather than fall back to
@@ -1337,7 +1807,7 @@ function EtcdTransportPanelView({
         aria-labelledby={postureHeadingId}
         aria-busy={result.status === 'loading'}
       >
-        <h3 id={postureHeadingId}>Reported posture</h3>
+        <Subheading id={postureHeadingId}>Reported posture</Subheading>
         <ReportedPosture result={result} />
         <button
           className="etcd-transport-panel__refresh"
@@ -1351,7 +1821,7 @@ function EtcdTransportPanelView({
       </section>
 
       <section className="etcd-transport-panel__inputs" aria-labelledby={inputsHeadingId}>
-        <h3 id={inputsHeadingId}>What configure-etcd-params reads</h3>
+        <Subheading id={inputsHeadingId}>What configure-etcd-params reads</Subheading>
         <p>
           All six credentials must be set for the mutual-TLS branch, and all six must be
           absent for the fallback branch. Any other combination is the partial branch,
@@ -1372,7 +1842,7 @@ function EtcdTransportPanelView({
       </section>
 
       <section className="etcd-transport-panel__scenarios" aria-labelledby={scenariosHeadingId}>
-        <h3 id={scenariosHeadingId}>Measured behaviour of configure-etcd-params</h3>
+        <Subheading id={scenariosHeadingId}>Measured behaviour of configure-etcd-params</Subheading>
         <p>
           Each scenario reports whether the shipped generator behaved as the requirement
           demands for that input, not whether the deployment ended up speaking mutual TLS. A

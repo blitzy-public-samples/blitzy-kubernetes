@@ -54,6 +54,11 @@ import { screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { V4_OBSERVATIONS } from '../domain/observationIds';
+import {
+  MAX_SAFE_PROSE_INPUT_LENGTH,
+  SAFE_OVERSIZED_TEXT,
+  SAFE_REDACTED,
+} from '../domain/safeText';
 import type { ControlObservation, ControlStatus } from '../hooks/useControlStatus';
 import {
   FORBIDDEN_CONTROL_STATUS_ERROR,
@@ -63,8 +68,10 @@ import {
   V4_EXPIRY_LEEWAY_SECONDS,
   V4_EXPIRY_WINDOW,
   V4_ISSUER,
+  V4_NAMESPACE,
   V4_OBSERVED_EXPIRY,
   V4_REQUESTED_TTL_SECONDS,
+  V4_SERVICE_ACCOUNT_NAME,
   V4_TOKEN_BOUNDARY_PASSING,
   V4_TOKEN_EVIDENCE,
   V4_TOKEN_FAILING,
@@ -183,11 +190,16 @@ describe('the recorded payloads', () => {
     expect(verdictText()).toBe('Overall verdict: unknown');
     expect(outcome('jwt-exp')).toBe('unknown');
     expect(outcome('status-expiration')).toBe('unknown');
-    // `token issued: false` is unrecognised as a claim and is reported as such rather
-    // than dropped.
+    // `token issued: false` is the ISSUANCE PRECONDITION, so it is acted upon in its
+    // own row rather than filed under unrelated evidence. It used to land in "other
+    // reported evidence", which reported the observation faithfully and then ignored
+    // it — the payload said issuance had failed and the panel evaluated the claims
+    // anyway.
+    expect(outcome('token-issued')).toBe('unknown');
+    expect(rowText('token-issued')).toContain('produced no token');
     expect(
       screen.getByRole('region', { name: 'Other reported evidence' }),
-    ).toHaveTextContent(V4_OBSERVATIONS.tokenIssued);
+    ).not.toHaveTextContent(V4_OBSERVATIONS.tokenIssued);
   });
 });
 
@@ -396,9 +408,16 @@ describe('no credential reaches the DOM, wherever it sits in the text', () => {
     expect(container.textContent).not.toContain(JWT);
   });
 
-  it('redacts a credential smuggled through the DERIVED required column', () => {
-    // The `sub` row's required column is built from the namespace and ServiceAccount
-    // name claims, so it is server data wearing a computed shape.
+  it('cannot be reached through the required column at all, which is now a constant', () => {
+    // SUPERSEDED, AND DELIBERATELY SO. This case used to assert that a credential
+    // placed in the namespace claim was REDACTED out of the `sub` row's required
+    // column, because that column was built from the payload's own namespace and
+    // ServiceAccount-name claims — server data wearing a computed shape. The column is
+    // now a module constant recorded from the oracle, so the payload cannot influence
+    // it in any way, redacted or otherwise. That is the stronger property, and this
+    // case asserts it: the credential is absent from the DOM, the required column
+    // still reads the canonical subject, and the credential surfaces only as a
+    // redacted OBSERVED value on the row that actually reported it.
     const status = passingWith([
       ...V4_TOKEN_EVIDENCE.observations.filter(
         (observation) => observation.label !== V4_OBSERVATIONS.kubernetesIoNamespace,
@@ -408,7 +427,9 @@ describe('no credential reaches the DOM, wherever it sits in the text', () => {
     const { container } = renderWithProviders(<TokenHygienePanel status={status} />);
 
     expect(container.textContent).not.toContain(JWT);
-    expect(rowText('claim-sub')).toContain(REDACTED);
+    expect(rowText('claim-sub')).toContain(V4_CLAIM_SHAPE.subject);
+    expect(rowText('claim-sub')).not.toContain(REDACTED);
+    expect(rowText('claim-namespace')).toContain(REDACTED);
   });
 
   it.each([
@@ -651,7 +672,13 @@ describe('the claim shape is proven, never assumed', () => {
     expect(rowText('claim-secret')).toContain('null');
   });
 
-  it('cannot derive the expected subject when a half of it is missing', () => {
+  it('checks the subject on its own when a sub-claim is missing, not against it', () => {
+    // SUPERSEDED, AND DELIBERATELY SO. This case used to assert that a missing
+    // ServiceAccount-name claim made the subject row UNVERIFIABLE, because the
+    // expectation was derived from that very claim — so removing one input silenced a
+    // different row's verdict. The three rows are now independent: the subject is
+    // measured against the trusted constant and still resolves, and only the row whose
+    // own claim is missing reads "could not verify".
     const status = passingWith(
       V4_TOKEN_EVIDENCE.observations.filter(
         (observation) => observation.label !== V4_OBSERVATIONS.kubernetesIoServiceAccountName,
@@ -659,11 +686,14 @@ describe('the claim shape is proven, never assumed', () => {
     );
     renderWithProviders(<TokenHygienePanel status={status} />);
 
-    expect(outcome('claim-sub')).toBe('unknown');
-    expect(rowText('claim-sub')).toContain('expected subject could not be derived');
+    expect(outcome('claim-sub')).toBe('pass');
+    expect(rowText('claim-sub')).toContain('matches the canonical subject');
+    expect(outcome('claim-serviceaccount-name')).toBe('unknown');
+    expect(rowText('claim-serviceaccount-name')).toContain('the claim was not reported');
+    expect(verdictText()).toBe('Overall verdict: unknown');
   });
 
-  it('fails a subject that does not match the derived canonical form', () => {
+  it('fails a subject that does not match the canonical form', () => {
     const status = passingWith([
       ...V4_TOKEN_EVIDENCE.observations.filter(
         (observation) => observation.label !== V4_OBSERVATIONS.subject,
@@ -673,6 +703,330 @@ describe('the claim shape is proven, never assumed', () => {
     renderWithProviders(<TokenHygienePanel status={status} />);
 
     expect(outcome('claim-sub')).toBe('fail');
+  });
+
+  // -------------------------------------------------------------------------
+  // M5, part 1 — the trusted-identity comparison.
+  //
+  // THE DEFECT. `expectedSubject` built the expected `sub` value from the payload's
+  // OWN `kubernetes.io/namespace` and `kubernetes.io/serviceaccount/name` claims, and
+  // the namespace and name rows themselves asserted only that each was A NON-EMPTY
+  // STRING. All three checks therefore passed for ANY self-consistent identity: a
+  // token reporting `sub: system:serviceaccount:evil:evil` alongside namespace `evil`
+  // and name `evil` matched its own expectation on all three rows. The panel was
+  // measuring internal consistency and reporting it as identity.
+  //
+  // THE ORACLE does not do that. It builds its expectation from `ns.Name` and
+  // `sa.Name` — the names IT created, which no token can influence — and makes three
+  // independent EQUALITY assertions against them (`svcaccttoken_test.go`
+  // L1521-L1523). Each case below is a token that the old code passed.
+  // -------------------------------------------------------------------------
+
+  it('fails a SELF-CONSISTENT identity for a different account on all three rows', () => {
+    // THE REGRESSION CASE, exactly as the finding describes it. Every one of the three
+    // identity claims names `evil`, so the payload agrees with itself perfectly.
+    const foreignSubject = 'system:serviceaccount:evil:evil';
+    const status = passingWith([
+      { label: V4_OBSERVATIONS.tokenIssued, value: true },
+      { label: V4_OBSERVATIONS.subject, value: foreignSubject },
+      { label: V4_OBSERVATIONS.kubernetesIoNamespace, value: 'evil' },
+      { label: V4_OBSERVATIONS.kubernetesIoServiceAccountName, value: 'evil' },
+      { label: V4_OBSERVATIONS.kubernetesIoPod, value: null },
+      { label: V4_OBSERVATIONS.kubernetesIoSecret, value: null },
+    ]);
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    expect(outcome('claim-sub')).toBe('fail');
+    expect(outcome('claim-namespace')).toBe('fail');
+    expect(outcome('claim-serviceaccount-name')).toBe('fail');
+    expect(verdictText()).toBe('Overall verdict: fail');
+    expect(resolveTokenHygieneEffectiveVerdict(status)).toBe('fail');
+  });
+
+  it('states the trusted expectation in the required column, not the observed value', () => {
+    const status = passingWith([
+      ...V4_TOKEN_EVIDENCE.observations.filter(
+        (observation) => observation.label !== V4_OBSERVATIONS.kubernetesIoNamespace,
+      ),
+      { label: V4_OBSERVATIONS.kubernetesIoNamespace, value: 'somewhere-else' },
+    ]);
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    // Both values are on screen, so the reader can see exactly what was expected and
+    // what arrived. Under the old rule the required column would have read
+    // `somewhere-else` and the row would have passed.
+    expect(rowText('claim-namespace')).toContain(V4_NAMESPACE);
+    expect(rowText('claim-namespace')).toContain('somewhere-else');
+    expect(outcome('claim-namespace')).toBe('fail');
+  });
+
+  it.each([
+    ['the namespace claim', V4_OBSERVATIONS.kubernetesIoNamespace, 'claim-namespace'],
+    [
+      'the ServiceAccount-name claim',
+      V4_OBSERVATIONS.kubernetesIoServiceAccountName,
+      'claim-serviceaccount-name',
+    ],
+  ])('fails a non-empty but WRONG value for %s', (_name, label, check) => {
+    // Under the superseded presence rule every one of these passed: each is a
+    // non-empty string, which was the entire test.
+    const status = passingWith([
+      ...V4_TOKEN_EVIDENCE.observations.filter((observation) => observation.label !== label),
+      { label, value: 'not-the-account-under-test' },
+    ]);
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    expect(outcome(check)).toBe('fail');
+    expect(verdictText()).toBe('Overall verdict: fail');
+  });
+
+  it.each([
+    ['a namespace-only substitution', 'system:serviceaccount:other:test-svcacct'],
+    ['a name-only substitution', 'system:serviceaccount:myns-v4:other-svcacct'],
+    ['a missing prefix', 'myns-v4:test-svcacct'],
+    ['a trailing separator', 'system:serviceaccount:myns-v4:test-svcacct:'],
+    ['a leading space', ' system:serviceaccount:myns-v4:test-svcacct'],
+  ])('fails a subject that differs from the canonical one by %s', (_name, subject) => {
+    const status = passingWith([
+      ...V4_TOKEN_EVIDENCE.observations.filter(
+        (observation) => observation.label !== V4_OBSERVATIONS.subject,
+      ),
+      { label: V4_OBSERVATIONS.subject, value: subject },
+    ]);
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    expect(outcome('claim-sub')).toBe('fail');
+    expect(rowText('claim-sub')).toContain('does not match the canonical subject');
+  });
+
+  it('derives the canonical subject from the two trusted names, so they cannot drift', () => {
+    // Not a rendering assertion: an arithmetic one over the recorded fixture, proving
+    // the constant the panel compares against and the value the fixture records are the
+    // same string for the same reason rather than by coincidence.
+    expect(V4_CLAIM_SHAPE.subject).toBe(
+      `system:serviceaccount:${V4_NAMESPACE}:${V4_SERVICE_ACCOUNT_NAME}`,
+    );
+    expect(V4_NAMESPACE).toBe('myns-v4');
+    expect(V4_SERVICE_ACCOUNT_NAME).toBe('test-svcacct');
+  });
+
+  it.each([
+    ['a number', 42],
+    ['a boolean', true],
+    ['null', null],
+  ])('fails an identity claim reported as %s rather than as the expected string', (_name, value) => {
+    const status = passingWith([
+      ...V4_TOKEN_EVIDENCE.observations.filter(
+        (observation) => observation.label !== V4_OBSERVATIONS.kubernetesIoNamespace,
+      ),
+      { label: V4_OBSERVATIONS.kubernetesIoNamespace, value },
+    ]);
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    expect(outcome('claim-namespace')).toBe('fail');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M5, part 2 — the issuance precondition.
+//
+// THE DEFECT. `tokenIssued` was read by nothing. A payload explicitly reporting
+// that issuance had produced no token could still be rendered as a pass on the
+// strength of claim, audience and expiry observations that, by its own account, came
+// from no token at all.
+//
+// THE ORACLE aborts first: `token := treq.Status.Token; if token == "" {
+// t.Fatalf("expected a non-empty projected token") }` (`svcaccttoken_test.go`
+// L1484-L1487). EVERY subsequent assertion — the audience, both expiry bounds, the
+// echoed request spec and all five claim assertions — sits after that abort.
+//
+// The translation of a `t.Fatalf` in this tier is "could not verify" and never
+// "fail" (AAP §0.4.1.2): an unissued token is a measurement that did not run, not a
+// hardening defect.
+// ---------------------------------------------------------------------------
+
+describe('the issuance precondition gates every dependent check', () => {
+  /** Every check that is downstream of issuance, and therefore withheld without it. */
+  const DEPENDENT_CHECKS: readonly string[] = [
+    'audience-values',
+    'audience-count',
+    'requested-ttl',
+    'jwt-exp',
+    'status-expiration',
+    'claim-sub',
+    'claim-namespace',
+    'claim-serviceaccount-name',
+    'claim-pod',
+    'claim-secret',
+  ];
+
+  /** The recorded observations with the issuance entry removed. */
+  function withoutIssuance(): readonly ControlObservation[] {
+    return V4_TOKEN_EVIDENCE.observations.filter(
+      (observation) => observation.label !== V4_OBSERVATIONS.tokenIssued,
+    );
+  }
+
+  it('passes the precondition on the recorded payload, so the gate is two-sided', () => {
+    // THE CONTROL. Without it every withholding case below would hold vacuously, over
+    // a baseline that never produced a pass in the first place.
+    renderWithProviders(<TokenHygienePanel status={V4_TOKEN_PASSING} />);
+
+    expect(outcome('token-issued')).toBe('pass');
+    expect(rowText('token-issued')).toContain('a token was issued');
+    for (const check of DEPENDENT_CHECKS) {
+      expect(outcome(check)).toBe('pass');
+    }
+    expect(verdictText()).toBe('Overall verdict: pass');
+  });
+
+  it.each([
+    [
+      'issuance reported as false',
+      (): readonly ControlObservation[] => [
+        { label: V4_OBSERVATIONS.tokenIssued, value: false },
+        ...withoutIssuance(),
+      ],
+      'produced no token',
+    ],
+    [
+      'issuance never reported',
+      (): readonly ControlObservation[] => withoutIssuance(),
+      'did not say whether a token was issued',
+    ],
+    [
+      'issuance reported twice, disagreeing',
+      (): readonly ControlObservation[] => [
+        { label: V4_OBSERVATIONS.tokenIssued, value: true },
+        { label: V4_OBSERVATIONS.tokenIssued, value: false },
+        ...withoutIssuance(),
+      ],
+      'reported more than once',
+    ],
+    [
+      'issuance reported twice, agreeing',
+      (): readonly ControlObservation[] => [
+        { label: V4_OBSERVATIONS.tokenIssued, value: true },
+        { label: V4_OBSERVATIONS.tokenIssued, value: true },
+        ...withoutIssuance(),
+      ],
+      'reported more than once',
+    ],
+    [
+      'issuance reported as a string',
+      (): readonly ControlObservation[] => [
+        { label: V4_OBSERVATIONS.tokenIssued, value: 'true' },
+        ...withoutIssuance(),
+      ],
+      'something other than true or false',
+    ],
+    [
+      'issuance reported as null',
+      (): readonly ControlObservation[] => [
+        { label: V4_OBSERVATIONS.tokenIssued, value: null },
+        ...withoutIssuance(),
+      ],
+      'something other than true or false',
+    ],
+  ])('withholds every dependent check when %s', (_name, build, phrase) => {
+    const status = passingWith(build());
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    expect(outcome('token-issued')).toBe('unknown');
+    expect(rowText('token-issued')).toContain(phrase);
+    for (const check of DEPENDENT_CHECKS) {
+      expect(outcome(check)).toBe('unknown');
+      expect(rowText(check)).toContain('withheld');
+    }
+    // The payload declares `pass` and carries a complete, compliant evidence bag. It
+    // is nonetheless UNKNOWN, because nothing in it can be attributed to a token.
+    expect(status.verdict).toBe('pass');
+    expect(verdictText()).toBe('Overall verdict: unknown');
+    expect(resolveTokenHygieneEffectiveVerdict(status)).toBe('unknown');
+  });
+
+  it('is UNKNOWN and never FAIL when issuance failed, matching the oracle abort', () => {
+    // The oracle `t.Fatalf`s on an empty token, which is setup breakage rather than a
+    // finding about the control. Reporting it as a failure would name a hardening
+    // defect the evidence does not show.
+    const status = passingWith([
+      { label: V4_OBSERVATIONS.tokenIssued, value: false },
+      ...withoutIssuance(),
+    ]);
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    expect(outcome('token-issued')).not.toBe('fail');
+    expect(verdictText()).toBe('Overall verdict: unknown');
+  });
+
+  it('keeps the observed value on a withheld row, so nothing is hidden', () => {
+    const status = passingWith([
+      { label: V4_OBSERVATIONS.tokenIssued, value: false },
+      ...withoutIssuance(),
+    ]);
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    // Withholding withdraws the COMPARISON, not the evidence: the reader still sees
+    // what arrived, alongside the reason it was not acted upon.
+    expect(rowText('claim-sub')).toContain(V4_CLAIM_SHAPE.subject);
+    expect(rowText('claim-sub')).toContain('withheld');
+    expect(rowText('requested-ttl')).toContain(String(V4_REQUESTED_TTL_SECONDS));
+  });
+
+  it('explains the withholding in the section prose as well as in the row', () => {
+    const status = passingWith([
+      { label: V4_OBSERVATIONS.tokenIssued, value: false },
+      ...withoutIssuance(),
+    ]);
+    renderWithProviders(<TokenHygienePanel status={status} />);
+
+    const region = screen.getByRole('region', { name: 'Token issuance' });
+    expect(region).toHaveTextContent('The checks below are withheld');
+    expect(region).toHaveTextContent('produced no token');
+  });
+
+  it('says nothing about withholding when the precondition holds', () => {
+    renderWithProviders(<TokenHygienePanel status={V4_TOKEN_PASSING} />);
+
+    expect(screen.getByRole('region', { name: 'Token issuance' })).not.toHaveTextContent(
+      'The checks below are withheld',
+    );
+  });
+
+  it('renders the issuance section BEFORE everything it gates', () => {
+    // Order is part of the fix: a reader who meets the precondition after the rows it
+    // governs has already read three tables of withheld results without knowing why.
+    const { container } = renderWithProviders(<TokenHygienePanel status={V4_TOKEN_PASSING} />);
+    const headings = [...container.querySelectorAll('h3')].map((node) => node.textContent);
+
+    expect(headings.indexOf('Token issuance')).toBe(0);
+    expect(headings.indexOf('Token issuance')).toBeLessThan(headings.indexOf('Audience binding'));
+    expect(headings.indexOf('Token issuance')).toBeLessThan(headings.indexOf('Token lifetime'));
+    expect(headings.indexOf('Token issuance')).toBeLessThan(headings.indexOf('Claim shape'));
+  });
+
+  it('evaluates rather than withholds on the recorded FAILING payload', () => {
+    // A token WAS issued there; its defects are in what it contains. Withholding those
+    // rows would turn a measured failure into "could not verify" and lose the finding.
+    renderWithProviders(<TokenHygienePanel status={V4_TOKEN_FAILING} />);
+
+    expect(outcome('token-issued')).toBe('pass');
+    expect(outcome('audience-values')).toBe('fail');
+    expect(outcome('jwt-exp')).toBe('fail');
+    expect(rowText('audience-values')).not.toContain('withheld');
+    expect(verdictText()).toBe('Overall verdict: fail');
+  });
+
+  it('does not report the issuance observation twice', () => {
+    renderWithProviders(<TokenHygienePanel status={V4_TOKEN_PASSING} />);
+
+    // Recognised as the precondition, so it is acted upon in its own row and is NOT
+    // also listed as unrelated evidence — where it would look like a measurement the
+    // panel had not used.
+    expect(rowText('token-issued')).toContain(V4_OBSERVATIONS.tokenIssued);
+    expect(
+      screen.getByRole('region', { name: 'Other reported evidence' }),
+    ).not.toHaveTextContent(V4_OBSERVATIONS.tokenIssued);
   });
 });
 
@@ -771,3 +1125,125 @@ describe('the interaction case', () => {
     expect(button).toHaveAttribute('title');
   });
 });
+
+describe('TokenHygienePanel — external prose is bounded, not only credential-redacted', () => {
+  // WHY THIS BLOCK EXISTS. The panel's prose guard replaced credential SHAPES and did nothing
+  // about three other properties of untrusted text, so all three reached the DOM: unbounded
+  // length, control characters, and bidirectional overrides. The last is the one that matters
+  // most here, because U+202E reorders every glyph after it and this prose feeds an affordance
+  // that announces itself — a reversed sentence in an alert can state the opposite of the text
+  // actually present. The guard now composes the shared bound over the local substitution, so
+  // this panel keeps its own `[redacted]` marker and gains the bounds.
+
+  it('renders an ordinary failure message unchanged — the control', () => {
+    const { container } = renderWithProviders(
+      <TokenHygienePanel
+        result={{ status: 'error', error: SERVER_ERROR_CONTROL_STATUS_ERROR, refresh: vi.fn() }}
+      />,
+    );
+
+    expect(container).toHaveTextContent(SERVER_ERROR_CONTROL_STATUS_ERROR.message);
+  });
+
+  it('bounds an oversized failure message instead of rendering all of it', () => {
+    const { container } = renderWithProviders(
+      <TokenHygienePanel
+        result={{
+          status: 'error',
+          error: {
+            ...SERVER_ERROR_CONTROL_STATUS_ERROR,
+            message: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(container).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    expect(container.textContent ?? '').not.toContain('xxxxxxxxxx');
+  });
+
+  it('strips a bidirectional override out of the failure message', () => {
+    const { container } = renderWithProviders(
+      <TokenHygienePanel
+        result={{
+          status: 'error',
+          error: {
+            ...SERVER_ERROR_CONTROL_STATUS_ERROR,
+            message: 'The token was rejected.\u202E',
+            reason: 'InternalError\u202D',
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain('\u202E');
+    expect(text).not.toContain('\u202D');
+    expect(container).toHaveTextContent('The token was rejected.');
+  });
+
+  it('collapses control characters out of a summary and a detail', () => {
+    const { container } = renderWithProviders(
+      <TokenHygienePanel
+        status={{
+          ...V4_TOKEN_PASSING,
+          summary: 'Token bound.\u0000\u0007 Audience exact.',
+          detail: 'Expiry within the window.\n\n\u0008Nothing else was measured.',
+        }}
+      />,
+    );
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain('\u0000');
+    expect(text).not.toContain('\u0007');
+    expect(text).not.toContain('\u0008');
+    expect(container).toHaveTextContent('Token bound. Audience exact.');
+  });
+
+  it('presents ONE redaction marker, the two constants being the same text', () => {
+    // Adding a second guard over prose raised the question of whether a reader could end up
+    // seeing two different markers for one meaning. They cannot, and this records WHY rather
+    // than assuming it: the panel's local marker and the shared one are the same string, so
+    // whichever pass performs a substitution the rendered wording is identical. Asserted
+    // directly, because it is the constants being equal — not the composition order — that
+    // makes this true, and a future change to either constant should fail here.
+    expect(REDACTED).toBe(SAFE_REDACTED);
+
+    const { container } = renderWithProviders(
+      <TokenHygienePanel
+        result={{
+          status: 'error',
+          error: { ...SERVER_ERROR_CONTROL_STATUS_ERROR, message: `refused: ${JWT}` },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(container.textContent).not.toContain(JWT);
+    expect(container).toHaveTextContent(REDACTED);
+  });
+
+  it('redacts a credential that is ALSO past the length bound', () => {
+    // The two guards compose rather than one shadowing the other: a message long enough to be
+    // replaced wholesale must not first leak the credential it carried, and a message carrying
+    // a credential must not escape the bound by virtue of having been redacted.
+    const { container } = renderWithProviders(
+      <TokenHygienePanel
+        result={{
+          status: 'error',
+          error: {
+            ...SERVER_ERROR_CONTROL_STATUS_ERROR,
+            message: `refused: ${JWT} ${'y'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH)}`,
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(container.textContent).not.toContain(JWT);
+    expect(container).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+  });
+});
+

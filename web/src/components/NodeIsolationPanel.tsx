@@ -93,6 +93,22 @@ import {
 import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
 import { strictestVerdict } from '../domain/evidence';
 import { V7_OBSERVATIONS, V7_OUTCOME_TITLES } from '../domain/observationIds';
+import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
+// The enabling posture and the two denial statuses, from the ONE place each is defined.
+// M16 gates the pass on the first two, so a literal here would be a second copy that
+// typechecks while disagreeing with the fixture the gate is measured against.
+import {
+  FORBIDDEN_STATUS,
+  NODE_AUTHORIZATION_MODE,
+  NODE_RESTRICTION_PLUGIN,
+  NOT_FOUND_STATUS,
+} from '../domain/securityConstants';
+import {
+  useLiveRegionRole,
+  usePanelLabelId,
+  usePanelSubheading,
+  useRendersOwnHeading,
+} from './embeddedPanel';
 
 /**
  * The control this panel reports on. Typed as {@link ControlId} rather than as a
@@ -290,25 +306,175 @@ export const NODE_ISOLATION_CHECKS: readonly NodeIsolationCheck[] = [
   },
 ];
 
+/* ------------------------------------------------------------------------ *
+ * The enabling configuration (M16) — F-007-RQ-001.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * How one enabling-configuration requirement stands.
+ *
+ * Kept as its own vocabulary rather than reusing {@link CheckStatus}, because the two
+ * answer different questions and share only their shape: a runtime check asks what the API
+ * server DID, and a configuration requirement asks whether the API server was launched in
+ * a way that makes what it did mean anything.
+ */
+type ConfigStatus = 'satisfied' | 'violated' | 'indeterminate' | 'not-reported';
+
+/** One enabling-configuration requirement, and what became of it. */
+interface ResolvedConfigRequirement {
+  /** Stable identifier, and the `data-config` attribute a specification addresses. */
+  readonly id: 'authorization-mode' | 'node-restriction-plugin';
+  /** Row header text. */
+  readonly title: string;
+  /** The exact observation identity carrying the measurement. */
+  readonly observationLabel: string;
+  /** What the requirement demands, in words, rendered beside what arrived. */
+  readonly required: string;
+  /** What arrived, already bounded for display. */
+  readonly observed: string;
+  /** See {@link ConfigStatus}. */
+  readonly status: ConfigStatus;
+  /** Why the requirement exists, rendered beneath the table. */
+  readonly note: string;
+}
+
+/**
+ * Resolves the two enabling-configuration requirements F-007-RQ-001 covers.
+ *
+ * THE M16 DEFECT, stated as what it allowed. `V7_REQUIREMENT_IDS` claims F-007-RQ-001 —
+ * the enabling-configuration requirement — and the panel rendered `authorization mode` and
+ * `admission plugins enabled` in "Other reported observations", where nothing read them.
+ * A payload could therefore report `authorizationMode: 'RBAC'`, with the Node authorizer
+ * absent entirely, and still earn a PASS attributed to F-007-RQ-001 on the strength of
+ * four runtime outcomes that a permissive RBAC role would produce identically.
+ *
+ * Both requirements are now measured, and each is compared EXACTLY:
+ *
+ *   * the mode is the whole string `Node,RBAC`, ORDER INCLUDED, because both authorizers
+ *     are load-bearing and the flag value is a sequence rather than a set;
+ *   * the plugin list is split on commas and `NodeRestriction` must be a MEMBER — never a
+ *     substring, so a hypothetical `NodeRestrictionShim` cannot satisfy it.
+ *
+ * The three outcomes are kept apart deliberately. An unreported requirement is a gap and
+ * floors the verdict at `unknown`; a requirement reported WRONG is a defect and floors it
+ * at `fail`, because a cluster running without the Node authorizer or without the
+ * restriction plugin is not enforcing this control however its runtime checks read.
+ */
+function resolveConfigRequirements(
+  observations: readonly ControlObservation[],
+): readonly ResolvedConfigRequirement[] {
+  return [
+    resolveAuthorizationMode(observations),
+    resolveNodeRestrictionPlugin(observations),
+  ];
+}
+
+/** The `--authorization-mode` requirement: the whole string, order included. */
+function resolveAuthorizationMode(
+  observations: readonly ControlObservation[],
+): ResolvedConfigRequirement {
+  const base = {
+    id: 'authorization-mode',
+    title: 'Authorization mode',
+    observationLabel: V7_OBSERVATIONS.authorizationMode,
+    required: NODE_AUTHORIZATION_MODE,
+    note:
+      'The Node authorizer decides which objects a kubelet identity may read at all, so ' +
+      'without it every denial below comes from an RBAC rule instead and this is a ' +
+      'different control with the same symptom. The order is part of the flag value.',
+  } as const;
+  const matches = observations.filter(
+    (observation) => observation.label === V7_OBSERVATIONS.authorizationMode,
+  );
+  if (matches.length > 1) {
+    return { ...base, observed: describeDuplicateCount(matches.length), status: 'indeterminate' };
+  }
+  const [observation] = matches;
+  if (observation === undefined) {
+    return { ...base, observed: NOT_REPORTED_VALUE_LABEL, status: 'not-reported' };
+  }
+  if (typeof observation.value !== 'string') {
+    return {
+      ...base,
+      observed: safeObservationValue(formatObservationValue(observation.value)),
+      status: 'indeterminate',
+    };
+  }
+  const observed = observation.value.trim();
+  if (observed === '') {
+    // AN EMPTY STRING IS NOT A MEASUREMENT, it is the absence of one wearing a value's
+    // clothes — so it is indeterminate rather than violated, exactly as an empty plugin list
+    // is below. Calling it a violation would assert that the cluster is misconfigured on the
+    // strength of a report that said nothing, which is the same error as a false pass with
+    // its sign reversed.
+    return { ...base, observed: EMPTY_VALUE_LABEL, status: 'indeterminate' };
+  }
+  return {
+    ...base,
+    observed: safeObservationValue(observed),
+    status: observed === NODE_AUTHORIZATION_MODE ? 'satisfied' : 'violated',
+  };
+}
+
+/** The `--enable-admission-plugins` requirement: `NodeRestriction` as an exact member. */
+function resolveNodeRestrictionPlugin(
+  observations: readonly ControlObservation[],
+): ResolvedConfigRequirement {
+  const base = {
+    id: 'node-restriction-plugin',
+    title: 'Admission plugin enabled',
+    observationLabel: V7_OBSERVATIONS.admissionPluginsEnabled,
+    required: `${NODE_RESTRICTION_PLUGIN} present in the enabled plugin list`,
+    note:
+      'The Node authorizer governs reads; this plugin is what stops a node identity from ' +
+      'MUTATING an object it is allowed to read. Neither substitutes for the other, which ' +
+      'is why they are two requirements rather than one posture flag.',
+  } as const;
+  const matches = observations.filter(
+    (observation) => observation.label === V7_OBSERVATIONS.admissionPluginsEnabled,
+  );
+  if (matches.length > 1) {
+    return { ...base, observed: describeDuplicateCount(matches.length), status: 'indeterminate' };
+  }
+  const [observation] = matches;
+  if (observation === undefined) {
+    return { ...base, observed: NOT_REPORTED_VALUE_LABEL, status: 'not-reported' };
+  }
+  if (typeof observation.value !== 'string') {
+    return {
+      ...base,
+      observed: safeObservationValue(formatObservationValue(observation.value)),
+      status: 'indeterminate',
+    };
+  }
+  const raw = observation.value.trim();
+  if (raw === '') {
+    return { ...base, observed: EMPTY_VALUE_LABEL, status: 'indeterminate' };
+  }
+  // MEMBERSHIP, not containment: split on the separator the flag itself uses and compare
+  // each member whole. `includes('NodeRestriction')` would also be satisfied by a plugin
+  // merely NAMED after it.
+  const members = raw.split(',').map((member) => member.trim());
+  return {
+    ...base,
+    observed: safeObservationValue(raw),
+    status: members.includes(NODE_RESTRICTION_PLUGIN) ? 'satisfied' : 'violated',
+  };
+}
+
+/** Rendered in the observed column of a configuration requirement nobody reported. */
+const NOT_REPORTED_VALUE_LABEL = 'not reported';
+
+/** Rendered when one identity was reported more than once, so none is authoritative. */
+function describeDuplicateCount(count: number): string {
+  return `reported ${String(count)} times, so none is authoritative`;
+}
+
 /** Rendered for an observation whose value is an explicit, meaningful `null`. */
 const NULL_VALUE_LABEL = 'reported explicitly as null';
 
 /** Rendered for an observation whose value is the empty string. */
 const EMPTY_VALUE_LABEL = 'reported as an empty value';
-
-/**
- * Folds a label to a comparison key: lower case, alphanumerics only.
- *
- * Everything else is removed rather than replaced with a separator, so
- * `cross-node-status-update`, `Cross node status update` and
- * `crossNodeStatusUpdate` all fold to the same key. That is deliberate for
- * LABELS, which are prose the server chose. It is deliberately NOT applied to
- * VALUES, which are evidence — see {@link classifyObservedValue}, which reads a
- * status code out of the untouched string first.
- */
-function normalizeLabel(label: string): string {
-  return label.toLowerCase().replace(/[^a-z0-9]+/g, '');
-}
 
 /**
  * Every name one row answers to: its measurement identity, its stable identifier and its
@@ -382,8 +548,128 @@ function classifyStatusCode(code: number, raw: string): ObservedOutcome {
   return { kind: 'unreadable', raw };
 }
 
-/** Matches the first three-digit HTTP status code in an untouched string. */
-const HTTP_STATUS_PATTERN = /\b([1-5]\d{2})\b/;
+/**
+ * Matches a string that is NOTHING BUT a three-digit HTTP status code.
+ *
+ * Anchored at both ends, and that is the whole of the M8 fix. The superseded pattern was
+ * `/\b([1-5]\d{2})\b/` — the FIRST three-digit run ANYWHERE in the text — which read a
+ * status code out of prose that said the opposite of what the code alone implies:
+ *
+ *   * `expected 403 but got 200` -> 403 -> "denied with 403" -> SATISFIED. The sentence
+ *     records a failure and was read as the requirement being met.
+ *   * `403 Not Found` -> 403 -> SATISFIED, over a phrase naming the one status the V7
+ *     ordering hazard exists to distinguish 403 FROM.
+ *   * `HTTP 200 OK after 403 retries` -> 403 -> SATISFIED.
+ *
+ * A status code is a datum, not a narrative. If the server wants to report one it reports
+ * the code, as this repository's own fixtures do; a sentence is not a measurement and is
+ * now `unreadable`, which is indeterminate and never a denial.
+ */
+const EXACT_HTTP_STATUS_PATTERN = /^[1-5]\d{2}$/;
+
+/**
+ * The ONLY outcome words this panel reads, each matched as the WHOLE trimmed value.
+ *
+ * Whole-value, folded through {@link normalizeOutcomeWord}, so `Forbidden`, `forbidden`
+ * and `FORBIDDEN` are one token while `not forbidden` is not that token at all. The
+ * superseded reader used `includes('forbidden')` over a label-style fold, and
+ * `notforbidden` contains `forbidden`: a negation was read as its own positive, so
+ * `not forbidden` — a phrase stating the denial did NOT happen — satisfied the denial.
+ *
+ * Negation is not handled by listing negations, because that is the trap the substring
+ * reader fell into: every negation a vocabulary knows about is a negation an attacker
+ * phrases differently. Instead, ANY value that is not exactly one of these tokens is
+ * `unreadable`. `not forbidden`, `possibly forbidden`, `forbidden?` and
+ * `forbidden (see note)` are then all indeterminate — which is the honest reading of each
+ * of them, and none of them can establish a denial.
+ */
+const EXACT_OUTCOME_TOKENS: Readonly<Record<string, ObservedOutcome['kind']>> = Object.freeze({
+  forbidden: 'forbidden',
+  notfound: 'not-found',
+  allowed: 'allowed',
+  denied: 'denied-unspecified',
+});
+
+/**
+ * Folds a VALUE to an outcome-word key: lower case, internal whitespace removed, and
+ * NOTHING ELSE.
+ *
+ * Deliberately weaker than a label-style fold, which strips every non-alphanumeric
+ * character. That folding was right for labels — prose the server chose to name a row
+ * with — and is WRONG for values, which are evidence. Stripping punctuation from a value
+ * re-opens the hole the exact grammar closes: `forbidden?` folds to `forbidden` under it,
+ * so a report EXPRESSING DOUBT about the outcome would establish it, and
+ * `forbidden (see note)` would too. THIS WAS FOUND BY A SPECIFICATION, not by review: the
+ * first draft of the exact grammar reused the label fold and was satisfied by `forbidden?`.
+ *
+ * The label fold itself is GONE. Rows are matched with `===` against their identity and
+ * exact aliases, so nothing folds a label any more, and leaving an unused fold beside a
+ * value grammar would invite its reintroduction.
+ *
+ * Whitespace alone is collapsed, because `Not Found` and `NotFound` are the two spellings
+ * of one Kubernetes reason. Note the asymmetry that makes this safe: `not found` folds to
+ * the NotFound token while `not forbidden` folds to `notforbidden`, which is no token at
+ * all — so a two-word reason is read and a negation is not.
+ */
+function normalizeOutcomeWord(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/gu, '');
+}
+
+/**
+ * A serialized Kubernetes `Status`, the one structured form a denial may arrive in.
+ *
+ * The review's resolution allows "a narrowly specified serialized status object", and this
+ * is that specification, deliberately narrow: an object literal carrying an integer `code`,
+ * optionally beside a `reason`, and NOTHING is inferred from any other member. A `reason`
+ * that disagrees with the `code` — `{"code":403,"reason":"NotFound"}` — is a CONTRADICTION
+ * and is `unreadable`, because a report that says both cannot be believed about either.
+ *
+ * `kind` is checked when present: a serialized object that is not a `Status` is not a
+ * denial record and is not read as one.
+ */
+interface SerializedStatus {
+  readonly code: number;
+  readonly reason?: string;
+  readonly kind?: string;
+}
+
+/** Whether a parsed JSON value has the narrow {@link SerializedStatus} shape. */
+function asSerializedStatus(parsed: unknown): SerializedStatus | undefined {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const record = parsed as Record<string, unknown>;
+  const { code, reason, kind } = record;
+  if (typeof code !== 'number' || !Number.isInteger(code)) {
+    return undefined;
+  }
+  if (reason !== undefined && typeof reason !== 'string') {
+    return undefined;
+  }
+  if (kind !== undefined && (typeof kind !== 'string' || normalizeOutcomeWord(kind) !== 'status')) {
+    return undefined;
+  }
+  return { code, ...(reason === undefined ? {} : { reason }), ...(kind === undefined ? {} : { kind }) };
+}
+
+/**
+ * Classifies a serialized `Status`, refusing any code/reason contradiction.
+ *
+ * The reason is only ever used to CONTRADICT the code, never to supply an outcome the code
+ * did not carry. That asymmetry is deliberate: a code is an unambiguous datum and a reason
+ * is a word, so the word can withhold trust from the datum but cannot create it.
+ */
+function classifySerializedStatus(status: SerializedStatus, raw: string): ObservedOutcome {
+  const byCode = classifyStatusCode(status.code, raw);
+  if (status.reason === undefined) {
+    return byCode;
+  }
+  const byReason = EXACT_OUTCOME_TOKENS[normalizeOutcomeWord(status.reason)];
+  if (byReason === undefined || byReason !== byCode.kind) {
+    return { kind: 'unreadable', raw };
+  }
+  return byCode;
+}
 
 /**
  * Classifies one reported observation value.
@@ -423,40 +709,45 @@ function classifyObservedValue(value: string | number | boolean | null): Observe
     return { kind: 'unreadable', raw: EMPTY_VALUE_LABEL };
   }
 
-  const codeMatch = HTTP_STATUS_PATTERN.exec(raw);
-  if (codeMatch !== null) {
-    return classifyStatusCode(Number(codeMatch[1]), raw);
+  // 1. THE WHOLE VALUE is a status code, or it is not a status code at all.
+  if (EXACT_HTTP_STATUS_PATTERN.test(raw)) {
+    return classifyStatusCode(Number(raw), raw);
   }
 
-  const normalized = normalizeLabel(raw);
-  if (normalized.includes('forbidden')) {
-    return { kind: 'forbidden', httpStatus: 403, raw };
+  // 2. A serialized Kubernetes `Status`, in the one narrow shape specified above. Tried
+  //    before the word vocabulary because a JSON document is never an outcome word, and
+  //    a parse failure simply falls through rather than being reported as a defect.
+  // Either brace, so a JSON ARRAY enters this branch and is rejected by shape rather than
+  // falling through to the word vocabulary. `[403]` reaches the same `unreadable` verdict
+  // either way, but rejecting it HERE is the honest route: it is a serialized document that
+  // is not a Status, which is a different fact from "not one of four words".
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { kind: 'unreadable', raw };
+    }
+    const status = asSerializedStatus(parsed);
+    return status === undefined
+      ? { kind: 'unreadable', raw }
+      : classifySerializedStatus(status, raw);
   }
-  if (normalized.includes('notfound')) {
-    return { kind: 'not-found', httpStatus: 404, raw };
+
+  // 3. THE WHOLE VALUE is one of four outcome words, or it is unreadable. No substring
+  //    search, so no negation, qualification or sentence can carry a denial, and no list
+  //    of negations has to stay ahead of however the next report phrases one.
+  const kind = EXACT_OUTCOME_TOKENS[normalizeOutcomeWord(raw)];
+  if (kind === undefined) {
+    return { kind: 'unreadable', raw };
   }
-  if (
-    normalized.includes('notallowed') ||
-    normalized.includes('notpermitted') ||
-    normalized.includes('disallowed') ||
-    normalized.includes('unauthorized') ||
-    normalized.includes('unauthorised') ||
-    normalized.includes('denied') ||
-    normalized.includes('rejected') ||
-    normalized.includes('refused')
-  ) {
-    return { kind: 'denied-unspecified', raw };
+  if (kind === 'forbidden') {
+    return { kind: 'forbidden', httpStatus: FORBIDDEN_STATUS, raw };
   }
-  if (
-    normalized.includes('allowed') ||
-    normalized.includes('permitted') ||
-    normalized.includes('success') ||
-    normalized === 'ok' ||
-    normalized === 'nocontent'
-  ) {
-    return { kind: 'allowed', raw };
+  if (kind === 'not-found') {
+    return { kind: 'not-found', httpStatus: NOT_FOUND_STATUS, raw };
   }
-  return { kind: 'unreadable', raw };
+  return kind === 'allowed' ? { kind: 'allowed', raw } : { kind: 'denied-unspecified', raw };
 }
 
 /**
@@ -592,6 +883,7 @@ function leastFavourable(left: ControlVerdict, right: ControlVerdict): ControlVe
 function resolveEffectiveVerdict(
   reported: ControlVerdict,
   checks: readonly ResolvedCheck[],
+  configRequirements: readonly ResolvedConfigRequirement[],
   findings: readonly ControlFinding[],
   warnings: readonly string[],
 ): ControlVerdict {
@@ -603,6 +895,21 @@ function resolveEffectiveVerdict(
     verdict = leastFavourable(verdict, 'unknown');
   }
   if (checks.some((resolved) => resolved.status === 'not-reported')) {
+    verdict = leastFavourable(verdict, 'unknown');
+  }
+  // M16 — THE ENABLING CONFIGURATION IS PART OF THE VERDICT, on the same monotone,
+  // downward-only terms as everything else. A configuration reported WRONG floors at
+  // `fail` because the control is then not enforced; a configuration nobody reported
+  // floors at `unknown` because F-007-RQ-001 is claimed and unmeasured.
+  if (configRequirements.some((requirement) => requirement.status === 'violated')) {
+    verdict = leastFavourable(verdict, 'fail');
+  }
+  if (
+    configRequirements.some(
+      (requirement) =>
+        requirement.status === 'indeterminate' || requirement.status === 'not-reported',
+    )
+  ) {
     verdict = leastFavourable(verdict, 'unknown');
   }
   if (findings.length > 0) {
@@ -635,9 +942,17 @@ export function resolveNodeIsolationEffectiveVerdict(
   if (control === undefined) {
     return 'unknown';
   }
-  const checks = resolveChecks(control.evidence?.observations ?? []);
+  const observations = control.evidence?.observations ?? [];
+  const checks = resolveChecks(observations);
+  const configRequirements = resolveConfigRequirements(observations);
   return strictestVerdict([
-    resolveEffectiveVerdict(control.verdict, checks, control.findings, control.warnings),
+    resolveEffectiveVerdict(
+      control.verdict,
+      checks,
+      configRequirements,
+      control.findings,
+      control.warnings,
+    ),
   ]);
 }
 
@@ -683,6 +998,49 @@ const CHECK_STATUS_LABELS: Readonly<Record<CheckStatus, string>> = {
   'not-reported': 'Not reported',
 };
 
+/** Human-readable name of each enabling-configuration status. */
+const CONFIG_STATUS_LABELS: Readonly<Record<ConfigStatus, string>> = {
+  satisfied: 'Satisfied',
+  violated: 'Violated',
+  indeterminate: 'Indeterminate',
+  'not-reported': 'Not reported',
+};
+
+/** Accessible name of the enabling-configuration table. */
+const CONFIG_TABLE_CAPTION =
+  'Enabling configuration the reported outcomes depend on, and what was reported for each';
+
+/** The requirement the enabling configuration answers to. */
+const ENABLING_REQUIREMENT_ID = 'F-007-RQ-001';
+
+/** Substituted for a summary that sanitized away to nothing. */
+const WITHHELD_SUMMARY = 'The check reported a verdict whose summary could not be displayed.';
+
+/** Substituted for a finding whose message sanitized away to nothing. */
+const WITHHELD_FINDING_MESSAGE =
+  'The check reported a finding whose message could not be displayed.';
+
+/** Substituted for a failure message that sanitized away to nothing. */
+const WITHHELD_ERROR_MESSAGE = 'The check reported a failure whose message could not be displayed.';
+
+/**
+ * Bounds a verdict summary, substituting local wording when nothing survives.
+ *
+ * An empty string is not an acceptable rendering of a verdict: the reader would see the
+ * verdict badge over a blank line and could not tell a withheld summary from a server that
+ * chose to say nothing. Both cases now say which one they are.
+ */
+function safeSummary(summary: string): string {
+  const bounded = safeProse(summary);
+  return bounded === '' ? WITHHELD_SUMMARY : bounded;
+}
+
+/** Bounds a failure message, substituting local wording when nothing survives. */
+function safeErrorMessage(message: string): string {
+  const bounded = safeProse(message);
+  return bounded === '' ? WITHHELD_ERROR_MESSAGE : bounded;
+}
+
 /**
  * The rendered explanation the boundary requires whenever a NotFound is observed
  * on a check that must be denied.
@@ -700,6 +1058,15 @@ const INTERPRETATION_NOTES: readonly string[] = [
     'violation, because an absent object masks the decision entirely; a refusal whose status ' +
     'code was not reported is recorded as indeterminate, because it may or may not have been a ' +
     '403.',
+  'An outcome is read only from a value that is ENTIRELY a status code, entirely one of the ' +
+    'words Forbidden, NotFound, Allowed or Denied, or an object carrying an integer code whose ' +
+    'reason agrees with it. A sentence is not a measurement: “expected 403 but got 200”, ' +
+    '“403 Not Found” and “not forbidden” are each recorded as an unrecognised outcome, because ' +
+    'reading a code or a word out of prose would let a report of failure satisfy a requirement.',
+  'The enabling configuration is part of the verdict. The authorization mode must be exactly ' +
+    'Node,RBAC and NodeRestriction must be a member of the enabled plugin list; either one ' +
+    'reported wrong is a failure, and either one unreported holds the verdict at Unknown, ' +
+    'because the outcomes below mean what this control claims only while both are in force.',
   'Every one of the four checks must be reported. A check nobody measured is recorded as not ' +
     'reported and holds the verdict at Unknown, however confident the server’s own verdict was: ' +
     'a report that made none of the four assertions has not made them.',
@@ -748,7 +1115,7 @@ function describeOutcome(outcome: ObservedOutcome): string {
   switch (outcome.kind) {
     case 'allowed':
       return outcome.httpStatus === undefined
-        ? `Allowed (${outcome.raw})`
+        ? `Allowed (${safeObservationValue(outcome.raw)})`
         : `Allowed with HTTP ${outcome.httpStatus}`;
     case 'forbidden':
       return `Denied with HTTP ${outcome.httpStatus} Forbidden`;
@@ -756,10 +1123,16 @@ function describeOutcome(outcome: ObservedOutcome): string {
       return `Denied with HTTP ${outcome.httpStatus} Not Found`;
     case 'denied-unspecified':
       return outcome.httpStatus === undefined
-        ? `Denied, status code not reported (${outcome.raw})`
+        ? `Denied, status code not reported (${safeObservationValue(outcome.raw)})`
         : `Denied with HTTP ${outcome.httpStatus}`;
     case 'unreadable':
-      return `Unrecognised outcome (${outcome.raw})`;
+      // M18, AND THE CHANNEL THE M8 FIX WIDENED. Tightening the grammar sends strictly
+      // MORE server text down this branch — every sentence, negation and qualification
+      // that used to be read as an outcome now arrives here to be echoed back — so the
+      // one branch that renders arbitrary wire text is also the one that most needed
+      // bounding. `raw` is the server's own string in every case but two, where it is a
+      // local label for null or empty.
+      return `Unrecognised outcome (${safeObservationValue(outcome.raw)})`;
     case 'inconsistent':
       return (
         `Reported ${String(outcome.count)} times — which outcome is authoritative cannot ` +
@@ -775,14 +1148,28 @@ function describeOutcome(outcome: ObservedOutcome): string {
   }
 }
 
-/** Flattens a finding into a single sentence, so it is one addressable text node. */
+/**
+ * Flattens a finding into a single sentence, so it is one addressable text node.
+ *
+ * All three members are server prose and all three are bounded (M18). The message goes
+ * through {@link safeProse} because it is a sentence; the subject and requirement
+ * identifier go through {@link safeLabel} because they are short identifiers and a
+ * sentence-length bound would let one crowd the finding it belongs to. Sanitizing FIRST
+ * and testing emptiness afterwards matters: a subject that is nothing but control
+ * characters is empty evidence, and appending `subject: ` to it would state a fact the
+ * report did not contain.
+ */
 function describeFinding(finding: ControlFinding): string {
-  const parts: string[] = [finding.message];
-  if (finding.subject !== undefined && finding.subject !== '') {
-    parts.push(`subject: ${finding.subject}`);
+  const message = safeProse(finding.message);
+  const parts: string[] = [message === '' ? WITHHELD_FINDING_MESSAGE : message];
+  const subject = finding.subject === undefined ? '' : safeLabel(finding.subject);
+  if (subject !== '') {
+    parts.push(`subject: ${subject}`);
   }
-  if (finding.requirementId !== undefined && finding.requirementId !== '') {
-    parts.push(`requirement: ${finding.requirementId}`);
+  const requirementId =
+    finding.requirementId === undefined ? '' : safeLabel(finding.requirementId);
+  if (requirementId !== '') {
+    parts.push(`requirement: ${requirementId}`);
   }
   return parts.join(' — ');
 }
@@ -890,8 +1277,12 @@ export interface NodeIsolationPanelProps {
 
 /** Renders the loading affordance. */
 function renderLoading(): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
-    <p className="node-isolation-panel__loading" role="status" aria-label="Loading V7 posture">
+    <p className="node-isolation-panel__loading" role={liveStatusRole} aria-label="Loading V7 posture">
       Loading the V7 node-isolation posture…
     </p>
   );
@@ -900,22 +1291,33 @@ function renderLoading(): ReactElement {
 /**
  * Renders the error affordance.
  *
- * `role="alert"` because a failure to read posture is exactly the kind of change
+ * `role={liveAlertRole}` because a failure to read posture is exactly the kind of change
  * a reader must not miss. It carries no verdict, and it structurally cannot: the
  * hook module's error arm has no `controls` member, so there is nothing here that
  * could be mistaken for one.
  */
 function renderError(error: ControlStatusError): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
   const label =
     error.httpStatus === undefined
       ? 'V7 posture unavailable'
       : `V7 posture unavailable — HTTP ${error.httpStatus}`;
   return (
-    <div className="node-isolation-panel__error" role="alert" aria-label={label}>
+    <div className="node-isolation-panel__error" role={liveAlertRole} aria-label={label}>
+      {/*
+        The headline and the disambiguation sentences are LOCALLY AUTHORED from `kind` and
+        `httpStatus` — a typed union and a number — so they are unconditional and are
+        deliberately not guarded. The message and the reason are the server's own text and
+        both are bounded (M18); guarding the two that are external and leaving the two that
+        are local alone is what keeps a redaction marker from ever standing alone.
+      */}
       <p className="node-isolation-panel__error-headline">{describeErrorHeadline(error)}</p>
-      <p className="node-isolation-panel__error-message">{error.message}</p>
+      <p className="node-isolation-panel__error-message">{safeErrorMessage(error.message)}</p>
       {error.reason !== undefined && error.reason !== '' ? (
-        <p className="node-isolation-panel__error-reason">{`Server reason: ${error.reason}`}</p>
+        <p className="node-isolation-panel__error-reason">
+          {`Server reason: ${safeProse(error.reason)}`}
+        </p>
       ) : null}
       {describeErrorDisambiguation(error).map((sentence) => (
         <p className="node-isolation-panel__error-note" key={sentence}>
@@ -936,8 +1338,12 @@ function renderError(error: ControlStatusError): ReactElement {
  * pass, which is why no verdict element exists on this path.
  */
 function renderEmpty(isEmpty: boolean): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
-    <p className="node-isolation-panel__empty" role="status" aria-label="V7 posture not reported">
+    <p className="node-isolation-panel__empty" role={liveStatusRole} aria-label="V7 posture not reported">
       {isEmpty
         ? 'The server reported no control posture at all, so there is nothing to show for V7.'
         : 'The server reported posture for other controls but not for V7, so no V7 verdict is shown.'}
@@ -947,11 +1353,21 @@ function renderEmpty(isEmpty: boolean): ReactElement {
 
 /** Renders the success affordance: the reconciled verdict and all four outcomes. */
 function renderSuccess(control: ControlStatus): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const observations = control.evidence?.observations ?? [];
   const checks = resolveChecks(observations);
+  const configRequirements = resolveConfigRequirements(observations);
   const verdict = resolveEffectiveVerdict(
     control.verdict,
     checks,
+    configRequirements,
     control.findings,
     control.warnings,
   );
@@ -961,13 +1377,22 @@ function renderSuccess(control: ControlStatus): ReactElement {
       .map((resolved) => resolved.observation)
       .filter((observation): observation is ControlObservation => observation !== undefined),
   );
-  const otherObservations = observations.filter((observation) => !claimed.has(observation));
+  // The two enabling-configuration identities are CLAIMED now, so they leave "Other
+  // reported observations" and appear in a table that states what each must be. Leaving
+  // them in the generic list was the visible half of M16: rendered, unread, and beside
+  // observations nothing gates.
+  const configIdentities = new Set(
+    configRequirements.map((requirement) => requirement.observationLabel),
+  );
+  const otherObservations = observations.filter(
+    (observation) => !claimed.has(observation) && !configIdentities.has(observation.label),
+  );
 
   return (
     <div className="node-isolation-panel__body">
       <p
         className="node-isolation-panel__verdict"
-        role="status"
+        role={liveStatusRole}
         aria-label={`V7 verdict: ${VERDICT_LABELS[verdict]}`}
       >
         {'Verdict: '}
@@ -975,10 +1400,39 @@ function renderSuccess(control: ControlStatus): ReactElement {
         {` — ${VERDICT_EXPLANATIONS[verdict]}`}
       </p>
 
-      <p className="node-isolation-panel__summary">{control.summary}</p>
+      <p className="node-isolation-panel__summary">{safeSummary(control.summary)}</p>
       {control.detail !== undefined && control.detail !== '' ? (
-        <p className="node-isolation-panel__detail">{control.detail}</p>
+        <p className="node-isolation-panel__detail">{safeProse(control.detail)}</p>
       ) : null}
+
+      {/*
+        THE ENABLING CONFIGURATION FIRST, because it is the precondition of everything
+        below it: the four runtime outcomes mean what this control claims they mean only
+        while the Node authorizer and the NodeRestriction plugin are both in force.
+      */}
+      <table className="node-isolation-panel__config">
+        <caption>{CONFIG_TABLE_CAPTION}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Requirement</th>
+            <th scope="col">Covers</th>
+            <th scope="col">Required</th>
+            <th scope="col">Reported</th>
+            <th scope="col">Outcome</th>
+          </tr>
+        </thead>
+        <tbody>
+          {configRequirements.map((requirement) => (
+            <tr key={requirement.id} data-config={requirement.id} data-status={requirement.status}>
+              <th scope="row">{requirement.title}</th>
+              <td>{ENABLING_REQUIREMENT_ID}</td>
+              <td>{requirement.required}</td>
+              <td>{requirement.observed}</td>
+              <td>{CONFIG_STATUS_LABELS[requirement.status]}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
 
       <table className="node-isolation-panel__checks">
         <caption>Observed NodeRestriction outcomes for the node1 identity</caption>
@@ -1016,7 +1470,7 @@ function renderSuccess(control: ControlStatus): ReactElement {
         </p>
       ) : null}
 
-      <h3 className="node-isolation-panel__subheading">Reported findings</h3>
+      <Subheading className="node-isolation-panel__subheading">Reported findings</Subheading>
       {control.findings.length === 0 ? (
         <p className="node-isolation-panel__no-findings">No findings were reported for V7.</p>
       ) : (
@@ -1029,25 +1483,28 @@ function renderSuccess(control: ControlStatus): ReactElement {
         </ul>
       )}
 
-      <h3 className="node-isolation-panel__subheading">Server warnings</h3>
+      <Subheading className="node-isolation-panel__subheading">Server warnings</Subheading>
       {control.warnings.length === 0 ? (
         <p className="node-isolation-panel__no-warnings">No warnings were reported for V7.</p>
       ) : (
         <ul className="node-isolation-panel__warnings" aria-label="V7 warnings">
           {control.warnings.map((warning, index) => (
-            <li key={`${warning}-${String(index)}`}>{warning}</li>
+            <li key={`${warning}-${String(index)}`}>{safeProse(warning)}</li>
           ))}
         </ul>
       )}
 
-      <h3 className="node-isolation-panel__subheading">Why each outcome is required</h3>
+      <Subheading className="node-isolation-panel__subheading">Why each outcome is required</Subheading>
       <ul className="node-isolation-panel__rationale" aria-label="V7 outcome rationale">
+        {configRequirements.map((requirement) => (
+          <li key={requirement.id}>{`${requirement.title}: ${requirement.note}`}</li>
+        ))}
         {NODE_ISOLATION_CHECKS.map((check) => (
           <li key={check.id}>{`${check.title}: ${check.note}`}</li>
         ))}
       </ul>
 
-      <h3 className="node-isolation-panel__subheading">How this panel reads the evidence</h3>
+      <Subheading className="node-isolation-panel__subheading">How this panel reads the evidence</Subheading>
       <ul className="node-isolation-panel__notes" aria-label="V7 interpretation notes">
         {INTERPRETATION_NOTES.map((note) => (
           <li key={note}>{note}</li>
@@ -1056,14 +1513,23 @@ function renderSuccess(control: ControlStatus): ReactElement {
 
       {otherObservations.length > 0 ? (
         <>
-          <h3 className="node-isolation-panel__subheading">Other reported observations</h3>
+          <Subheading className="node-isolation-panel__subheading">Other reported observations</Subheading>
           <ul
             className="node-isolation-panel__other-observations"
             aria-label="V7 additional observations"
           >
+            {/*
+              BOTH HALVES ARE SERVER-CHOSEN (M18). This list renders whatever the report
+              carried that nothing above claimed, so it is the one place where an
+              unrecognised label and an unrecognised value are rendered side by side — the
+              broadest echo channel in the panel and the one a credential is most likely to
+              reach. The label is bounded as an identifier and the value as a value.
+            */}
             {otherObservations.map((observation, index) => (
               <li key={`${observation.label}-${String(index)}`}>
-                {`${observation.label}: ${formatObservationValue(observation.value)}`}
+                {`${safeLabel(observation.label)}: ${safeObservationValue(
+                  formatObservationValue(observation.value),
+                )}`}
               </li>
             ))}
           </ul>
@@ -1071,7 +1537,9 @@ function renderSuccess(control: ControlStatus): ReactElement {
       ) : null}
 
       {control.observedAt !== undefined && control.observedAt !== '' ? (
-        <p className="node-isolation-panel__observed-at">{`Evaluated at ${control.observedAt}`}</p>
+        <p className="node-isolation-panel__observed-at">
+          {`Evaluated at ${safeLabel(control.observedAt)}`}
+        </p>
       ) : null}
     </div>
   );
@@ -1122,25 +1590,45 @@ interface NodeIsolationPanelViewProps {
  * ambiguous.
  */
 function NodeIsolationPanelView({ state, onRefresh }: NodeIsolationPanelViewProps): ReactElement {
+  // EMBEDDED-AWARE OWN HEADING (m3), bound once for this component.
+  const rendersOwnHeading = useRendersOwnHeading();
   const headingId = useId();
   const control =
     state.status === 'success' ? selectControlStatus(state.controls, V7_CONTROL_ID) : undefined;
   const reportedRequirementIds = control?.requirementIds;
+  // BOUNDED BEFORE EMPTINESS IS TESTED (M18). A reported identifier is server prose that
+  // reaches the panel HEADER, above every state affordance, so it is the most prominent
+  // echo channel of all. Guarding first and filtering afterwards means a list of
+  // identifiers that all sanitize away falls back to this panel's own literals rather than
+  // rendering "Requirements covered: " over nothing.
+  const guardedRequirementIds = (reportedRequirementIds ?? [])
+    .map((identifier) => safeLabel(identifier))
+    .filter((identifier) => identifier !== '');
   const requirementIds =
-    reportedRequirementIds !== undefined && reportedRequirementIds.length > 0
-      ? reportedRequirementIds
-      : V7_REQUIREMENT_IDS;
+    guardedRequirementIds.length > 0 ? guardedRequirementIds : V7_REQUIREMENT_IDS;
+  // EMBEDDED-AWARE REGION NAME (m3). The region is named by whichever heading exists: this
+  // panel's own when standalone, the dashboard's control heading when embedded. Without this
+  // an embedded panel would point `aria-labelledby` at an id it no longer renders, leaving a
+  // region with no accessible name at all.
+  const panelLabelId = usePanelLabelId(headingId);
 
   return (
     <section
       className="node-isolation-panel"
-      aria-labelledby={headingId}
+      aria-labelledby={panelLabelId}
       aria-busy={state.status === 'loading'}
     >
       <header className="node-isolation-panel__header">
-        <h2 className="node-isolation-panel__heading" id={headingId}>
-          {PANEL_HEADING}
-        </h2>
+        {/*
+          EMBEDDED-AWARE OWN HEADING (m3). See embeddedPanel.tsx: embedded, the dashboard has
+          already named this control, so a second title would duplicate the name and restart
+          the heading run above its own level.
+        */}
+        {rendersOwnHeading ? (
+          <h2 className="node-isolation-panel__heading" id={headingId}>
+            {PANEL_HEADING}
+          </h2>
+        ) : null}
         <p className="node-isolation-panel__requirements">
           {`Requirements covered: ${requirementIds.join(', ')}`}
         </p>

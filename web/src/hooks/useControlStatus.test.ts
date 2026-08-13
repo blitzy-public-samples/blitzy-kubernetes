@@ -646,3 +646,212 @@ describe('the exported helpers', () => {
     expect(found?.controlId).toBe('V8');
   });
 });
+
+describe('the collection list members are validated at every declared type', () => {
+  // WHY THESE CASES. The parser rejects a malformed payload rather than dropping the part it
+  // cannot read, and the reason is the finding this hook was corrected for: a dropped member is
+  // indistinguishable from a member that was never sent, so silently discarding one turns
+  // "the check reported something the UI could not parse" into "the check reported nothing" —
+  // and a control with nothing reported against it must not read as clean. Each case below is a
+  // declared list arriving as something that is not a list, or a member arriving as something
+  // that is not a member.
+
+  it.each([
+    ['an object', { message: 'not a list' }],
+    ['a string', 'not a list'],
+    ['a number', 7],
+    ['a boolean', true],
+  ])('refuses "findings" arriving as %s, naming the type it got', async (_name, findings) => {
+    respondWith([entry('V1', { findings })]);
+
+    const message = await refusedMessage();
+    expect(message).toContain('findings');
+    expect(message).toContain('list');
+  });
+
+  it.each([
+    ['an object', { message: 'not a list' }],
+    ['a string', 'not a list'],
+    ['a number', 7],
+  ])('refuses "warnings" arriving as %s', async (_name, warnings) => {
+    respondWith([entry('V1', { warnings })]);
+
+    const message = await refusedMessage();
+    expect(message).toContain('warnings');
+    expect(message).toContain('list');
+  });
+
+  it('refuses a warning object carrying no string message, rather than dropping it', async () => {
+    // Stated in the parser itself and worth locking: the V2 control turns on a warning being
+    // PRESENT. Under warn=restricted the pod is admitted either way, so only the warning
+    // distinguishes a working Pod Security configuration from a silent one. Dropping an
+    // unreadable warning would therefore manufacture the passing appearance.
+    respondWith([entry('V1', { warnings: [{ detail: 'no message key' }] })]);
+
+    const message = await refusedMessage();
+    expect(message).toContain('warnings[0]');
+    expect(message).toContain('message');
+  });
+
+  it('accepts a warning as either a bare string or an object with a message', async () => {
+    // The two-sided control: both recorded shapes must still be read.
+    respondWith([entry('V1', { warnings: ['a bare string', { message: 'an object message' }] })]);
+
+    const result = await settled();
+    expect(result.status).toBe('success');
+    if (result.status !== 'success') {
+      throw new Error('unreachable: status was asserted to be success');
+    }
+    expect(result.controls[0].warnings).toEqual(['a bare string', 'an object message']);
+  });
+
+  it.each([
+    ['an object', { label: 'not a list' }],
+    ['a string', 'not a list'],
+    ['a number', 7],
+  ])('refuses "observations" arriving as %s', async (_name, observations) => {
+    respondWith([entry('V1', { evidence: { observations } })]);
+
+    const message = await refusedMessage();
+    expect(message).toContain('observations');
+    expect(message).toContain('list');
+  });
+
+  it.each([
+    ['a string', 'not an object'],
+    ['a number', 7],
+    ['null', null],
+    ['a list', []],
+  ])('refuses an observation member arriving as %s', async (_name, member) => {
+    respondWith([entry('V1', { evidence: { observations: [member] } })]);
+
+    const message = await refusedMessage();
+    expect(message).toContain('observations[0]');
+  });
+
+  it('names the type it received without echoing the value', async () => {
+    // These messages are RENDERED by the dashboard, so a diagnostic must describe the shape
+    // rather than quote the payload — which is the parser half of the sensitive-text finding.
+    const secret = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl';
+    respondWith([entry('V1', { findings: secret })]);
+
+    const message = await refusedMessage();
+    expect(message).toContain('string');
+    expect(message).not.toContain(secret);
+  });
+});
+
+describe('the evidence bag degrades to “not reported” rather than to a false value', () => {
+  it.each([
+    ['a string', 'not an object'],
+    ['a number', 7],
+    ['a list', []],
+    ['null', null],
+  ])('treats evidence arriving as %s as no evidence at all', async (_name, evidence) => {
+    // Not an error: evidence is optional, so an unusable bag is an ABSENCE. What matters is
+    // that it becomes `undefined` and never an empty-but-present bag, because a panel reading
+    // an empty bag as "measured nothing" is the false-pass shape.
+    respondWith([entry('V1', { evidence })]);
+
+    const result = await settled();
+    expect(result.status).toBe('success');
+    if (result.status !== 'success') {
+      throw new Error('unreachable: status was asserted to be success');
+    }
+    expect(result.controls[0].evidence).toBeUndefined();
+  });
+
+  it('REFUSES a wrong-typed evidence field rather than degrading it to absent', async () => {
+    // The line between the two behaviours, and it is drawn deliberately. A bag that is not an
+    // object carries no fields to misread, so it is an absence. A bag that IS an object and
+    // names `audiences` as a scalar is a contract violation about a specific measurement — and
+    // V4's control turns on the audience list being exactly ['api'], so reading a scalar as a
+    // one-element list would invent the very value under test. That is refused, loudly.
+    respondWith([entry('V1', { evidence: { audiences: 'api' } })]);
+
+    const message = await refusedMessage();
+    expect(message).toContain('audiences');
+    expect(message).toContain('list');
+  });
+
+  it('degrades a wrong-typed SCALAR field to not-reported, which is the safe answer', async () => {
+    // The asymmetry against the case above is deliberate and worth recording, because it looks
+    // like an inconsistency until the reason is stated. A scalar arriving at the wrong type has
+    // no coercion that could invent a plausible value — `'3600'` simply is not a number the
+    // server reported — so it becomes "not reported", and a panel reading it withholds its
+    // check. A LIST arriving as a scalar is different: wrapping it would fabricate a
+    // one-element list, and for `audiences` that fabricated list is exactly what V4 asserts on.
+    // Absence is safe here; fabrication never is.
+    respondWith([entry('V1', { evidence: { requestedTtlSeconds: '3600' } })]);
+
+    const result = await settled();
+    if (result.status !== 'success') {
+      throw new Error('unreachable: status was asserted to be success');
+    }
+    expect(result.controls[0].evidence?.requestedTtlSeconds).toBeUndefined();
+  });
+
+  it('drops an observedExpiry whose every field is unusable, keeping the rest', async () => {
+    respondWith([
+      entry('V1', {
+        evidence: {
+          observedExpiry: { expirySeconds: 'no', expirationTimestamp: 5, requestTimeSeconds: [] },
+          observations: [{ label: 'kept', value: true }],
+        },
+      }),
+    ]);
+
+    const result = await settled();
+    if (result.status !== 'success') {
+      throw new Error('unreachable: status was asserted to be success');
+    }
+    // The unusable expiry is absent, and the usable observation beside it survives: one bad
+    // field does not discard the measurements reported next to it.
+    expect(result.controls[0].evidence?.observedExpiry).toBeUndefined();
+    expect(result.controls[0].evidence?.observations).toEqual([{ label: 'kept', value: true }]);
+  });
+
+  it('keeps an observedExpiry when even one field is usable', async () => {
+    respondWith([entry('V1', { evidence: { observedExpiry: { expirySeconds: 3600 } } })]);
+
+    const result = await settled();
+    if (result.status !== 'success') {
+      throw new Error('unreachable: status was asserted to be success');
+    }
+    expect(result.controls[0].evidence?.observedExpiry?.expirySeconds).toBe(3600);
+  });
+});
+
+describe('a failure response body is read defensively', () => {
+  it('reports the failure when the body is empty', async () => {
+    // A 500 with no body is still a 500. Failing to parse the body must not mask the status,
+    // which is the whole point of reading it defensively.
+    respondWithText('', 500);
+
+    const result = await settled();
+    expect(result.status).toBe('error');
+    if (result.status !== 'error') {
+      throw new Error('unreachable: status was asserted to be error');
+    }
+    expect(result.error.httpStatus).toBe(500);
+    expect(result.error.kind).toBe('http');
+  });
+
+  it.each([
+    ['a JSON list', '[1,2,3]'],
+    ['a JSON string', '"just a string"'],
+    ['a JSON number', '42'],
+    ['unparseable text', '<html>gateway error</html>'],
+  ])('reports the failure when the body is %s', async (_name, body) => {
+    respondWithText(body, 503);
+
+    const result = await settled();
+    expect(result.status).toBe('error');
+    if (result.status !== 'error') {
+      throw new Error('unreachable: status was asserted to be error');
+    }
+    // The status survives, and no `reason` is invented from a body that carried none.
+    expect(result.error.httpStatus).toBe(503);
+    expect(result.error.message).not.toBe('');
+  });
+});

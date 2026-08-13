@@ -55,6 +55,12 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { V5_OBSERVATIONS } from '../domain/observationIds';
 import {
+  MAX_SAFE_PROSE_INPUT_LENGTH,
+  MAX_SAFE_VALUE_LENGTH,
+  SAFE_OVERSIZED_TEXT,
+  SAFE_REDACTED,
+} from '../domain/safeText';
+import {
   WEBHOOK_ADMISSION_REVIEW_VERSIONS,
   WEBHOOK_FAIL_CLOSED_POLICY,
   WEBHOOK_FAIL_OPEN_POLICY,
@@ -823,5 +829,347 @@ describe('WebhookPosturePanel — the fixture observation builder', () => {
     );
 
     expect(new Set(labels).size).toBe(labels.length);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EXTERNAL TEXT IS BOUNDED AND REDACTED (M18, AAP §0.11.1 "no secrets, ever").
+//
+// THE DEFECT. Every server-authored string this panel rendered went into the document
+// verbatim and unbounded: the summary, the detail, each finding's message, subject and
+// requirement identifier, each warning, each unrecognised observation's label and
+// value, the evaluation timestamp, the reported requirement identifiers, and the error
+// message and reason — the last two into a live `role="alert"` region AND its
+// `aria-label`. A control could therefore place a PEM block, a compact token, a
+// bidirectional override or a megabyte of text into any one of them.
+//
+// A NOTE ON WHERE THE VALUE CHANNEL SAT. The posture table already refused to echo a
+// matched value, but a DIVERGENT value and a wrong-typed list value were rendered
+// through `renderObservationValue`, which returned any non-empty string as it stood.
+// That is now routed through the shared guard as well, and it is display-only: every
+// comparison in `buildRow` is still made against the raw wire value, so no verdict moves.
+//
+// EVERY CASE HERE IS TWO-SIDED. Dangerous text is withheld AND the recorded text
+// survives, because a sanitizer that mangled ordinary prose would push the panel back
+// to inventing its own wording — and an invented message cannot say what went wrong.
+// ---------------------------------------------------------------------------
+
+describe('WebhookPosturePanel — external text is bounded and redacted', () => {
+  /** A JWT-shaped value: three dot-separated runs of at least eight word characters. */
+  const TOKEN_SHAPED = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlLXZhbHVl';
+
+  /** A PEM block marker, which the shared guard treats as credential-shaped whole. */
+  const PEM_SHAPED = '-----BEGIN PRIVATE KEY----- abcd -----END PRIVATE KEY-----';
+
+  it('renders the recorded summary and detail unchanged', () => {
+    // THE CONTROL for every case below. Without it a sanitizer that blanked everything
+    // would satisfy all of them.
+    const { container } = renderWithProviders(<WebhookPosturePanel status={V5_WEBHOOK_PASSING} />);
+
+    expect(container).toHaveTextContent(V5_WEBHOOK_PASSING.summary);
+    if (V5_WEBHOOK_PASSING.detail !== undefined) {
+      expect(container).toHaveTextContent(V5_WEBHOOK_PASSING.detail);
+    }
+  });
+
+  it('renders every recorded finding and warning of the failing payload unchanged', () => {
+    const { container } = renderWithProviders(<WebhookPosturePanel status={V5_WEBHOOK_FAILING} />);
+
+    for (const finding of V5_WEBHOOK_FAILING.findings) {
+      expect.soft(container).toHaveTextContent(finding.message);
+    }
+    for (const warning of V5_WEBHOOK_FAILING.warnings) {
+      expect.soft(container).toHaveTextContent(warning);
+    }
+  });
+
+  it.each([
+    ['the summary', (text: string): ControlStatus => ({ ...V5_WEBHOOK_PASSING, summary: text })],
+    ['the detail', (text: string): ControlStatus => ({ ...V5_WEBHOOK_PASSING, detail: text })],
+    [
+      'a warning',
+      (text: string): ControlStatus => ({ ...V5_WEBHOOK_PASSING, warnings: [text] }),
+    ],
+    [
+      'a finding message',
+      (text: string): ControlStatus => ({
+        ...V5_WEBHOOK_PASSING,
+        findings: [{ message: text, requirementId: 'F-005-RQ-001' }],
+      }),
+    ],
+    [
+      'a finding subject',
+      (text: string): ControlStatus => ({
+        ...V5_WEBHOOK_PASSING,
+        findings: [{ message: 'the committed posture diverged.', subject: text }],
+      }),
+    ],
+    [
+      'a finding requirement identifier',
+      (text: string): ControlStatus => ({
+        ...V5_WEBHOOK_PASSING,
+        findings: [{ message: 'the committed posture diverged.', requirementId: text }],
+      }),
+    ],
+    [
+      'the evaluation timestamp',
+      (text: string): ControlStatus => ({ ...V5_WEBHOOK_PASSING, observedAt: text }),
+    ],
+    [
+      'a reported requirement identifier',
+      (text: string): ControlStatus => ({ ...V5_WEBHOOK_PASSING, requirementIds: [text] }),
+    ],
+    [
+      'an unrecognised observation label',
+      (text: string): ControlStatus =>
+        claimingPass([...ALL_POSTURE_PROVEN, { label: text, value: 1 }]),
+    ],
+    [
+      'an unrecognised observation value',
+      (text: string): ControlStatus =>
+        claimingPass([...ALL_POSTURE_PROVEN, { label: 'probe', value: text }]),
+    ],
+  ])('withholds a token-shaped credential in %s', (_name, build) => {
+    const { container } = renderWithProviders(<WebhookPosturePanel status={build(TOKEN_SHAPED)} />);
+
+    expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+  });
+
+  it('withholds a PEM block wherever it arrives, and keeps the words around it', () => {
+    const status: ControlStatus = {
+      ...V5_WEBHOOK_PASSING,
+      detail: `the caBundle was read as ${PEM_SHAPED} rather than as the placeholder.`,
+      warnings: [`reload reported ${PEM_SHAPED}`],
+    };
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain('BEGIN PRIVATE KEY');
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+    // Only the shape is removed; the explanation that gives it meaning survives.
+    expect(container).toHaveTextContent('rather than as the placeholder');
+    expect(container).toHaveTextContent('reload reported');
+  });
+
+  it('bounds an oversized summary rather than rendering any of it', () => {
+    const status: ControlStatus = {
+      ...V5_WEBHOOK_PASSING,
+      summary: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+    };
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+
+    expect(container).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    expect(container.textContent ?? '').not.toContain('xxxxxxxxxx');
+  });
+
+  it('collapses control characters and bidirectional overrides out of prose', () => {
+    const status: ControlStatus = {
+      ...V5_WEBHOOK_PASSING,
+      summary: 'Fail-closed.\n\u0007\u202EFail-open for nobody.',
+    };
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain('\u0007');
+    expect(text).not.toContain('\u202E');
+    expect(container).toHaveTextContent('Fail-closed. Fail-open for nobody.');
+  });
+
+  it('bounds a divergent observed value without moving the verdict', () => {
+    // The comparison uses the RAW wire value, so an oversized divergent value must still
+    // read as divergent — bounded display, unchanged decision.
+    const oversized = 'y'.repeat(MAX_SAFE_VALUE_LENGTH + 1);
+    const status = claimingPass(replacing(V5_OBSERVATIONS.sideEffects, oversized));
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+
+    expect(container.textContent ?? '').not.toContain('yyyyyyyyyy');
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+    expect(rowOutcome(container, 'sideEffects')).toBe('divergent');
+    expect(renderedVerdict(container)).toBe('fail');
+  });
+
+  it('bounds a credential-shaped divergent value, and still calls it divergent', () => {
+    const status = claimingPass(replacing(V5_OBSERVATIONS.failurePolicy, TOKEN_SHAPED));
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+
+    expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    expect(rowOutcome(container, 'failurePolicy')).toBe('divergent');
+    // A failurePolicy that is neither Fail nor Ignore leaves the posture unconfirmed,
+    // which is the safe direction and is asserted elsewhere; here the point is that the
+    // value never reached the document.
+    expect(container).toHaveTextContent(UNDETERMINED_SENTENCE);
+  });
+
+  it.each([
+    ['a credential-shaped member', `["${TOKEN_SHAPED}"]`, TOKEN_SHAPED],
+    ['an oversized member', `["${'z'.repeat(MAX_SAFE_VALUE_LENGTH + 1)}"]`, 'zzzzzzzzzz'],
+  ])('bounds a DIVERGENT list carrying %s', (_name, reported, forbidden) => {
+    // The narrowest gap of the set, and the one a per-field audit misses: a list value
+    // that PARSES as a JSON list of strings is not wrong-typed, so it reaches the
+    // divergent branch and is rendered through `JSON.stringify` of arbitrary wire data.
+    const status = claimingPass(replacing(V5_OBSERVATIONS.admissionReviewVersions, reported));
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+
+    expect(container.textContent ?? '').not.toContain(forbidden);
+    expect(rowOutcome(container, 'admissionReviewVersions')).toBe('divergent');
+    expect(renderedVerdict(container)).toBe('fail');
+  });
+
+  it('keeps a divergent list that is safe to show, brackets and quoting intact', () => {
+    // The two-sided half: bounding must not mangle an ordinary divergent list, or the
+    // reader loses the one thing the cell exists to say.
+    const status = claimingPass(
+      replacing(V5_OBSERVATIONS.admissionReviewVersions, '["v1","v1beta1"]'),
+    );
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+
+    expect(container).toHaveTextContent('["v1","v1beta1"]');
+    expect(rowOutcome(container, 'admissionReviewVersions')).toBe('divergent');
+  });
+
+  it('bounds a credential-shaped value reported for the LIST field', () => {
+    // A scalar reported for a list-valued field is the wrong type, and the reason text
+    // quotes what arrived — which is the third place a raw value reached the document.
+    const status = claimingPass(
+      replacing(V5_OBSERVATIONS.admissionReviewVersions, TOKEN_SHAPED),
+    );
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+
+    expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    expect(rowOutcome(container, 'admissionReviewVersions')).toBe('wrong-type');
+    expect(container).toHaveTextContent('not a JSON list of');
+  });
+
+  it.each([
+    ['a 403', CONTROL_STATUS_ERRORS.forbidden],
+    ['a 500', CONTROL_STATUS_ERRORS.serverError],
+  ])('withholds a credential in %s error message and reason, and renders no verdict', (
+    _name,
+    error,
+  ) => {
+    const { container } = renderWithProviders(
+      <WebhookPosturePanel
+        result={{
+          status: 'error',
+          error: { ...error, message: `refused: ${TOKEN_SHAPED}`, reason: `reason ${PEM_SHAPED}` },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    expect(container.textContent ?? '').not.toContain('BEGIN PRIVATE KEY');
+    expect(alert).toHaveTextContent('did not complete, so no verdict is shown');
+    // The accessible name is the same guarded sentence, so the credential cannot reach
+    // the document through the label either.
+    expect(alert.getAttribute('aria-label') ?? '').not.toContain(TOKEN_SHAPED);
+    expect(renderedVerdict(container)).toBeNull();
+  });
+
+  it('names the failure kind and HTTP status, which are closed sets rather than prose', () => {
+    const { container } = renderWithProviders(
+      <WebhookPosturePanel
+        result={{ status: 'error', error: CONTROL_STATUS_ERRORS.forbidden, refresh: vi.fn() }}
+      />,
+    );
+
+    // Deliberately unguarded: `kind` is a typed union of this repository's own literals
+    // and `httpStatus` is a number, so neither is external text.
+    expect(container).toHaveTextContent(`failure kind ${CONTROL_STATUS_ERRORS.forbidden.kind}`);
+    expect(container).toHaveTextContent('HTTP status 403');
+  });
+
+  it('says a wholly credential-shaped message was withheld, not that none arrived', () => {
+    const { container } = renderWithProviders(
+      <WebhookPosturePanel
+        result={{
+          status: 'error',
+          error: { ...CONTROL_STATUS_ERRORS.serverError, message: TOKEN_SHAPED, reason: undefined },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    // The credential is REPLACED rather than deleted, so the sentence reads
+    // `... no verdict is shown: [redacted]`. That is the honest wording: a message did
+    // arrive and was withheld, which is a different fact from none arriving — and the
+    // local substitution below is reserved for the second case.
+    expect(container).toHaveTextContent(`no verdict is shown: ${SAFE_REDACTED}`);
+    expect(container).not.toHaveTextContent('no readable explanation');
+    expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+  });
+
+  it.each([
+    ['an empty message', ''],
+    ['a whitespace-only message', '   \t  '],
+    ['a message of nothing but control characters', '\u0007\u0000\u202E'],
+  ])('substitutes local wording for %s', (_name, message) => {
+    const { container } = renderWithProviders(
+      <WebhookPosturePanel
+        result={{
+          status: 'error',
+          error: { ...CONTROL_STATUS_ERRORS.serverError, message, reason: undefined },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+
+    // Nothing renderable survived, so the sentence must not simply stop after its colon.
+    expect(container).toHaveTextContent('no readable explanation');
+    expect(screen.getByRole('alert')).toHaveTextContent('did not complete');
+  });
+
+  it('renders no empty paragraph for a summary that was entirely unrenderable', () => {
+    const status: ControlStatus = { ...V5_WEBHOOK_PASSING, summary: '\u0007\u0007' };
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+
+    // Sanitize once, then decide: the emptiness test runs on the RESULT, so a field whose
+    // whole content was unrenderable contributes no element at all.
+    expect([...container.querySelectorAll('p')].some((node) => node.textContent === '')).toBe(
+      false,
+    );
+  });
+
+  it('collapses two reported identifiers that redact to the same placeholder', () => {
+    const status: ControlStatus = {
+      ...V5_WEBHOOK_PASSING,
+      requirementIds: [TOKEN_SHAPED, `${TOKEN_SHAPED}.extra`],
+    };
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain(TOKEN_SHAPED);
+    // De-duplication happens on the guarded strings, so the list reads `[redacted]` once
+    // rather than `[redacted], [redacted]`.
+    expect(text).not.toContain(`${SAFE_REDACTED}, ${SAFE_REDACTED}`);
+    expect(container).toHaveTextContent('F-005-RQ-001');
+  });
+
+  it('still renders null and numeric observation values, which cannot be credentials', () => {
+    const status = claimingPass([
+      ...ALL_POSTURE_PROVEN,
+      { label: 'reload attempts', value: 3 },
+      { label: 'previous policy', value: null },
+    ]);
+    const { container } = renderWithProviders(<WebhookPosturePanel status={status} />);
+
+    expect(container).toHaveTextContent('reload attempts');
+    expect(container).toHaveTextContent('3');
+    expect(container).toHaveTextContent('null');
+  });
+
+  it('leaves every committed literal in the required column untouched', () => {
+    // The required column is built from local constants, so nothing in it is guarded and
+    // nothing in it may be lost. A sanitizer reaching the wrong column would blank the
+    // very values the panel exists to state.
+    const { container } = renderWithProviders(<WebhookPosturePanel status={V5_WEBHOOK_PASSING} />);
+
+    expect(container).toHaveTextContent(WEBHOOK_FAIL_CLOSED_POLICY);
+    expect(container).toHaveTextContent(WEBHOOK_SIDE_EFFECTS);
+    expect(container).toHaveTextContent(WEBHOOK_NAME);
+    expect(container).toHaveTextContent(String(WEBHOOK_TIMEOUT_SECONDS));
+    expect(container).toHaveTextContent(JSON.stringify(WEBHOOK_ADMISSION_REVIEW_VERSIONS));
   });
 });

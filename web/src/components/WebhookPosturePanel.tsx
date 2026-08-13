@@ -78,6 +78,7 @@ import {
   type EffectiveVerdict,
 } from '../domain/evidence';
 import { V5_OBSERVATIONS } from '../domain/observationIds';
+import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
 import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
 import {
   WEBHOOK_ADMISSION_REVIEW_VERSIONS,
@@ -97,6 +98,12 @@ import {
   type ControlVerdict,
   type UseControlStatusResult,
 } from '../hooks/useControlStatus';
+import {
+  useLiveRegionRole,
+  usePanelLabelId,
+  usePanelSubheading,
+  useRendersOwnHeading,
+} from './embeddedPanel';
 
 /**
  * The control this panel reports on: V5, admission-webhook fail-closed posture.
@@ -511,7 +518,7 @@ interface WebhookPostureModel {
 }
 
 /**
- * Renders an observed value for display, verbatim.
+ * Renders an observed value for display, BOUNDED.
  *
  * `null` is rendered as the token `null` on purpose. It is a MEASURED value —
  * the hook documents it as representable rather than missing — so eliding it
@@ -521,15 +528,29 @@ interface WebhookPostureModel {
  *
  * Nothing here rounds, rescales, reformats or re-parses. A number is stringified
  * and a boolean is stringified; neither is reinterpreted.
+ *
+ * WHAT CHANGED, AND WHY. A non-empty string used to be returned VERBATIM, with no
+ * length bound and no shape guard, and it reaches the document in three places: the
+ * observed cell of a divergent posture row, the reason text of a wrong-typed list
+ * field, and the value of an unrecognised observation. A control reporting an
+ * 8 KB `failurePolicy`, a value carrying a bidirectional override, or a value
+ * carrying a PEM block or a compact token therefore put all of it on screen. The
+ * value is now routed through the shared {@link safeObservationValue}, which
+ * flattens control characters, redacts a credential shape whole rather than
+ * truncating it, and bounds the length. DISPLAY ONLY: every comparison in
+ * {@link buildRow} is made against the raw `text.value`, so no verdict moves.
  */
 function renderObservationValue(value: string | number | boolean | null): string {
   if (value === null) {
     return 'null';
   }
-  if (typeof value === 'string') {
-    return value.length === 0 ? '""' : value;
+  if (typeof value !== 'string') {
+    return String(value);
   }
-  return String(value);
+  // The panel's own punctuation for a genuinely empty string is kept ahead of the
+  // shared guard, because `""` says "reported, and empty" in the table's own idiom
+  // and the surrounding cells are quoted literals.
+  return value.length === 0 ? '""' : safeObservationValue(value);
 }
 
 /**
@@ -653,9 +674,14 @@ function buildRow(
       };
     }
     const required = field.required as readonly string[];
+    // The MATCH case stringifies a list already proven equal to the local required
+    // list, so what it renders is a local literal. The DIVERGENT case stringifies
+    // arbitrary wire data, so the rendered form is bounded — a list is one display
+    // string here, and guarding the whole rendering rather than each member keeps the
+    // brackets and quoting intact instead of producing a half-redacted array literal.
     return sameMembers(members, required)
       ? { field, outcome: 'match', observed: JSON.stringify(members) }
-      : { field, outcome: 'divergent', observed: JSON.stringify(members) };
+      : { field, outcome: 'divergent', observed: safeObservationValue(JSON.stringify(members)) };
   }
 
   return text.value === field.required
@@ -1024,6 +1050,16 @@ const EMPTY_MESSAGE =
 /** Substituted for a finding the check reported without a readable message. */
 const UNDESCRIBED_FINDING = 'The check reported a finding without a readable message.';
 
+/**
+ * Rendered in place of a failure message that arrived empty, or that sanitized away
+ * to nothing because all of it was credential-shaped or unrenderable.
+ *
+ * Local wording rather than an empty tail after the colon: a sentence that stops at
+ * its punctuation reads as a rendering bug, and the reader still needs to be told
+ * that the check did not complete.
+ */
+const UNDESCRIBED_FAILURE = 'the server supplied no readable explanation.';
+
 /** Rendered in the observed column when a required value was matched. */
 const MATCH_NOTE = 'Matches the required value.';
 
@@ -1081,14 +1117,18 @@ const PASS_WITHHELD_EXPLANATION =
 /**
  * The in-flight affordance.
  *
- * `role="status"` makes it a polite live region, and the `aria-label` repeats its
+ * `role={liveStatusRole}` makes it a polite live region, and the `aria-label` repeats its
  * text because `status` takes its accessible name from the author rather than
  * from its content — without the label the affordance would be reachable by role
  * but not by name.
  */
 function LoadingNotice(): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
-    <p role="status" aria-label={LOADING_MESSAGE}>
+    <p role={liveStatusRole} aria-label={LOADING_MESSAGE}>
       {LOADING_MESSAGE}
     </p>
   );
@@ -1096,8 +1136,12 @@ function LoadingNotice(): ReactElement {
 
 /** The empty affordance: the check completed and reported nothing to render. */
 function EmptyNotice(): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
-    <p role="status" aria-label={EMPTY_MESSAGE}>
+    <p role={liveStatusRole} aria-label={EMPTY_MESSAGE}>
       {EMPTY_MESSAGE}
     </p>
   );
@@ -1107,14 +1151,32 @@ function EmptyNotice(): ReactElement {
  * Describes a failed check in one sentence, including the HTTP status verbatim so
  * that a 403 and a 500 are told apart by a reader rather than merged into a
  * generic failure.
+ *
+ * THE SENTENCE IS LOCALLY AUTHORED and the two externally supplied parts are the
+ * only ones that come from the wire. `message` and `reason` are prose the server
+ * wrote, so both pass through {@link safeProse} — an error body is the one channel a
+ * failing backend controls completely, and it used to be interpolated verbatim into
+ * a live `role={liveAlertRole}` region and its `aria-label`. `httpStatus` is a number and
+ * `kind` is a typed union of this repository's own literals, so neither is external
+ * text and neither is sanitized; guarding them would only obscure that they are
+ * already closed sets.
+ *
+ * A message that sanitizes away to nothing is replaced by local wording rather than
+ * leaving the sentence dangling after its colon.
  */
 function describeError(error: ControlStatusError): string {
-  const parts = [`The posture check did not complete, so no verdict is shown: ${error.message}`];
+  const message = safeProse(error.message);
+  const parts = [
+    `The posture check did not complete, so no verdict is shown: ${
+      message.length > 0 ? message : UNDESCRIBED_FAILURE
+    }`,
+  ];
   if (error.httpStatus !== undefined) {
     parts.push(`HTTP status ${error.httpStatus}`);
   }
-  if (hasText(error.reason)) {
-    parts.push(`reason ${error.reason}`);
+  const reason = safeProse(error.reason);
+  if (reason.length > 0) {
+    parts.push(`reason ${reason}`);
   }
   parts.push(`failure kind ${error.kind}`);
   return `${parts.join(' — ')}.`;
@@ -1123,7 +1185,7 @@ function describeError(error: ControlStatusError): string {
 /**
  * The error affordance.
  *
- * `role="alert"` because a check that did not complete is an assertive
+ * `role={liveAlertRole}` because a check that did not complete is an assertive
  * announcement, and — like `status` — it is named by its `aria-label`. Invariant
  * locked: this renders INSTEAD of a verdict, never alongside one. A 403 or a 500
  * cannot be rendered as a pass, because the state that carries an error carries
@@ -1132,9 +1194,11 @@ function describeError(error: ControlStatusError): string {
  * rendered, not an exception to be caught.
  */
 function ErrorNotice({ error }: { readonly error: ControlStatusError }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
   const sentence = describeError(error);
   return (
-    <p role="alert" aria-label={sentence}>
+    <p role={liveAlertRole} aria-label={sentence}>
       {sentence}
     </p>
   );
@@ -1154,10 +1218,14 @@ function VerdictNotice({
   readonly status: ControlStatus;
   readonly model: WebhookPostureModel;
 }): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   const verdict = resolveVerdict(status, model);
   const sentence = verdictSentence(verdict, status, model);
   return (
-    <p role="status" aria-label={sentence} data-verdict={verdict}>
+    <p role={liveStatusRole} aria-label={sentence} data-verdict={verdict}>
       {sentence}
     </p>
   );
@@ -1204,6 +1272,10 @@ function PassWithheldNotice({
   readonly status: ControlStatus;
   readonly model: WebhookPostureModel;
 }): ReactElement | null {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const headingId = useId();
   if (status.verdict !== 'pass' || model.evidence === 'pass') {
     return null;
@@ -1214,7 +1286,7 @@ function PassWithheldNotice({
     'one shown.';
   return (
     <section aria-labelledby={headingId} data-region="pass-withheld">
-      <h3 id={headingId}>Why a pass is withheld</h3>
+      <Subheading id={headingId}>Why a pass is withheld</Subheading>
       <p>{sentence}</p>
       {model.unprovenPostureRows.length === 0 ? null : (
         <dl>
@@ -1238,10 +1310,17 @@ function PassWithheldNotice({
  *
  * Only the repository's own identifiers appear. No external benchmark or
  * hardening-guide number is asserted, because the repository enumerates none.
+ *
+ * The panel's own identifier is a local constant; the reported ones are external, so
+ * each is bounded as a label. De-duplication happens on the GUARDED strings, so two
+ * reported identifiers that both redact to the same placeholder collapse into one
+ * entry instead of rendering `[redacted], [redacted]`.
  */
 function RequirementList({ status }: { readonly status: ControlStatus | undefined }): ReactElement {
   const reported = status?.requirementIds ?? [];
-  const identifiers = Array.from(new Set([WEBHOOK_POSTURE_REQUIREMENT_ID, ...reported]));
+  const identifiers = Array.from(
+    new Set([WEBHOOK_POSTURE_REQUIREMENT_ID, ...reported.map((identifier) => safeLabel(identifier))]),
+  );
   return (
     <p>
       Requirements covered:{' '}
@@ -1363,6 +1442,23 @@ function PostureTable({
  * empty "Findings" heading and a control with three findings shows all three —
  * the list is never truncated to the first, because the Go oracle this tier
  * mirrors reports every offender in one run (AAP §0.4.1.2).
+ *
+ * EVERY STRING IN THIS COMPONENT COMES FROM THE WIRE, and that is why it is where
+ * the sanitizing happens. The summary, the detail, each finding's message, subject
+ * and requirement identifier, each warning, each unrecognised observation's label
+ * and value, and the evaluation timestamp are all server-authored, and all of them
+ * used to be interpolated verbatim and unbounded — a control could put a PEM block,
+ * a compact token, a bidirectional override or a megabyte of text into any of them.
+ * Prose goes through {@link safeProse}, which keeps a legible explanation legible
+ * while redacting a credential shape whole and bounding the length; identifiers and
+ * labels go through {@link safeLabel}, which is bounded harder and redacts an
+ * identifier-shaped-like-a-token entirely, because there is nothing in such an
+ * identifier worth showing.
+ *
+ * SANITIZE ONCE, THEN DECIDE. Each value is sanitized into a local and the emptiness
+ * test is applied to the RESULT, so a field whose entire content was unrenderable
+ * renders no heading and no empty paragraph rather than an empty element that reads
+ * as a rendering fault.
  */
 function EvidenceSections({
   status,
@@ -1371,19 +1467,29 @@ function EvidenceSections({
   readonly status: ControlStatus;
   readonly model: WebhookPostureModel;
 }): ReactElement {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const findingsHeadingId = useId();
   const warningsHeadingId = useId();
   const observationsHeadingId = useId();
 
   const findings = status.findings ?? [];
   const warnings = status.warnings ?? [];
-  const observedAt = status.observedAt;
   const configurationCount = model.committedConfigurationCount;
+
+  const summary = safeProse(status.summary);
+  const detail = safeProse(status.detail);
+  // Bounded as a LABEL rather than as prose: an evaluation instant is an identifier,
+  // and it is placed in the `datetime` attribute as well as in the text, so the two
+  // must be the same guarded string or they could disagree about what was rendered.
+  const observedAt = hasText(status.observedAt) ? safeLabel(status.observedAt) : '';
 
   return (
     <>
-      {hasText(status.summary) ? <p>{status.summary}</p> : null}
-      {hasText(status.detail) ? <p>{status.detail}</p> : null}
+      {summary.length > 0 ? <p>{summary}</p> : null}
+      {detail.length > 0 ? <p>{detail}</p> : null}
 
       {configurationCount === undefined ? null : (
         <p>
@@ -1397,31 +1503,39 @@ function EvidenceSections({
 
       {findings.length > 0 ? (
         <>
-          <h3 id={findingsHeadingId}>Findings</h3>
+          <Subheading id={findingsHeadingId}>Findings</Subheading>
           <ul aria-labelledby={findingsHeadingId}>
-            {findings.map((finding, index) => (
-              <li key={`${index}-${finding.subject ?? finding.message}`}>
-                <p>{hasText(finding.message) ? finding.message : UNDESCRIBED_FINDING}</p>
-                {hasText(finding.subject) ? (
-                  <p>
-                    Reported object: <code>{finding.subject}</code>
-                  </p>
-                ) : null}
-                {hasText(finding.requirementId) ? (
-                  <p>Attributed to requirement {finding.requirementId}.</p>
-                ) : null}
-              </li>
-            ))}
+            {findings.map((finding, index) => {
+              const message = safeProse(finding.message);
+              const subject = safeLabel(finding.subject);
+              const requirementId = safeLabel(finding.requirementId);
+              return (
+                // The key is deliberately index-first and uses the RAW subject: a key
+                // is never placed in the document, so guarding it would buy nothing
+                // and would risk collapsing two distinct findings onto one key.
+                <li key={`${index}-${finding.subject ?? finding.message}`}>
+                  <p>{message.length > 0 ? message : UNDESCRIBED_FINDING}</p>
+                  {hasText(finding.subject) ? (
+                    <p>
+                      Reported object: <code>{subject}</code>
+                    </p>
+                  ) : null}
+                  {hasText(finding.requirementId) ? (
+                    <p>Attributed to requirement {requirementId}.</p>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </>
       ) : null}
 
       {warnings.length > 0 ? (
         <>
-          <h3 id={warningsHeadingId}>Warnings</h3>
+          <Subheading id={warningsHeadingId}>Warnings</Subheading>
           <ul aria-labelledby={warningsHeadingId}>
             {warnings.map((warning, index) => (
-              <li key={`${index}-${warning}`}>{warning}</li>
+              <li key={`${index}-${warning}`}>{safeProse(warning)}</li>
             ))}
           </ul>
         </>
@@ -1429,11 +1543,19 @@ function EvidenceSections({
 
       {model.unrecognisedObservations.length > 0 ? (
         <>
-          <h3 id={observationsHeadingId}>Other reported observations</h3>
+          <Subheading id={observationsHeadingId}>Other reported observations</Subheading>
           <dl aria-labelledby={observationsHeadingId}>
             {model.unrecognisedObservations.map((observation, index) => (
               <div key={`${index}-${observation.label}`}>
-                <dt>{observation.label}</dt>
+                {/*
+                  BOTH halves are guarded, and they are guarded differently. An
+                  unrecognised observation is the widest channel this panel renders:
+                  the label is arbitrary text this panel has no row for, and the value
+                  is whatever the control chose to attach to it. Neither can be
+                  checked against a local expectation, so both are bounded on shape
+                  alone.
+                */}
+                <dt>{safeLabel(observation.label)}</dt>
                 <dd>
                   <code>{renderObservationValue(observation.value)}</code>
                 </dd>
@@ -1443,7 +1565,7 @@ function EvidenceSections({
         </>
       ) : null}
 
-      {hasText(observedAt) ? (
+      {observedAt.length > 0 ? (
         <p>
           Evaluated at <time dateTime={observedAt}>{observedAt}</time>.
         </p>
@@ -1484,13 +1606,27 @@ function WebhookPosturePanelView({
    */
   readonly onRefresh: (() => void) | undefined;
 }): ReactElement {
+  // EMBEDDED-AWARE OWN HEADING (m3), bound once for this component.
+  const rendersOwnHeading = useRendersOwnHeading();
   const headingId = useId();
+  // EMBEDDED-AWARE REGION NAME (m3). The region is named by whichever heading exists: this
+  // panel's own when standalone, the dashboard's control heading when embedded. Without this
+  // an embedded panel would point `aria-labelledby` at an id it no longer renders, leaving a
+  // region with no accessible name at all.
+  const panelLabelId = usePanelLabelId(headingId);
   const status = state.phase === 'resolved' ? state.status : undefined;
   const model = useMemo(() => buildPostureModel(status), [status]);
 
   return (
-    <section aria-labelledby={headingId} aria-busy={state.phase === 'loading'}>
-      <h2 id={headingId}>{PANEL_HEADING}</h2>
+    <section aria-labelledby={panelLabelId} aria-busy={state.phase === 'loading'}>
+      {/*
+        EMBEDDED-AWARE OWN HEADING (m3). Standalone, this heading names the panel's region and
+        is the only title on screen. Embedded, the dashboard has already written an `h3` naming
+        this control, so rendering a second title here both DUPLICATED the name and restarted
+        the heading run at a shallower level than the one above it. The region keeps a name
+        either way: `aria-labelledby` points at whichever heading exists.
+      */}
+      {rendersOwnHeading ? <h2 id={headingId}>{PANEL_HEADING}</h2> : null}
 
       <p>
         Committed artifact: <code>{WEBHOOK_CONFIGURATION_SOURCE_PATH}</code>, an{' '}

@@ -104,8 +104,13 @@ import {
   type EffectiveVerdict,
 } from '../domain/evidence';
 import { V6_OBSERVATIONS, v6ResourceLevelObservation } from '../domain/observationIds';
+import { safeLabel, safeObservationValue, safeProse } from '../domain/safeText';
 import type { AuditEvent, AuditLevel } from '../hooks/useAuditEvents';
-import { AUDIT_LEVEL_ORDER } from '../hooks/useAuditEvents';
+import {
+  AUDIT_LEVEL_ORDER,
+  isConfidentialAuditIdentity,
+  resolveAuditResourceIdentity,
+} from '../hooks/useAuditEvents';
 import type {
   ControlId,
   ControlObservation,
@@ -116,6 +121,12 @@ import type {
 } from '../hooks/useControlStatus';
 import { selectControlStatus, useControlStatus } from '../hooks/useControlStatus';
 import { REFRESH_UNAVAILABLE_TITLE, resolveRefreshHandler } from './refreshContract';
+import {
+  useLiveRegionRole,
+  usePanelLabelId,
+  usePanelSubheading,
+  useRendersOwnHeading,
+} from './embeddedPanel';
 
 /**
  * The control this panel reports on.
@@ -239,6 +250,21 @@ export interface AuditLevelExpectation {
    * the table cites its own evidence and can be re-verified by reading it.
    */
   readonly measuredIn: string;
+  /**
+   * The observation identity under which THIS CHECK reports the level it observed, when
+   * one exists.
+   *
+   * M6 — THIS IS WHAT SEPARATES EXPECTED FROM OBSERVED. Every row's `level` is
+   * transcribed from an oracle: it is what the policy is REQUIRED to assign, and it is
+   * true of the repository whether or not any check ran. The table nevertheless carried a
+   * column headed "Audit level" and a caption reading "Measured per-resource audit
+   * levels", so a reader saw nineteen rows of static expectations presented as nineteen
+   * measurements. Rows that the integration check actually reports carry an identity here
+   * and render the observed value beside the required one; rows measured only by the shell
+   * generator carry none and say so, rather than borrowing the credibility of the ones
+   * that were measured.
+   */
+  readonly observedIdentity?: string;
 }
 
 /**
@@ -304,6 +330,7 @@ const AUDIT_LEVEL_EXPECTATIONS: readonly AuditLevelExpectation[] = Object.freeze
     principals: Object.freeze(['system:apiserver']),
     level: 'Request',
     measuredIn: `${AUDIT_ORACLE} L812-851`,
+    observedIdentity: v6ResourceLevelObservation('', [SECRETS_RESOURCE], 'secret-audit-request'),
   },
   {
     id: 'serviceaccount-token-create',
@@ -434,6 +461,13 @@ const AUDIT_LEVEL_EXPECTATIONS: readonly AuditLevelExpectation[] = Object.freeze
     principals: Object.freeze(['system:apiserver']),
     level: 'RequestResponse',
     measuredIn: `${AUDIT_ORACLE} L859-948`,
+    // `roles` and `rolebindings` share ONE observation, because the policy rule names
+    // both together and the check reports the rule rather than the resource.
+    observedIdentity: v6ResourceLevelObservation(
+      'rbac.authorization.k8s.io',
+      ['roles', 'rolebindings'],
+      'rbac-audit-response',
+    ),
   },
   {
     id: 'rolebindings-write',
@@ -444,6 +478,11 @@ const AUDIT_LEVEL_EXPECTATIONS: readonly AuditLevelExpectation[] = Object.freeze
     principals: Object.freeze(['system:apiserver']),
     level: 'RequestResponse',
     measuredIn: `${AUDIT_ORACLE} L859-948`,
+    observedIdentity: v6ResourceLevelObservation(
+      'rbac.authorization.k8s.io',
+      ['roles', 'rolebindings'],
+      'rbac-audit-response',
+    ),
   },
 ]);
 
@@ -565,6 +604,27 @@ const SECRETS_RESPONSE_BODY_FINDING =
 const NO_FINDINGS: readonly string[] = Object.freeze([]);
 
 /**
+ * Raised when an event's resource identity cannot be established (C1).
+ *
+ * A finding rather than a silent fail-closed, because an unidentifiable event is a defect
+ * in the audit report and the reader needs to know the checks below it were applied on an
+ * assumption. The hook's own reason is appended, so the sentence names WHICH of the
+ * unreadable shapes arrived rather than merely that one did.
+ */
+const UNCERTAIN_IDENTITY_FINDING =
+  'The event\u2019s resource identity could not be established, so it is treated as a ' +
+  'Secret event and every confidentiality check below was applied to it:';
+
+/**
+ * Rendered in the target column of an event whose identity cannot be established (C1).
+ *
+ * A phrase rather than whichever half of the identity happened to be readable. Showing
+ * `configmaps` for an event whose `requestURI` said `secrets` would make the row look
+ * ordinary beside a finding raised precisely because the two disagreed.
+ */
+const UNCERTAIN_TARGET_TEXT = 'target could not be established';
+
+/**
  * Every audit-fidelity finding raised by one observed event, in report order.
  *
  * Invariant locked: findings ACCUMULATE. The Go guard uses `t.Errorf`, which
@@ -581,10 +641,35 @@ const NO_FINDINGS: readonly string[] = Object.freeze([]);
  * @returns the findings, or an empty list when the event is compliant.
  */
 function auditEventFindings(event: AuditEvent): readonly string[] {
-  if (event.objectRef?.resource !== SECRETS_RESOURCE) {
+  // C1 — THE IDENTITY IS RESOLVED, NOT READ OFF `objectRef.resource`.
+  //
+  // The early return used to be `event.objectRef?.resource !== SECRETS_RESOURCE`, an
+  // expression with two outcomes where three are needed. "This is not a Secret" and "I
+  // cannot tell what this is" both took the return, so every one of these skipped every
+  // check and reported no finding:
+  //
+  //   * `objectRef: { name: 's' }` — referenced something, unreadably.
+  //   * `objectRef: 'secrets'` — not an object at all.
+  //   * `objectRef` absent while `requestURI` is a Secret path — identity knowable from
+  //     the other field, and it says Secret.
+  //   * `requestURI` naming secrets while `objectRef.resource` says configmaps — two
+  //     statements that disagree, so neither can be believed.
+  //
+  // `isConfidentialAuditIdentity` returns `true` for a resolved `secrets` identity AND for
+  // every uncertain one, so all four are now checked. The shared model is imported rather
+  // than restated: two copies of a confidentiality rule is one copy too many.
+  const identity = resolveAuditResourceIdentity(event);
+  if (!isConfidentialAuditIdentity(identity)) {
     return NO_FINDINGS;
   }
   const findings: string[] = [];
+  if (identity.kind === 'uncertain') {
+    // Reported in its own right, not merely used as a reason to keep checking. An event
+    // whose identity cannot be established is a defect in the audit report itself, and the
+    // reader needs to know that the checks below were applied on a fail-closed assumption
+    // rather than to a confirmed Secret event.
+    findings.push(`${UNCERTAIN_IDENTITY_FINDING} ${identity.reason}.`);
+  }
   if (event.responseObject !== undefined) {
     findings.push(SECRETS_RESPONSE_BODY_FINDING);
   }
@@ -613,6 +698,76 @@ const SECRETS_LEVEL_ROW_IDENTITY = v6ResourceLevelObservation(
   [SECRETS_RESOURCE],
   'secret-audit-request',
 );
+
+/**
+ * One per-resource level row whose value is a boundary condition of AAP §0.10.2.
+ *
+ * M6 — WHY A LIST AND NOT ONE ROW. The panel used to require the aggregate `secrets`
+ * level and, conditionally, the single `secrets` policy row. Every other measured row —
+ * the issued-token level, the metadata level, the RBAC forensic level — was rendered and
+ * then ignored by the verdict, so a payload could report `serviceaccounts/token` at
+ * `RequestResponse`, which writes issued credentials into the audit log, and still pass
+ * on the strength of its `secrets` row alone.
+ *
+ * The four below are exactly the rows this control MEASURES that §0.10.2 pins:
+ *
+ *   * `secrets` at `Request` — the response object is omitted, which is the control.
+ *   * `serviceaccounts/token` at `Request` — same reasoning for an issued credential.
+ *   * `configmaps` at `Metadata` in the namespace the policy scopes to that level. The
+ *     same resource legitimately sits at three other levels in three other namespaces,
+ *     which is the policy proving its selection is namespace-scoped, so the row is
+ *     required BY NAMESPACE and not by resource name.
+ *   * `roles` and `rolebindings` at `RequestResponse` — held UP deliberately for
+ *     forensics. Requiring it is what stops a blanket-downgrade passing.
+ *
+ * §0.10.2 also pins `tokenreviews` at `Metadata` and `clusterroles` at
+ * `RequestResponse`. Neither is measured by THIS control — both belong to the shell-tier
+ * generator matrix (`python/tests/unit/shell/test_audit_policy.py`) — so requiring them
+ * here would make a pass unreachable rather than stricter, which is a different defect
+ * and not a fix.
+ */
+interface RequiredLevelRow {
+  /** The observation identity, built through the shared builder. */
+  readonly identity: string;
+  /** The level the row must report, exactly. */
+  readonly level: AuditLevel;
+  /** Why the level is load-bearing, for the rendered detail. */
+  readonly because: string;
+}
+
+/** The four control-defining per-resource level rows. */
+const REQUIRED_LEVEL_ROWS: readonly RequiredLevelRow[] = Object.freeze([
+  {
+    identity: SECRETS_LEVEL_ROW_IDENTITY,
+    level: SECRETS_REQUIRED_LEVEL,
+    because: 'at this level the response object is omitted, so a Secret body is never logged',
+  },
+  {
+    identity: v6ResourceLevelObservation('', ['serviceaccounts/token'], 'create-audit-request'),
+    level: 'Request',
+    because:
+      'an issued token appears only in the response, so a higher level would write the ' +
+      'credential itself into the audit log',
+  },
+  {
+    identity: v6ResourceLevelObservation('', ['configmaps'], 'webhook-audit-metadata'),
+    level: 'Metadata',
+    because:
+      'this is the namespace the policy scopes to Metadata; the same resource sits at ' +
+      'other levels in other namespaces by design',
+  },
+  {
+    identity: v6ResourceLevelObservation(
+      'rbac.authorization.k8s.io',
+      ['roles', 'rolebindings'],
+      'rbac-audit-response',
+    ),
+    level: 'RequestResponse',
+    because:
+      'RBAC objects are held UP at the most verbose level for forensics, so a downgrade ' +
+      'here is a loss of evidence rather than a tightening',
+  },
+]);
 
 /** The level order as the payload must report it: the canonical relation, verbatim. */
 const REQUIRED_LEVEL_ORDERING = AUDIT_LEVEL_ORDER.join(' < ');
@@ -755,23 +910,195 @@ function requireLevelOrdering(observations: readonly ControlObservation[]): Audi
 }
 
 /**
+ * Requires that at least one audit event was scanned.
+ *
+ * NOW REQUIRED OUTRIGHT rather than conditional on being reported (M6). Its absence used
+ * to be treated as "normal rather than suspicious", but the completeness measurement below
+ * needs it as a denominator: without an observed count there is no way to check that the
+ * observed stream is a superset of the expected set, and "the levels are right" said over
+ * a log nobody confirmed had any events in it is a policy document rather than a
+ * measurement.
+ *
+ * Zero is `indeterminate` and never `violated`: an empty audit log is an unverified
+ * control, not a broken one.
+ */
+function requireEventsObserved(
+  observations: readonly ControlObservation[],
+): AuditMeasurement {
+  const identity = V6_OBSERVATIONS.auditEventsObserved;
+  const title = 'at least one audit event was scanned';
+  const count = readNumber(observations, identity);
+  if (count.state !== 'reported') {
+    return { identity, title, result: 'indeterminate', detail: count.reason };
+  }
+  return {
+    identity,
+    title,
+    result: count.value > 0 ? 'satisfied' : 'indeterminate',
+    detail:
+      count.value > 0
+        ? `${String(count.value)} ${plural(count.value, 'event', 'events')} scanned.`
+        : 'No audit event was scanned, so the guard had nothing to inspect.',
+  };
+}
+
+/**
+ * Requires that EVERY expected audit event was observed (M6, F-006-RQ-002).
+ *
+ * THIS IS THE MEASUREMENT THAT TURNS A POLICY TABLE INTO A VERIFICATION. A count of
+ * observed events proves that auditing is on; it proves nothing about WHICH events
+ * arrived, so ten events that are all the wrong ten satisfied every check this panel used
+ * to make. The Go oracle does not accept that: `test/utils/audit.go` L86 and L93 poll
+ * until every expected event has been seen and otherwise fail with a missing-events report
+ * naming each absent one.
+ *
+ * `false` IS NOT UNCONDITIONALLY A VIOLATION, and the condition is the observed count:
+ *
+ *   * `false` alongside events that DID arrive means the wrong events arrived — a policy
+ *     rule did not fire while others did. That is a defect, so it is `violated`.
+ *   * `false` alongside NO events at all is the same fact the observed-count row already
+ *     reports: nothing was scanned. An empty audit log is an unverified control, not a
+ *     broken one, so it is `indeterminate`. Counting it as a violation would turn an
+ *     unexercised control into a failing one, and would report the single gap twice —
+ *     once honestly and once as a finding it is not.
+ *
+ * Silence is indeterminate either way.
+ */
+function requireExpectedEventsObserved(
+  observations: readonly ControlObservation[],
+): AuditMeasurement {
+  const identity = V6_OBSERVATIONS.expectedEventsObserved;
+  const title = 'every expected audit event was observed';
+  const found = selectObservation(observations, identity);
+  if (found.state !== 'reported') {
+    return { identity, title, result: 'indeterminate', detail: found.reason };
+  }
+  const { value } = found.value;
+  if (typeof value !== 'boolean') {
+    return {
+      identity,
+      title,
+      result: 'indeterminate',
+      detail:
+        'The completeness verdict was not reported as a boolean, so whether every ' +
+        'expected event arrived cannot be read.',
+    };
+  }
+  if (value) {
+    return {
+      identity,
+      title,
+      result: 'satisfied',
+      detail: 'Every expected audit event was observed, so each policy rule fired.',
+    };
+  }
+  const observed = readNumber(observations, V6_OBSERVATIONS.auditEventsObserved);
+  const nothingScanned = observed.state === 'reported' && observed.value === 0;
+  return nothingScanned
+    ? {
+        identity,
+        title,
+        result: 'indeterminate',
+        detail:
+          'No audit event arrived at all, so the expected set is unobserved because the ' +
+          'log was empty rather than because a rule failed to fire.',
+      }
+    : {
+        identity,
+        title,
+        result: 'violated',
+        detail:
+          'At least one expected audit event was never observed while others were, so a ' +
+          'policy rule did not fire and the levels below are unverified for it.',
+      };
+}
+
+/**
+ * Requires a coherent expected-event count, and checks it against the observed one.
+ *
+ * The count is the DENOMINATOR of the completeness verdict: without it, "every expected
+ * event was observed" is an unauditable assertion. The coherence check is the second half
+ * — the observed stream is documented as a SUPERSET of the expected set (`audit_test.go`
+ * L1038-L1039), so observing fewer events than were expected contradicts a completeness
+ * verdict of `true` and is a violation whichever of the two is wrong.
+ */
+function requireExpectedEventCount(
+  observations: readonly ControlObservation[],
+): AuditMeasurement {
+  const identity = V6_OBSERVATIONS.expectedEventCount;
+  const title = 'the expected-event count is reported and coherent';
+  const expected = readNumber(observations, identity);
+  if (expected.state !== 'reported') {
+    return { identity, title, result: 'indeterminate', detail: expected.reason };
+  }
+  if (!Number.isInteger(expected.value) || expected.value <= 0) {
+    return {
+      identity,
+      title,
+      result: 'violated',
+      detail:
+        'The expected-event count is not a positive whole number, so it cannot be the ' +
+        'size of a set of events.',
+    };
+  }
+  const observed = readNumber(observations, V6_OBSERVATIONS.auditEventsObserved);
+  if (observed.state === 'reported' && observed.value < expected.value) {
+    // THE EMPTY-LOG EXEMPTION, shared with `requireExpectedEventsObserved`. A shortfall
+    // against the expected count is a CONTRADICTION only when events actually arrived: the
+    // observed stream is a superset of the expected set, so 8 observed against 9 expected
+    // cannot both be true. Zero observed is a different fact entirely — the log was empty,
+    // which the observed-count row above already reports as indeterminate. Calling that a
+    // violation would convert "this check did not run" into "this control is broken", and
+    // would make the recorded no-events payload FAIL where it must be UNKNOWN.
+    if (observed.value === 0) {
+      return {
+        identity,
+        title,
+        result: 'indeterminate',
+        detail:
+          `${String(expected.value)} events were expected and none arrived at all, so the ` +
+          'count is unverified because the log was empty rather than because it disagrees.',
+      };
+    }
+    return {
+      identity,
+      title,
+      result: 'violated',
+      detail:
+        `${String(observed.value)} ${plural(observed.value, 'event', 'events')} were ` +
+        `observed against ${String(expected.value)} expected. The observed stream is a ` +
+        'superset of the expected set, so fewer observed than expected is a contradiction.',
+    };
+  }
+  return {
+    identity,
+    title,
+    result: 'satisfied',
+    detail: `${String(expected.value)} events were expected, and at least that many arrived.`,
+  };
+}
+
+/**
  * The measurements a V6 pass rests on, in the order a reader needs them.
  *
- * THREE are required outright — the `secrets` level, the response-body count and the
- * level ordering — and each is an exact value from AAP §0.10.2. Two more are
- * CONDITIONAL: they constrain the verdict only when the check reported them, because
- * their absence is normal rather than suspicious.
+ * TEN required measurements, every one of them an exact value from AAP §0.10.2 or the
+ * completeness contract of `test/utils/audit.go`:
  *
- *   * `audit events observed` reported as zero means nothing was scanned, so a pass
- *     is withheld. It is not a violation: an empty audit log is an unverified
- *     control, not a broken one.
- *   * the per-resource `secrets` level row, when present, must be exactly `Request`
- *     for the same reason the aggregate level must be.
+ *   * the aggregate `secrets` level, the response-body count and the level ordering;
+ *   * that at least one event was scanned, that the expected-event count is coherent, and
+ *     that EVERY expected event was observed — the three that turn a policy table into a
+ *     verification;
+ *   * the four control-defining per-resource level rows of {@link REQUIRED_LEVEL_ROWS}.
+ *
+ * NOTHING IS CONDITIONAL ANY MORE, and that is the substance of the M6 fix. Every one of
+ * the last seven used to be either absent from the verdict entirely or included only when
+ * the payload happened to report it — which made a pass available to a payload that simply
+ * reported less.
  */
 function buildAuditMeasurements(
   observations: readonly ControlObservation[],
 ): readonly AuditMeasurement[] {
-  const measurements: AuditMeasurement[] = [
+  return [
     requireLevel(
       observations,
       V6_OBSERVATIONS.secretsAuditLevel,
@@ -780,43 +1107,18 @@ function buildAuditMeasurements(
     ),
     requireResponseObjectCount(observations),
     requireLevelOrdering(observations),
-  ];
-
-  const observedCount = selectObservation(observations, V6_OBSERVATIONS.auditEventsObserved);
-  if (observedCount.state !== 'unreported') {
-    const count = readNumber(observations, V6_OBSERVATIONS.auditEventsObserved);
-    measurements.push(
-      count.state !== 'reported'
-        ? {
-            identity: V6_OBSERVATIONS.auditEventsObserved,
-            title: 'at least one audit event was scanned',
-            result: 'indeterminate',
-            detail: count.reason,
-          }
-        : {
-            identity: V6_OBSERVATIONS.auditEventsObserved,
-            title: 'at least one audit event was scanned',
-            result: count.value > 0 ? 'satisfied' : 'indeterminate',
-            detail:
-              count.value > 0
-                ? `${String(count.value)} ${plural(count.value, 'event', 'events')} scanned.`
-                : 'No audit event was scanned, so the guard had nothing to inspect.',
-          },
-    );
-  }
-
-  if (selectObservation(observations, SECRETS_LEVEL_ROW_IDENTITY).state !== 'unreported') {
-    measurements.push(
+    requireEventsObserved(observations),
+    requireExpectedEventCount(observations),
+    requireExpectedEventsObserved(observations),
+    ...REQUIRED_LEVEL_ROWS.map((row) =>
       requireLevel(
         observations,
-        SECRETS_LEVEL_ROW_IDENTITY,
-        `the policy rule for ${SECRETS_LEVEL_ROW_IDENTITY} projects at ${SECRETS_REQUIRED_LEVEL}`,
-        SECRETS_REQUIRED_LEVEL,
+        row.identity,
+        `the policy rule for ${row.identity} projects at ${row.level} \u2014 ${row.because}`,
+        row.level,
       ),
-    );
-  }
-
-  return measurements;
+    ),
+  ];
 }
 
 /**
@@ -929,20 +1231,28 @@ function describeRecordedPayloads(event: AuditEvent): string {
  *   text `undefined`.
  */
 function describeAuditEventTarget(event: AuditEvent): string {
-  const objectRef = event.objectRef;
-  if (objectRef === undefined) {
-    return `non-resource request ${event.requestURI}`;
+  // C1 — DESCRIBED FROM THE RESOLVED IDENTITY, so the target column cannot say
+  // `configmaps` about an event whose findings were raised because its identity could not
+  // be believed. Every interpolated part is bounded (M18): a target is assembled entirely
+  // from server strings, and all four of them used to be rendered verbatim.
+  const identity = resolveAuditResourceIdentity(event);
+  if (identity.kind === 'uncertain') {
+    return UNCERTAIN_TARGET_TEXT;
+  }
+  if (identity.kind === 'non-resource') {
+    return `non-resource request ${safeObservationValue(identity.requestURI)}`;
   }
   const selector =
-    objectRef.subresource === undefined || objectRef.subresource === ''
-      ? objectRef.resource
-      : `${objectRef.resource}/${objectRef.subresource}`;
+    identity.subresource === undefined || identity.subresource === ''
+      ? safeObservationValue(identity.resource)
+      : `${safeObservationValue(identity.resource)}/${safeObservationValue(identity.subresource)}`;
+  const rawGroup = event.objectRef?.apiGroup;
   const group =
-    objectRef.apiGroup === undefined || objectRef.apiGroup === '' ? 'core' : objectRef.apiGroup;
+    rawGroup === undefined || rawGroup === '' ? 'core' : safeObservationValue(rawGroup);
   const scope =
-    objectRef.namespace === undefined || objectRef.namespace === ''
+    identity.namespace === undefined || identity.namespace === ''
       ? 'cluster-scoped'
-      : `namespace ${objectRef.namespace}`;
+      : `namespace ${safeObservationValue(identity.namespace)}`;
   return `${selector} (${group}, ${scope})`;
 }
 
@@ -1039,7 +1349,7 @@ const FILTER_LABEL = 'Filter by audit level';
 /** Label of the filter option that applies no filter. */
 const ALL_LEVELS_OPTION_LABEL = 'All audit levels';
 /** Accessible name of the measured level table. */
-const LEVELS_TABLE_CAPTION = 'Measured per-resource audit levels';
+const LEVELS_TABLE_CAPTION = 'Required per-resource audit levels, and what this check observed';
 
 /**
  * How each measurement result opens its sentence.
@@ -1081,10 +1391,14 @@ interface AuditFidelityLoadingProps {
  * than by omission.
  */
 function AuditFidelityLoading({ labelId }: AuditFidelityLoadingProps): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   return (
     <p
       className="audit-fidelity-panel__state audit-fidelity-panel__state--loading"
-      role="status"
+      role={liveStatusRole}
       aria-labelledby={labelId}
     >
       <strong id={labelId}>{LOADING_LABEL}</strong>{' '}
@@ -1109,8 +1423,8 @@ interface AuditFidelityErrorProps {
  *
  * Invariant locked: a refusal is never a pass. This renders for every non-2xx
  * response — 403 and 500 in particular — and for a transport failure, and it
- * says outright that no verdict is available. `role="alert"` rather than
- * `role="status"` because a failed posture check is assertive: it must be
+ * says outright that no verdict is available. `role={liveAlertRole}` rather than
+ * `role={liveStatusRole}` because a failed posture check is assertive: it must be
  * announced without waiting for the operator to reach it.
  *
  * The status code and the server's own `reason` are rendered when present and
@@ -1119,28 +1433,83 @@ interface AuditFidelityErrorProps {
  * inventing a zero there would report a status the server never sent.
  */
 function AuditFidelityError({ error, labelId }: AuditFidelityErrorProps): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). See the note on the status role above.
+  const liveAlertRole = useLiveRegionRole('alert');
   return (
     <p
       className="audit-fidelity-panel__state audit-fidelity-panel__state--error"
-      role="alert"
+      role={liveAlertRole}
       aria-labelledby={labelId}
       data-error-kind={error.kind}
     >
       <strong id={labelId}>{ERROR_LABEL}</strong>{' '}
-      <span className="audit-fidelity-panel__error-message">{error.message}</span>
+      <span className="audit-fidelity-panel__error-message">{safeErrorMessage(error)}</span>
       {error.httpStatus === undefined ? null : (
         <span className="audit-fidelity-panel__error-status">
           {` HTTP status ${error.httpStatus}.`}
         </span>
       )}
       {error.reason === undefined ? null : (
-        <span className="audit-fidelity-panel__error-reason">{` Reason: ${error.reason}.`}</span>
+        <span className="audit-fidelity-panel__error-reason">
+          {` Reason: ${safeProse(error.reason)}.`}
+        </span>
       )}
       <span className="audit-fidelity-panel__state-detail">
         {' No verdict is available for this control, and this is not a pass.'}
       </span>
     </p>
   );
+}
+
+/**
+ * The three prose channels this panel renders, each with a local fallback (M18).
+ *
+ * EVERY ONE OF THEM IS BACKEND PROSE, and all three used to be interpolated verbatim and
+ * unbounded — the error message and reason into a live `role={liveAlertRole}` region, and the
+ * summary into a `role={liveStatusRole}` one. A control could therefore place a PEM block, a
+ * compact token, a bidirectional override or a megabyte of text into any of them.
+ *
+ * WHY EACH HAS A FALLBACK RATHER THAN RENDERING NOTHING. These three occupy positions the
+ * reader depends on: an alert with no message, a verdict with no summary and a finding with
+ * no text each read as a rendering fault rather than as withheld content. Local wording in
+ * those positions keeps the affordance meaningful and says why it is empty.
+ *
+ * The detail, timestamp, requirement identifiers and warnings have no fallback, because
+ * each of those is optional and simply does not render when it is absent.
+ */
+const WITHHELD_ERROR_MESSAGE =
+  'The check reported a failure whose message could not be displayed.';
+
+/** Fallback for a summary that sanitized away to nothing. */
+const WITHHELD_SUMMARY = 'The check reported a verdict whose summary could not be displayed.';
+
+/** Fallback for a finding whose message sanitized away to nothing. */
+const WITHHELD_FINDING_MESSAGE =
+  'The check reported a finding whose message could not be displayed.';
+
+/**
+ * Bounds a failure message, substituting local wording when nothing survives.
+ *
+ * `kind` and `httpStatus` are deliberately NOT guarded and are rendered elsewhere as they
+ * stand: the first is a typed union of this repository's own literals and the second is a
+ * number, so neither is external text and guarding either would only obscure that it is a
+ * closed set.
+ */
+function safeErrorMessage(error: ControlStatusError): string {
+  const message = safeProse(error.message);
+  return message.length > 0 ? message : WITHHELD_ERROR_MESSAGE;
+}
+
+/** Bounds a verdict summary, substituting local wording when nothing survives. */
+function safeSummary(summary: string): string {
+  const bounded = safeProse(summary);
+  return bounded.length > 0 ? bounded : WITHHELD_SUMMARY;
+}
+
+/** Bounds a finding message, substituting local wording when nothing survives. */
+function safeFindingMessage(message: string): string {
+  const bounded = safeProse(message);
+  return bounded.length > 0 ? bounded : WITHHELD_FINDING_MESSAGE;
 }
 
 /** Props of the verdict affordance. */
@@ -1185,14 +1554,19 @@ function AuditFidelityVerdict({
   labelId,
   events,
 }: AuditFidelityVerdictProps): ReactElement {
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
   const verdict: ControlVerdict =
     control === undefined ? 'unknown' : resolveAuditFidelityEffectiveVerdict(control, events);
-  const summary = control === undefined ? ABSENT_CONTROL_SUMMARY : control.summary;
+  const summary =
+    control === undefined ? ABSENT_CONTROL_SUMMARY : safeSummary(control.summary);
   const presentation = VERDICT_PRESENTATION[verdict];
   return (
     <p
       className="audit-fidelity-panel__state audit-fidelity-panel__state--verdict"
-      role="status"
+      role={liveStatusRole}
       aria-labelledby={labelId}
       data-verdict={verdict}
     >
@@ -1226,6 +1600,10 @@ interface AuditMeasurementListProps {
  * elements that contradict each other.
  */
 function AuditMeasurementList({ control, events }: AuditMeasurementListProps): ReactElement {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const headingId = useId();
   const measurements = buildAuditMeasurements(control.evidence?.observations ?? NO_OBSERVATIONS);
   const localFindings = localEventFindings(events);
@@ -1236,7 +1614,7 @@ function AuditMeasurementList({ control, events }: AuditMeasurementListProps): R
       aria-labelledby={headingId}
       data-region="measurements"
     >
-      <h3 id={headingId}>What this verdict rests on</h3>
+      <Subheading id={headingId}>What this verdict rests on</Subheading>
       {resolved === control.verdict ? null : (
         <p className="audit-fidelity-panel__disagreement" data-disagreement={resolved}>
           {`The check reported ${control.verdict} for this control; the evidence below supports ` +
@@ -1293,6 +1671,10 @@ interface AuditFidelityControlDetailProps {
  * absent field, and the text `undefined` is never rendered.
  */
 function AuditFidelityControlDetail({ control }: AuditFidelityControlDetailProps): ReactElement {
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   const baseId = useId();
   const findingsHeadingId = `${baseId}-findings-heading`;
   const warningsHeadingId = `${baseId}-warnings-heading`;
@@ -1300,31 +1682,35 @@ function AuditFidelityControlDetail({ control }: AuditFidelityControlDetailProps
   return (
     <div className="audit-fidelity-panel__reported">
       {control.detail === undefined ? null : (
-        <p className="audit-fidelity-panel__detail">{control.detail}</p>
+        <p className="audit-fidelity-panel__detail">{safeProse(control.detail)}</p>
       )}
       {reportedRequirements === undefined || reportedRequirements.length === 0 ? null : (
         <p className="audit-fidelity-panel__reported-requirements">
-          {`Requirements reported by the server: ${reportedRequirements.join(', ')}.`}
+          {`Requirements reported by the server: ${reportedRequirements
+            .map((identifier) => safeLabel(identifier))
+            .join(', ')}.`}
         </p>
       )}
       {control.observedAt === undefined ? null : (
-        <p className="audit-fidelity-panel__observed-at">{`Evaluated at ${control.observedAt}.`}</p>
+        <p className="audit-fidelity-panel__observed-at">{`Evaluated at ${safeLabel(control.observedAt)}.`}</p>
       )}
       {control.findings.length === 0 ? null : (
         <section className="audit-fidelity-panel__findings" aria-labelledby={findingsHeadingId}>
-          <h3 id={findingsHeadingId}>{FINDINGS_HEADING}</h3>
+          <Subheading id={findingsHeadingId}>{FINDINGS_HEADING}</Subheading>
           <ul>
             {control.findings.map((finding, index) => (
               <li key={`finding-${index}`}>
-                <span className="audit-fidelity-panel__finding-message">{finding.message}</span>
+                <span className="audit-fidelity-panel__finding-message">
+                  {safeFindingMessage(finding.message)}
+                </span>
                 {finding.subject === undefined ? null : (
                   <span className="audit-fidelity-panel__finding-subject">
-                    {` Object: ${finding.subject}.`}
+                    {` Object: ${safeLabel(finding.subject)}.`}
                   </span>
                 )}
                 {finding.requirementId === undefined ? null : (
                   <span className="audit-fidelity-panel__finding-requirement">
-                    {` Requirement: ${finding.requirementId}.`}
+                    {` Requirement: ${safeLabel(finding.requirementId)}.`}
                   </span>
                 )}
               </li>
@@ -1334,10 +1720,10 @@ function AuditFidelityControlDetail({ control }: AuditFidelityControlDetailProps
       )}
       {control.warnings.length === 0 ? null : (
         <section className="audit-fidelity-panel__warnings" aria-labelledby={warningsHeadingId}>
-          <h3 id={warningsHeadingId}>{WARNINGS_HEADING}</h3>
+          <Subheading id={warningsHeadingId}>{WARNINGS_HEADING}</Subheading>
           <ul>
             {control.warnings.map((warning, index) => (
-              <li key={`warning-${index}`}>{warning}</li>
+              <li key={`warning-${index}`}>{safeProse(warning)}</li>
             ))}
           </ul>
         </section>
@@ -1363,10 +1749,69 @@ function describeExpectationSelector(expectation: AuditLevelExpectation): string
     : `${expectation.resource} (${expectation.apiGroup})`;
 }
 
-/** Props of the measured level table. */
+/** Rendered in the observed column of a row this check does not report. */
+const NOT_MEASURED_HERE_TEXT = 'Not measured by this check';
+
+/** Rendered in the observed column of a reportable row the payload left out. */
+const NOT_REPORTED_TEXT = 'Reportable, but not reported';
+
+/** Prefixed to an observed level that does not equal the required one. */
+const LEVEL_MISMATCH_PREFIX = 'differs: ';
+
+/**
+ * How one row's observed level reads, and whether it agrees with the requirement.
+ *
+ * Three outcomes, kept apart because they are three different facts and only the last is a
+ * defect: this check does not report the row at all; it could report it and did not; it
+ * reported it and the value either matches or does not.
+ */
+interface ObservedLevelCell {
+  /** The text of the cell. */
+  readonly text: string;
+  /** `data-observed` attribute, so a spec can address the outcome without parsing text. */
+  readonly outcome: 'not-measured' | 'unreported' | 'match' | 'mismatch';
+}
+
+/**
+ * Resolves the observed-level cell for one expectation row (M6).
+ *
+ * The distinction this function exists to draw: a row with no `observedIdentity` is
+ * measured elsewhere — by the shell-tier generator matrix — and saying so is honest, while
+ * showing its required level in an "Observed" column would be a fabrication. A row that
+ * COULD be reported and was not reads differently again, because that is a gap in this
+ * check rather than a property of the row.
+ */
+function resolveObservedLevel(
+  expectation: AuditLevelExpectation,
+  observations: readonly ControlObservation[],
+): ObservedLevelCell {
+  const identity = expectation.observedIdentity;
+  if (identity === undefined) {
+    return { text: NOT_MEASURED_HERE_TEXT, outcome: 'not-measured' };
+  }
+  const observed = readString(observations, identity);
+  if (observed.state !== 'reported') {
+    return { text: NOT_REPORTED_TEXT, outcome: 'unreported' };
+  }
+  const value = safeObservationValue(observed.value);
+  return observed.value === expectation.level
+    ? { text: value, outcome: 'match' }
+    : { text: `${LEVEL_MISMATCH_PREFIX}${value}`, outcome: 'mismatch' };
+}
+
+/** Props of the level table. */
 interface AuditLevelTableProps {
   /** The rows to render, already filtered. Never empty; the caller guards that. */
   readonly expectations: readonly AuditLevelExpectation[];
+  /**
+   * The observations this check reported, used to fill the observed column.
+   *
+   * Empty when no control payload arrived, in which case every reportable row reads
+   * "Reportable, but not reported" — which is the correct answer while a request is in
+   * flight or after it failed, and is precisely what the previous single-column table could
+   * not express.
+   */
+  readonly observations: readonly ControlObservation[];
 }
 
 /**
@@ -1383,7 +1828,7 @@ interface AuditLevelTableProps {
  * the level as an attribute for styling and for a spec that wants to assert on a
  * row without parsing its text.
  */
-function AuditLevelTable({ expectations }: AuditLevelTableProps): ReactElement {
+function AuditLevelTable({ expectations, observations }: AuditLevelTableProps): ReactElement {
   return (
     <table className="audit-fidelity-panel__levels-table">
       <caption>{LEVELS_TABLE_CAPTION}</caption>
@@ -1393,16 +1838,26 @@ function AuditLevelTable({ expectations }: AuditLevelTableProps): ReactElement {
           <th scope="col">Scope</th>
           <th scope="col">Verbs</th>
           <th scope="col">Principals</th>
-          <th scope="col">Audit level</th>
-          <th scope="col">Measured in</th>
+          {/*
+            TWO level columns, and the split is the whole of the M6 presentation fix. The
+            first is transcribed from an oracle and is true of the repository whether or not
+            any check ran; the second is what THIS check reported. One column headed "Audit
+            level" presented the first as if it were the second.
+          */}
+          <th scope="col">Required level</th>
+          <th scope="col">Observed level</th>
+          <th scope="col">Requirement recorded in</th>
         </tr>
       </thead>
       <tbody>
-        {expectations.map((expectation) => (
+        {expectations.map((expectation) => {
+          const observed = resolveObservedLevel(expectation, observations);
+          return (
           <tr
             key={expectation.id}
             data-expectation={expectation.id}
             data-audit-level={expectation.level}
+            data-observed={observed.outcome}
           >
             <th scope="row">{describeExpectationSelector(expectation)}</th>
             <td>{expectation.scope}</td>
@@ -1421,9 +1876,11 @@ function AuditLevelTable({ expectations }: AuditLevelTableProps): ReactElement {
               )}
             </td>
             <td>{describeAuditLevel(expectation.level)}</td>
+            <td>{observed.text}</td>
             <td>{expectation.measuredIn}</td>
           </tr>
-        ))}
+          );
+        })}
       </tbody>
     </table>
   );
@@ -1478,7 +1935,7 @@ function ObservedAuditEventTable({ events }: ObservedAuditEventTableProps): Reac
               data-finding-count={findings.length}
             >
               <th scope="row">{describeAuditEventTarget(event)}</th>
-              <td>{event.verb}</td>
+              <td>{safeObservationValue(event.verb)}</td>
               <td>{describeAuditLevel(event.level)}</td>
               <td>{describeRecordedPayloads(event)}</td>
               <td>
@@ -1533,7 +1990,7 @@ interface AuditFidelityPanelViewProps {
  *   * exactly ONE of the loading region, the failure alert and the verdict
  *     region renders, because the three are keyed off the same discriminant;
  *   * the level table and the observed events each sit in their own nested
- *     `<section>` named by an `<h3>`, and each table is named by its
+ *     `<section>` named by an `<Subheading>`, and each table is named by its
  *     `<caption>`;
  *   * the refresh control is a native `<button type="button">` and the filter is
  *     a native `<select>` associated with a real `<label>`, so both are keyboard
@@ -1551,10 +2008,25 @@ function AuditFidelityPanelView({
   onRefresh,
   canRefresh = true,
 }: AuditFidelityPanelViewProps): ReactElement {
+  // EMBEDDED-AWARE OWN HEADING (m3), bound once for this component.
+  const rendersOwnHeading = useRendersOwnHeading();
+  // EMBEDDED-AWARE LIVE REGION (m4). Standalone this element announces; embedded it keeps
+  // its text and drops the role, because the dashboard's aggregate region announces the one
+  // collection transition and nine simultaneous announcements bury the summary.
+  const liveStatusRole = useLiveRegionRole('status');
+  // EMBEDDED-AWARE SUBHEADING LEVEL (m3). `h3` when this panel is the page, `h4` when the
+  // dashboard has already named the control with an `h3` above it — so the heading run stays
+  // monotonic in both documents and a subsection is never a sibling of the control it belongs to.
+  const Subheading = usePanelSubheading();
   // One base per instance, suffixed per element, so two panels on one page never
   // collide and so no identifier depends on render order.
   const baseId = useId();
   const headingId = `${baseId}-heading`;
+  // EMBEDDED-AWARE REGION NAME (m3). The region is named by whichever heading exists: this
+  // panel's own when standalone, the dashboard's control heading when embedded. Without this
+  // an embedded panel would point `aria-labelledby` at an id it no longer renders, leaving a
+  // region with no accessible name at all.
+  const panelLabelId = usePanelLabelId(headingId);
   const levelsHeadingId = `${baseId}-levels-heading`;
   const eventsHeadingId = `${baseId}-events-heading`;
   const verdictLabelId = `${baseId}-verdict-label`;
@@ -1597,10 +2069,17 @@ function AuditFidelityPanelView({
       : undefined;
 
   return (
-    <section className="audit-fidelity-panel" aria-labelledby={headingId}>
-      <h2 className="audit-fidelity-panel__heading" id={headingId}>
-        {PANEL_HEADING}
-      </h2>
+    <section className="audit-fidelity-panel" aria-labelledby={panelLabelId}>
+      {/*
+        EMBEDDED-AWARE OWN HEADING (m3). See embeddedPanel.tsx: embedded, the dashboard has
+        already named this control, so a second title would duplicate the name and restart the
+        heading run above its own level.
+      */}
+      {rendersOwnHeading ? (
+        <h2 className="audit-fidelity-panel__heading" id={headingId}>
+          {PANEL_HEADING}
+        </h2>
+      ) : null}
       <p className="audit-fidelity-panel__requirements">
         {`Requirements covered: ${COVERED_REQUIREMENT_IDS.join(', ')}.`}
       </p>
@@ -1629,7 +2108,7 @@ function AuditFidelityPanelView({
       {control === undefined ? null : <AuditFidelityControlDetail control={control} />}
 
       <section className="audit-fidelity-panel__levels-region" aria-labelledby={levelsHeadingId}>
-        <h3 id={levelsHeadingId}>{LEVELS_HEADING}</h3>
+        <Subheading id={levelsHeadingId}>{LEVELS_HEADING}</Subheading>
         <p className="audit-fidelity-panel__legend">
           {`Audit levels are strictly ordered: ${AUDIT_LEVEL_ORDER_LEGEND}. ` +
             `${SECRETS_RESOURCE} is audited at exactly ` +
@@ -1657,7 +2136,7 @@ function AuditFidelityPanelView({
         {visibleExpectations.length === 0 ? (
           <p
             className="audit-fidelity-panel__state audit-fidelity-panel__state--empty"
-            role="status"
+            role={liveStatusRole}
             aria-labelledby={levelsEmptyLabelId}
           >
             <strong id={levelsEmptyLabelId}>{LEVELS_EMPTY_LABEL}</strong>{' '}
@@ -1669,17 +2148,20 @@ function AuditFidelityPanelView({
             </span>
           </p>
         ) : (
-          <AuditLevelTable expectations={visibleExpectations} />
+          <AuditLevelTable
+            expectations={visibleExpectations}
+            observations={control?.evidence?.observations ?? NO_OBSERVATIONS}
+          />
         )}
       </section>
 
       {events === undefined ? null : (
         <section className="audit-fidelity-panel__events-region" aria-labelledby={eventsHeadingId}>
-          <h3 id={eventsHeadingId}>{EVENTS_HEADING}</h3>
+          <Subheading id={eventsHeadingId}>{EVENTS_HEADING}</Subheading>
           {events.length === 0 ? (
             <p
               className="audit-fidelity-panel__state audit-fidelity-panel__state--empty"
-              role="status"
+              role={liveStatusRole}
               aria-labelledby={eventsEmptyLabelId}
             >
               <strong id={eventsEmptyLabelId}>{EVENTS_EMPTY_LABEL}</strong>{' '}

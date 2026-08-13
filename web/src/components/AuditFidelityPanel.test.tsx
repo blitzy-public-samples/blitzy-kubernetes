@@ -51,8 +51,12 @@ import { screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { V6_OBSERVATIONS, v6ResourceLevelObservation } from '../domain/observationIds';
+import {
+  MAX_SAFE_PROSE_INPUT_LENGTH,
+  SAFE_OVERSIZED_TEXT,
+  SAFE_REDACTED,
+} from '../domain/safeText';
 import type { AuditEvent } from '../hooks/useAuditEvents';
-import { AUDIT_LEVEL_ORDER } from '../hooks/useAuditEvents';
 import type {
   ControlObservation,
   ControlStatus,
@@ -73,12 +77,19 @@ import AuditFidelityPanel, {
 /** The identity of the per-resource row whose level is the load-bearing boundary. */
 const SECRETS_ROW_ID = v6ResourceLevelObservation('', ['secrets'], 'secret-audit-request');
 
-/** The three required measurements, all satisfied. */
-const ALL_REQUIRED_PROVEN: readonly ControlObservation[] = [
-  { label: V6_OBSERVATIONS.secretsAuditLevel, value: SECRETS_AUDIT_LEVEL },
-  { label: V6_OBSERVATIONS.secretsResponseObjectCount, value: 0 },
-  { label: V6_OBSERVATIONS.levelOrdering, value: AUDIT_LEVEL_ORDER.join(' < ') },
-];
+/**
+ * EVERY required measurement, all satisfied — the baseline every withholding case varies.
+ *
+ * TAKEN FROM THE RECORDED PASSING PAYLOAD rather than written out, and that is deliberate.
+ * This list used to be three hand-written observations, which was the minimal set the panel
+ * then required. When the required set grew to ten (M6), a hand-written baseline would have
+ * stopped producing a pass — and every `withholds the pass when X is unreported` case below
+ * it would have held VACUOUSLY, over a baseline that was already `unknown`. Deriving it from
+ * the fixture means the baseline and the panel's requirements cannot drift apart silently:
+ * if the fixture stops satisfying the panel, the two-sided control immediately below fails.
+ */
+const ALL_REQUIRED_PROVEN: readonly ControlObservation[] =
+  V6_AUDIT_PASSING.evidence.observations;
 
 /** A payload claiming `pass`, carrying exactly the observations under test. */
 function claimingPass(observations: readonly ControlObservation[]): ControlStatus {
@@ -114,6 +125,30 @@ function replacing(
   }
   return ALL_REQUIRED_PROVEN.map((observation) =>
     observation.label === label ? { label, value } : observation,
+  );
+}
+
+/**
+ * {@link ALL_REQUIRED_PROVEN} with SEVERAL measurements' values replaced at once.
+ *
+ * Needed because two of the coherence rules below are relations between two observations —
+ * a completeness verdict of `false` means one thing beside a positive observed count and
+ * another beside a count of zero — and asserting on a relation requires setting both of
+ * its sides in one payload. Chaining {@link replacing} cannot do it: each call rebuilds
+ * from the baseline and discards the previous substitution.
+ */
+function replacingAll(
+  substitutions: ReadonlyMap<string, ControlObservation['value']>,
+): readonly ControlObservation[] {
+  for (const label of substitutions.keys()) {
+    if (!ALL_REQUIRED_PROVEN.some((observation) => observation.label === label)) {
+      throw new Error(`"${label}" is not a required measurement, so replacing it is a no-op.`);
+    }
+  }
+  return ALL_REQUIRED_PROVEN.map((observation) =>
+    substitutions.has(observation.label)
+      ? { label: observation.label, value: substitutions.get(observation.label) ?? null }
+      : observation,
   );
 }
 
@@ -309,8 +344,14 @@ describe('AuditFidelityPanel — a local confidentiality violation is a failure 
 
   it('leaves a response body on a NON-secrets resource alone', () => {
     const status = claimingPass(ALL_REQUIRED_PROVEN);
+    // The requestURI must be overridden ALONGSIDE objectRef. The helper's default names a
+    // secret, and leaving it in place while objectRef names a role is exactly the identity
+    // contradiction C1 now refuses to resolve — the event would be treated as sensitive and
+    // the body reported, which is correct fail-closed behaviour but not what this case is
+    // about. A coherent non-secrets event needs both halves to agree.
     const roleEvent = event({
       level: 'RequestResponse',
+      requestURI: '/apis/rbac.authorization.k8s.io/v1/namespaces/rbac-audit-response/roles',
       objectRef: { resource: 'roles', namespace: 'rbac-audit-response', name: 'audit-role' },
       responseObject: { kind: 'Role' },
     });
@@ -346,7 +387,7 @@ describe('AuditFidelityPanel — a local confidentiality violation is a failure 
 });
 
 describe('AuditFidelityPanel — a pass must be earned', () => {
-  it('grants the pass when exactly the three required measurements are proven', () => {
+  it('grants the pass when every required measurement is proven', () => {
     expect(resolveAuditFidelityEffectiveVerdict(claimingPass(ALL_REQUIRED_PROVEN))).toBe('pass');
   });
 
@@ -413,10 +454,8 @@ describe('AuditFidelityPanel — a pass must be earned', () => {
   });
 
   it('withholds the pass when the check reported that it scanned no events', () => {
-    const status = claimingPass([
-      ...ALL_REQUIRED_PROVEN,
-      { label: V6_OBSERVATIONS.auditEventsObserved, value: 0 },
-    ]);
+    // REPLACING rather than appending: the baseline already carries an observed count.
+    const status = claimingPass(replacing(V6_OBSERVATIONS.auditEventsObserved, 0));
     const { container } = renderWithProviders(<AuditFidelityPanel result={success(status)} />);
 
     expect(renderedVerdict(container)).toBe('unknown');
@@ -424,19 +463,15 @@ describe('AuditFidelityPanel — a pass must be earned', () => {
   });
 
   it('grants the pass when the check reported that it scanned events', () => {
-    const status = claimingPass([
-      ...ALL_REQUIRED_PROVEN,
-      { label: V6_OBSERVATIONS.auditEventsObserved, value: 12 },
-    ]);
+    // REPLACING rather than appending: the baseline already carries an observed count, and
+    // a second copy of an identity is a conflict rather than a stronger measurement.
+    const status = claimingPass(replacing(V6_OBSERVATIONS.auditEventsObserved, 12));
 
     expect(resolveAuditFidelityEffectiveVerdict(status)).toBe('pass');
   });
 
   it('fails when the per-resource secrets row projects above the required level', () => {
-    const status = claimingPass([
-      ...ALL_REQUIRED_PROVEN,
-      { label: SECRETS_ROW_ID, value: 'RequestResponse' },
-    ]);
+    const status = claimingPass(replacing(SECRETS_ROW_ID, 'RequestResponse'));
 
     expect(resolveAuditFidelityEffectiveVerdict(status)).toBe('fail');
   });
@@ -641,3 +676,579 @@ describe('AuditFidelityPanel — accessibility and citation discipline', () => {
     );
   });
 });
+
+describe('AuditFidelityPanel — C1: an unestablished resource identity fails closed', () => {
+  /**
+   * An object reference that references something without naming its kind.
+   *
+   * Cast, and deliberately so: `AuditObjectReference.resource` is required, so a validated
+   * payload cannot hold this shape. An UNVALIDATED one can, which is the whole of C1 — the
+   * panel used to read `objectRef?.resource` and compare it, and a comparison has two
+   * outcomes where "this is not a Secret" and "I cannot tell what this is" need three.
+   */
+  const EMPTY_REFERENCE = {} as unknown as AuditEvent['objectRef'];
+
+  /**
+   * Every shape whose resource identity CANNOT be established, and which the superseded
+   * `event.objectRef?.resource !== SECRETS_RESOURCE` test therefore waved through.
+   *
+   * Each is a real audit-report defect rather than a contrived value: a reference that
+   * names an object without naming its kind, an empty kind, a non-string kind, and an
+   * `objectRef` that is not an object at all. None of them is a Secret event as far as an
+   * equality test can see, so each one used to skip every confidentiality check.
+   */
+  const UNREADABLE_REFERENCES: readonly (readonly [string, Partial<AuditEvent>])[] = [
+    [
+      'a reference naming no resource at all',
+      // The cast IS the point. `AuditObjectReference.resource` is required, so within the
+      // type system this shape cannot exist — and it cannot, once the hook's parser has
+      // validated the payload. It arrives from the wire, which is exactly why the panel
+      // must not assume the field is there and why C1 was reachable in the first place.
+      { objectRef: { name: 'audit-secret' } as unknown as AuditEvent['objectRef'] },
+    ],
+    ['a reference whose resource is empty', { objectRef: { resource: '', name: 's' } }],
+    [
+      'a reference whose resource is not a string',
+      { objectRef: { resource: 7 } as unknown as AuditEvent['objectRef'] },
+    ],
+    [
+      'a reference that is not an object',
+      { objectRef: 'secrets' as unknown as AuditEvent['objectRef'] },
+    ],
+  ];
+
+  it('grants the pass for a COHERENT Secret event at the required level — the control', () => {
+    // Two-sided first, so none of the failures below can be the sanitizer, the fixture or
+    // the gate refusing everything. A well-formed Secret event at Request with no response
+    // body is exactly what the control requires, and it must pass.
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+
+    expect(resolveAuditFidelityEffectiveVerdict(status, [event()])).toBe('pass');
+  });
+
+  it.each(UNREADABLE_REFERENCES)('fails on %s, with no response body needed', (_name, shape) => {
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+    const unreadable = event(shape);
+
+    // FAIL rather than pass, and note what is NOT required to get there: no response body,
+    // no level deviation. An audit report that cannot say what it audited is itself the
+    // defect, because every confidentiality conclusion below it is unfounded.
+    expect(resolveAuditFidelityEffectiveVerdict(status, [unreadable])).toBe('fail');
+  });
+
+  it('names the uncertainty as its own finding rather than only its consequences', () => {
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel
+        result={success(status)}
+        events={[event({ objectRef: EMPTY_REFERENCE })]}
+      />,
+    );
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(container).toHaveTextContent('resource identity could not be established');
+    // And the reason the shared model gave, so a reader can act on it.
+    expect(container).toHaveTextContent(/objectRef/iu);
+  });
+
+  it('reports the uncertainty ALONGSIDE the body it fell back to reporting', () => {
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel
+        result={success(status)}
+        events={[event({ objectRef: EMPTY_REFERENCE, responseObject: { kind: 'Secret' } })]}
+      />,
+    );
+
+    // Findings ACCUMULATE: the identity gap and the response body are two facts, and a
+    // reader who sees only the second cannot tell it was found on a fail-closed assumption.
+    expect(container).toHaveTextContent('resource identity could not be established');
+    expect(container).toHaveTextContent('response object');
+  });
+
+  it('fails when the request path and the object reference disagree', () => {
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+    const contradictory = event({
+      requestURI: '/api/v1/namespaces/secret-audit-request/secrets',
+      objectRef: { resource: 'configmaps', namespace: 'secret-audit-request', name: 'cm' },
+    });
+
+    // Neither statement can be believed once they disagree, so the event is treated as a
+    // Secret. Reading `objectRef.resource` alone would have called this a ConfigMap event
+    // and skipped every check — while the path says a Secret was read.
+    expect(resolveAuditFidelityEffectiveVerdict(status, [contradictory])).toBe('fail');
+  });
+
+  it('reaches a Secret event whose identity is knowable only from the request path', () => {
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+    const pathOnly = event({
+      objectRef: undefined,
+      responseObject: { kind: 'Secret' },
+    });
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(status)} events={[pathOnly]} />,
+    );
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(container).toHaveTextContent('response object');
+    // Resolved, not uncertain: the path names the resource unambiguously, so this is a
+    // confirmed Secret event and must NOT be reported as an identity gap.
+    expect(container.textContent ?? '').not.toContain('resource identity could not be established');
+  });
+
+  it('says the target could not be established rather than guessing at either half', () => {
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel
+        result={success(status)}
+        events={[
+          event({
+            requestURI: '/api/v1/namespaces/secret-audit-request/secrets',
+            objectRef: { resource: 'configmaps', namespace: 'secret-audit-request' },
+          }),
+        ]}
+      />,
+    );
+
+    expect(container).toHaveTextContent('target could not be established');
+    // Rendering `configmaps` here would make the row look like a mis-filed ConfigMap event
+    // rather than an event whose identity is in dispute.
+    expect(container.textContent ?? '').not.toContain('configmaps (core, namespace');
+  });
+
+  it('leaves a non-resource request alone, body and all', () => {
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+    const healthz = event({
+      requestURI: '/healthz',
+      objectRef: undefined,
+      responseObject: { status: 'ok' },
+    });
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(status)} events={[healthz]} />,
+    );
+
+    // `/healthz` references no resource, which is a KNOWN identity rather than an unknown
+    // one. Failing closed on it would make every liveness probe a confidentiality finding.
+    expect(renderedVerdict(container)).toBe('pass');
+    expect(container).toHaveTextContent('non-resource request /healthz');
+  });
+});
+
+describe('AuditFidelityPanel — M6: every required per-resource level row must be proven', () => {
+  /**
+   * The four per-resource rows a V6 pass now rests on, with the level each must project at.
+   *
+   * These are the rows this control MEASURES, transcribed from the same oracle the panel
+   * cites. `tokenreviews` and `clusterroles` are deliberately absent: AAP §0.10.2 pins them
+   * too, but the integration check does not report them, so requiring them here would make
+   * the pass unreachable for a payload that is doing everything asked of it.
+   */
+  const REQUIRED_LEVEL_ROWS: readonly (readonly [string, string, string])[] = [
+    [
+      'secrets at Request',
+      v6ResourceLevelObservation('', ['secrets'], 'secret-audit-request'),
+      'Metadata',
+    ],
+    [
+      'serviceaccounts/token at Request',
+      v6ResourceLevelObservation('', ['serviceaccounts/token'], 'create-audit-request'),
+      'RequestResponse',
+    ],
+    [
+      'configmaps at Metadata',
+      v6ResourceLevelObservation('', ['configmaps'], 'webhook-audit-metadata'),
+      'Request',
+    ],
+    [
+      'roles and rolebindings at RequestResponse',
+      v6ResourceLevelObservation(
+        'rbac.authorization.k8s.io',
+        ['roles', 'rolebindings'],
+        'rbac-audit-response',
+      ),
+      'Metadata',
+    ],
+  ];
+
+  it.each(REQUIRED_LEVEL_ROWS)(
+    'withholds the pass when the row for %s is not reported',
+    (_name, identity) => {
+      const { container } = renderWithProviders(
+        <AuditFidelityPanel result={success(claimingPass(without(identity)))} />,
+      );
+
+      // UNKNOWN rather than PASS. Before the fix these rows were folded in only when the
+      // payload happened to report them, so a payload reporting three of the ten required
+      // measurements got the same verdict as one reporting all ten.
+      expect(renderedVerdict(container)).toBe('unknown');
+      expect(measurementResult(container, identity)).toBe('indeterminate');
+    },
+  );
+
+  it.each(REQUIRED_LEVEL_ROWS)(
+    'fails when the row for %s projects at the wrong level',
+    (_name, identity, wrongLevel) => {
+      const { container } = renderWithProviders(
+        <AuditFidelityPanel result={success(claimingPass(replacing(identity, wrongLevel)))} />,
+      );
+
+      expect(renderedVerdict(container)).toBe('fail');
+      expect(measurementResult(container, identity)).toBe('violated');
+    },
+  );
+
+  it('renders all ten required measurements whether or not the payload reports them', () => {
+    // UNCONDITIONAL is the substance of the fix: a measurement that appears only when its
+    // observation does cannot report the observation's ABSENCE, which is the one thing a
+    // reader most needs from it.
+    const proven = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass(ALL_REQUIRED_PROVEN))} />,
+    );
+    const reportingNothing = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass([]))} />,
+    );
+
+    const provenRows = proven.container.querySelectorAll('[data-measurement]').length;
+    const emptyRows = reportingNothing.container.querySelectorAll('[data-measurement]').length;
+
+    expect(provenRows).toBe(10);
+    expect(emptyRows).toBe(10);
+  });
+
+  it('withholds the pass when the completeness verdict is not reported', () => {
+    const identity = V6_OBSERVATIONS.expectedEventsObserved;
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass(without(identity)))} />,
+    );
+
+    // Without it the level table is a policy document: it says what the rules are and not
+    // that any of them fired.
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, identity)).toBe('indeterminate');
+  });
+
+  it('fails when an expected event was missed while others arrived', () => {
+    const identity = V6_OBSERVATIONS.expectedEventsObserved;
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass(replacing(identity, false)))} />,
+    );
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, identity)).toBe('violated');
+  });
+
+  it('withholds rather than fails when nothing arrived at all', () => {
+    const substitutions = new Map<string, ControlObservation['value']>([
+      [V6_OBSERVATIONS.expectedEventsObserved, false],
+      [V6_OBSERVATIONS.auditEventsObserved, 0],
+    ]);
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass(replacingAll(substitutions)))} />,
+    );
+
+    // THE EMPTY-LOG EXEMPTION, and the difference matters: an expected event that never
+    // arrived while others did is a rule that failed to fire, but an empty log is a check
+    // that did not run. Reporting the second as a violation would say the control is broken
+    // on the evidence that nothing was looked at.
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, V6_OBSERVATIONS.expectedEventsObserved)).toBe(
+      'indeterminate',
+    );
+    expect(measurementResult(container, V6_OBSERVATIONS.expectedEventCount)).toBe('indeterminate');
+  });
+
+  it('withholds the pass when the expected-event count is not reported', () => {
+    const identity = V6_OBSERVATIONS.expectedEventCount;
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass(without(identity)))} />,
+    );
+
+    expect(renderedVerdict(container)).toBe('unknown');
+    expect(measurementResult(container, identity)).toBe('indeterminate');
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['fractional', 2.5],
+  ])('fails on an expected-event count reported as %s', (_name, count) => {
+    const identity = V6_OBSERVATIONS.expectedEventCount;
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass(replacing(identity, count)))} />,
+    );
+
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, identity)).toBe('violated');
+  });
+
+  it('fails when fewer events were observed than expected while events did arrive', () => {
+    const substitutions = new Map<string, ControlObservation['value']>([
+      [V6_OBSERVATIONS.expectedEventCount, 9],
+      [V6_OBSERVATIONS.auditEventsObserved, 4],
+    ]);
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(claimingPass(replacingAll(substitutions)))} />,
+    );
+
+    // The observed stream is a SUPERSET of the expected set, so four observed against nine
+    // expected cannot both be true and the report contradicts itself.
+    expect(renderedVerdict(container)).toBe('fail');
+    expect(measurementResult(container, V6_OBSERVATIONS.expectedEventCount)).toBe('violated');
+  });
+
+  it('accepts more observed than expected — the expected set is a lower bound', () => {
+    const substitutions = new Map<string, ControlObservation['value']>([
+      [V6_OBSERVATIONS.expectedEventCount, 9],
+      [V6_OBSERVATIONS.auditEventsObserved, 40],
+    ]);
+
+    expect(
+      resolveAuditFidelityEffectiveVerdict(claimingPass(replacingAll(substitutions))),
+    ).toBe('pass');
+  });
+});
+
+describe('AuditFidelityPanel — M6: the table separates the requirement from the measurement', () => {
+  it('says in its caption that it carries both', () => {
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(V6_AUDIT_PASSING)} />,
+    );
+    const caption = container.querySelector('.audit-fidelity-panel__levels-table caption');
+
+    // One column headed "Audit level" presented a transcribed expectation as though it were
+    // a measured value, which is the presentation half of M6.
+    expect(caption?.textContent ?? '').toContain('Required');
+    expect(caption?.textContent ?? '').toContain('observed');
+  });
+
+  it('renders both a required and an observed level column', () => {
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(V6_AUDIT_PASSING)} />,
+    );
+    const headers = Array.from(
+      container.querySelectorAll('.audit-fidelity-panel__levels-table thead th'),
+    ).map((cell) => cell.textContent ?? '');
+
+    expect(headers).toContain('Required level');
+    expect(headers).toContain('Observed level');
+  });
+
+  it('marks the measured secrets row as agreeing, and shows the value it agreed with', () => {
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(V6_AUDIT_PASSING)} />,
+    );
+    const row = container.querySelector('[data-expectation="secrets-observed-write"]');
+
+    expect(row?.getAttribute('data-observed')).toBe('match');
+    expect(row?.textContent ?? '').toContain(SECRETS_AUDIT_LEVEL);
+  });
+
+  it('says a row is not measured here rather than leaving it to read as measured', () => {
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(V6_AUDIT_PASSING)} />,
+    );
+    const notMeasured = container.querySelectorAll('[data-observed="not-measured"]');
+
+    // Most rows of the table are transcribed from the unit-tier oracle and this check does
+    // not measure them. Saying so is what stops the whole table reading as evidence.
+    expect(notMeasured.length).toBeGreaterThan(0);
+    expect(notMeasured[0]?.textContent ?? '').toContain('Not measured by this check');
+  });
+
+  it('distinguishes reportable-and-absent from not-measured', () => {
+    const status = claimingPass(without(SECRETS_ROW_ID));
+    const { container } = renderWithProviders(<AuditFidelityPanel result={success(status)} />);
+    const row = container.querySelector('[data-expectation="secrets-observed-write"]');
+
+    expect(row?.getAttribute('data-observed')).toBe('unreported');
+    expect(row?.textContent ?? '').toContain('Reportable, but not reported');
+  });
+
+  it('names a divergent observed level as differing, and keeps the requirement beside it', () => {
+    const status = claimingPass(replacing(SECRETS_ROW_ID, 'RequestResponse'));
+    const { container } = renderWithProviders(<AuditFidelityPanel result={success(status)} />);
+    const row = container.querySelector('[data-expectation="secrets-observed-write"]');
+
+    expect(row?.getAttribute('data-observed')).toBe('mismatch');
+    expect(row?.textContent ?? '').toContain('differs: RequestResponse');
+    // The requirement column is UNCHANGED: the row must not rewrite itself to agree with
+    // what was measured, which is precisely how a downgrade would hide.
+    expect(row?.getAttribute('data-audit-level')).toBe(SECRETS_AUDIT_LEVEL);
+    expect(renderedVerdict(container)).toBe('fail');
+  });
+
+  it('shows one shared observation against both RBAC rows', () => {
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(V6_AUDIT_PASSING)} />,
+    );
+
+    // The policy rule names `roles` and `rolebindings` together, so the check reports the
+    // RULE rather than the resource and both rows read from the same observation.
+    for (const id of ['roles-write', 'rolebindings-write']) {
+      const row = container.querySelector(`[data-expectation="${id}"]`);
+      expect.soft(row?.getAttribute('data-observed')).toBe('match');
+      expect.soft(row?.textContent ?? '').toContain('RequestResponse');
+    }
+  });
+});
+
+describe('AuditFidelityPanel — M18: external prose is bounded and stripped of credentials', () => {
+  /** A JWT-shaped value: three dot-separated runs of at least eight word characters. */
+  const TOKEN_SHAPED = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJlLXZhbHVl';
+
+  /** A PEM block, which the shared guard treats as credential-shaped whole. */
+  const PEM_SHAPED = '-----BEGIN PRIVATE KEY----- abcd -----END PRIVATE KEY-----';
+
+  it('renders the recorded summary, detail, findings and warnings unchanged', () => {
+    // THE CONTROL for every case below: without it a guard that blanked everything would
+    // satisfy all of them, and the panel would report nothing at all rather than safely.
+    const passing = renderWithProviders(<AuditFidelityPanel result={success(V6_AUDIT_PASSING)} />);
+    expect(passing.container).toHaveTextContent(V6_AUDIT_PASSING.summary);
+    if (V6_AUDIT_PASSING.detail !== undefined) {
+      expect(passing.container).toHaveTextContent(V6_AUDIT_PASSING.detail);
+    }
+
+    const failing = renderWithProviders(<AuditFidelityPanel result={success(V6_AUDIT_FAILING)} />);
+    for (const finding of V6_AUDIT_FAILING.findings) {
+      expect.soft(failing.container).toHaveTextContent(finding.message);
+    }
+    for (const warning of V6_AUDIT_FAILING.warnings) {
+      expect.soft(failing.container).toHaveTextContent(warning);
+    }
+  });
+
+  it.each([
+    ['the summary', (text: string): ControlStatus => ({ ...V6_AUDIT_PASSING, summary: text })],
+    ['the detail', (text: string): ControlStatus => ({ ...V6_AUDIT_PASSING, detail: text })],
+    ['a warning', (text: string): ControlStatus => ({ ...V6_AUDIT_PASSING, warnings: [text] })],
+    [
+      'a finding message',
+      (text: string): ControlStatus => ({
+        ...V6_AUDIT_PASSING,
+        findings: [{ message: text, requirementId: 'F-006-RQ-002' }],
+      }),
+    ],
+    [
+      'a finding subject',
+      (text: string): ControlStatus => ({
+        ...V6_AUDIT_PASSING,
+        findings: [{ message: 'the recorded level diverged.', subject: text }],
+      }),
+    ],
+    [
+      'a finding requirement identifier',
+      (text: string): ControlStatus => ({
+        ...V6_AUDIT_PASSING,
+        findings: [{ message: 'the recorded level diverged.', requirementId: text }],
+      }),
+    ],
+    [
+      'the evaluation timestamp',
+      (text: string): ControlStatus => ({ ...V6_AUDIT_PASSING, observedAt: text }),
+    ],
+    [
+      'a reported requirement identifier',
+      (text: string): ControlStatus => ({ ...V6_AUDIT_PASSING, requirementIds: [text] }),
+    ],
+  ])('withholds a token-shaped credential in %s', (_name, build) => {
+    const { container } = renderWithProviders(<AuditFidelityPanel result={success(build(TOKEN_SHAPED))} />);
+
+    expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+  });
+
+  it('withholds a credential in the failure message and its reason', () => {
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel
+        result={{
+          status: 'error',
+          error: {
+            ...CONTROL_STATUS_ERRORS.serverError,
+            message: `the audit sink reported ${TOKEN_SHAPED}`,
+            reason: `upstream said ${PEM_SHAPED}`,
+          },
+          refresh: vi.fn(),
+        }}
+      />,
+    );
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain(TOKEN_SHAPED);
+    expect(text).not.toContain('BEGIN PRIVATE KEY');
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+    // The locally authored sentence is unconditional, so the reader is never left with a
+    // redaction marker and no statement of what it means.
+    expect(container).toHaveTextContent('this is not a pass');
+  });
+
+  it('withholds a PEM block from an observed event, and keeps the words around it', () => {
+    const status: ControlStatus = {
+      ...V6_AUDIT_PASSING,
+      detail: `the sink wrote ${PEM_SHAPED} into the log rather than the placeholder.`,
+    };
+    const { container } = renderWithProviders(<AuditFidelityPanel result={success(status)} />);
+
+    expect(container.textContent ?? '').not.toContain('BEGIN PRIVATE KEY');
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+    expect(container).toHaveTextContent('rather than the placeholder');
+  });
+
+  it('bounds an oversized summary rather than rendering any of it', () => {
+    const status: ControlStatus = {
+      ...V6_AUDIT_PASSING,
+      summary: 'x'.repeat(MAX_SAFE_PROSE_INPUT_LENGTH + 1),
+    };
+    const { container } = renderWithProviders(<AuditFidelityPanel result={success(status)} />);
+
+    expect(container).toHaveTextContent(SAFE_OVERSIZED_TEXT);
+    expect(container.textContent ?? '').not.toContain('xxxxxxxxxx');
+  });
+
+  it('collapses control characters and bidirectional overrides out of prose', () => {
+    const status: ControlStatus = {
+      ...V6_AUDIT_PASSING,
+      summary: 'Secrets sit at Request.\n\u0007\u202ENothing was downgraded.',
+    };
+    const { container } = renderWithProviders(<AuditFidelityPanel result={success(status)} />);
+    const text = container.textContent ?? '';
+
+    expect(text).not.toContain('\u0007');
+    expect(text).not.toContain('\u202E');
+    expect(container).toHaveTextContent('Secrets sit at Request. Nothing was downgraded.');
+  });
+
+  it('substitutes a local sentence for text that sanitized away to nothing', () => {
+    const status: ControlStatus = {
+      ...V6_AUDIT_PASSING,
+      summary: '\u0000\u0007',
+      findings: [{ message: '\u202E\u200B' }],
+    };
+    const { container } = renderWithProviders(<AuditFidelityPanel result={success(status)} />);
+
+    // An empty string is not an acceptable rendering of a verdict or a finding: the reader
+    // would see a heading over nothing and could not tell a blank report from a clean one.
+    expect(container).toHaveTextContent('summary could not be displayed');
+    expect(container).toHaveTextContent('finding whose message could not be displayed');
+  });
+
+  it('bounds every server-supplied part of an observed-event row', () => {
+    const status = claimingPass(ALL_REQUIRED_PROVEN);
+    const noisy = event({
+      verb: TOKEN_SHAPED,
+      objectRef: { resource: 'secrets', namespace: TOKEN_SHAPED, name: 'audit-secret' },
+      requestURI: `/api/v1/namespaces/${TOKEN_SHAPED}/secrets`,
+    });
+    const { container } = renderWithProviders(
+      <AuditFidelityPanel result={success(status)} events={[noisy]} />,
+    );
+
+    // Rendered, and only then absent: without this the negative assertion below would hold
+    // vacuously over a row the panel never drew.
+    expect(container.querySelector('.audit-fidelity-panel__events-table')).not.toBeNull();
+    expect(container).toHaveTextContent(SAFE_REDACTED);
+    // A target row is assembled ENTIRELY from server strings — resource, subresource, group
+    // and namespace — and the verb beside it likewise.
+    expect(container.textContent ?? '').not.toContain(TOKEN_SHAPED);
+  });
+});
+

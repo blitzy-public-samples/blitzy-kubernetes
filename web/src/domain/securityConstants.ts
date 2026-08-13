@@ -210,15 +210,82 @@ export const AUDIT_API_VERSION = 'audit.k8s.io/v1';
 /**
  * The audit levels as a STRICT TOTAL ORDER, weakest first.
  *
- * The order is the assertion, not a display convenience: it is what stops a future
- * edit from silently downgrading a level. Compare by index, never by string.
+ * THE ONE DEFINITION SITE for the audit-level vocabulary of this tier, and the
+ * reason it is a `const` TUPLE rather than a `readonly string[]`. Three copies of
+ * this list used to exist — here, in `hooks/useAuditEvents.ts` and in
+ * `test/fixtures/controlStatus.ts` — each with its own `AuditLevel` union beside
+ * it. Three copies of an ORDER that is itself the assertion is three chances for
+ * the parser, the panels and the recorded fixtures to disagree about what
+ * `secrets sits at exactly Request` means, and nothing would have failed to say
+ * so: each copy typechecked on its own.
+ *
+ * The order is the assertion, not a display convenience: it is what stops a
+ * future edit from silently downgrading a level (AAP §0.10.2, `None < Metadata <
+ * Request < RequestResponse`). Compare by index — see {@link compareAuditLevels}
+ * — never by string. The `satisfies` target is a fixed four-element tuple of
+ * literals, so reordering, adding, removing or renaming an entry is a
+ * `tsc --noEmit` error rather than a review finding.
+ *
+ * Recorded from `cluster/gce/gci/audit_policy_test.go` L120-125, whose aliases
+ * `none`, `metadata`, `request` and `response` name `audit.LevelNone`,
+ * `LevelMetadata`, `LevelRequest` and `LevelRequestResponse`. The WIRE spellings
+ * are used here because that is what an audit policy and an audit event carry.
  */
-export const AUDIT_LEVEL_ORDER: readonly string[] = Object.freeze([
+export const AUDIT_LEVEL_ORDER = [
   'None',
   'Metadata',
   'Request',
   'RequestResponse',
-]);
+] as const satisfies readonly ['None', 'Metadata', 'Request', 'RequestResponse'];
+
+/**
+ * The four audit levels of the `audit.k8s.io/v1` API, spelled exactly as they
+ * appear on the wire.
+ *
+ * DERIVED from {@link AUDIT_LEVEL_ORDER} rather than written out, which is what
+ * makes the union and the order one fact instead of two: a level added to the
+ * tuple is a member of this union immediately, and a level named here that is
+ * absent from the tuple cannot exist. The ordering lives in the tuple because a
+ * union is unordered.
+ */
+export type AuditLevel = (typeof AUDIT_LEVEL_ORDER)[number];
+
+/**
+ * Rank of each level, for comparison.
+ *
+ * INVARIANT LOCKED (F-006-RQ-001): `None < Metadata < Request < RequestResponse`
+ * is a STRICT TOTAL ORDER. Every level has a distinct rank, so no two levels
+ * compare equal unless they are the same level, and every pair is comparable.
+ * That is what makes a silent downgrade detectable: an edit moving `secrets` from
+ * `Request` to `Metadata` is not merely a different value, it is a strictly
+ * SMALLER one, and a spec can say so.
+ *
+ * Derived from {@link AUDIT_LEVEL_ORDER}'s index order and typed as an exhaustive
+ * `Record<AuditLevel, number>`, so a level cannot be ranked twice, cannot be
+ * left unranked, and cannot be ranked in an order that contradicts the tuple.
+ */
+export const AUDIT_LEVEL_RANK: Readonly<Record<AuditLevel, number>> = Object.freeze(
+  Object.fromEntries(AUDIT_LEVEL_ORDER.map((level, index) => [level, index])) as Record<
+    AuditLevel,
+    number
+  >,
+);
+
+/**
+ * Compares two audit levels by detail.
+ *
+ * Pure and total: every pair of levels is comparable, and the result is zero only
+ * when the levels are identical, which is precisely the strict-total-order
+ * property {@link AUDIT_LEVEL_RANK} encodes.
+ *
+ * @param left - the first level.
+ * @param right - the second level.
+ * @returns a negative number when `left` is less detailed than `right`, zero when
+ *   they are the same level, and a positive number when `left` is more detailed.
+ */
+export function compareAuditLevels(left: AuditLevel, right: AuditLevel): number {
+  return AUDIT_LEVEL_RANK[left] - AUDIT_LEVEL_RANK[right];
+}
 
 /**
  * The exact level each sensitive resource must be audited at.
@@ -227,7 +294,7 @@ export const AUDIT_LEVEL_ORDER: readonly string[] = Object.freeze([
  * trade-off: raising it would write Secret bodies into the audit log, which is the
  * very disclosure V6 exists to prevent. Lowering any of them loses the evidence.
  */
-export const REQUIRED_AUDIT_LEVELS: Readonly<Record<string, string>> = Object.freeze({
+export const REQUIRED_AUDIT_LEVELS: Readonly<Record<string, AuditLevel>> = Object.freeze({
   secrets: 'Request',
   'serviceaccounts/token': 'Request',
   configmaps: 'Metadata',
@@ -296,6 +363,30 @@ export const ETCD_ALLOW_INSECURE_ENABLED_VALUE = 'true';
  */
 export const ETCD_FAIL_CLOSED_MESSAGE = 'refusing to fall back to plaintext etcd';
 
+/**
+ * The stderr text the PARTIAL-credential branch must emit, matched as a substring.
+ *
+ * A separate phrase from {@link ETCD_FAIL_CLOSED_MESSAGE} because it is a separate
+ * branch of the shell (`configure-kubeapiserver.sh` L48-L50) with separate
+ * semantics: it never consults the opt-out at all, so a half-configured deployment
+ * aborts unconditionally. Telling the two diagnostics apart is what stops a
+ * partially-configured deployment being reported as a deliberately permitted one.
+ */
+export const ETCD_PARTIAL_CREDENTIALS_MESSAGE = 'Please provide all mTLS credential';
+
+/**
+ * The stdout text the plaintext-fallback branch must emit, matched as a substring.
+ *
+ * Quoted from the same shell function (L41-L43). Required evidence for the
+ * explicitly permitted plaintext branch: without the warning, an unauthenticated
+ * transport would be configured silently, and "the operator asked for it" would be
+ * an assumption rather than an announced decision. Only the invariant half of the
+ * sentence is quoted — the shell prefixes it with the six variable names, which are
+ * context rather than contract.
+ */
+export const ETCD_PLAINTEXT_WARNING_MESSAGE =
+  'mTLS between etcd server and kube-apiserver is not enabled';
+
 /* ------------------------------------------------------------------------ *
  * V2 - Pod Security admission
  * ------------------------------------------------------------------------ */
@@ -344,6 +435,27 @@ export const FORBIDDEN_STATUS = 403;
 
 /** The HTTP status that would mean the target did not exist — the V7 ordering hazard. */
 export const NOT_FOUND_STATUS = 404;
+
+/**
+ * The exact `--authorization-mode` the V7 oracle runs its API server with.
+ *
+ * AAP §0.4.2.2 records the flag list verbatim: `--authorization-mode Node,RBAC`. BOTH
+ * authorizers are load-bearing and the ORDER is part of the value, so this is compared as
+ * a whole string rather than by membership. `RBAC` alone leaves the Node authorizer out,
+ * and every cross-node denial the control depends on then comes from RBAC rules that a
+ * cluster is free to change — which is a different control with the same symptom.
+ */
+export const NODE_AUTHORIZATION_MODE = 'Node,RBAC';
+
+/**
+ * The admission plugin that must be enabled for V7.
+ *
+ * `--enable-admission-plugins NodeRestriction` (AAP §0.4.2.2). The Node AUTHORIZER decides
+ * which objects a kubelet may read; this PLUGIN is what stops it from mutating the ones it
+ * is allowed to read. Neither substitutes for the other, which is why the mode above and
+ * this plugin are two separate requirements rather than one posture flag.
+ */
+export const NODE_RESTRICTION_PLUGIN = 'NodeRestriction';
 
 /* ------------------------------------------------------------------------ *
  * V4 - ServiceAccount token hygiene
