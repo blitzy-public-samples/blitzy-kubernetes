@@ -171,7 +171,7 @@ def test_teardown_is_idempotent(repo_root: Path, tmp_path: Path) -> None:
     case.tear_down()
 
 
-def test_teardown_keeps_a_pre_existing_caller_directorys_other_contents(
+def test_teardown_keeps_the_other_contents_of_a_pre_existing_caller_directory(
     repo_root: Path, tmp_path: Path
 ) -> None:
     """A directory the caller already had must not be deleted wholesale.
